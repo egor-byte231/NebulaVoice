@@ -197,7 +197,7 @@ async def help_command(m:Message):
     group=m.chat.type in ('group','supergroup')
     lines=['📚 Допомога NebulaVoice','',
            '🎙 Транскрипція — надішли голосове повідомлення або відеокружечок.',
-           '💬 Текстовий ШІ — '+('згадай @Nebulavcbot або відповідай на повідомлення бота.' if group else 'просто напиши запит.'),
+           '💬 Текстовий ШІ — згадай @Nebulavcbot або відповідай на повідомлення бота (у групах і ЛС).',
            'За потреби ШІ використовує до 50 повідомлень історії. Контекст може передаватися зовнішнім API.','',
            '📋 Команди:',
            '/start — інформація про бота',
@@ -224,7 +224,7 @@ async def help_command(m:Message):
         if testing_enabled():
             lines.extend(['','🧪 Режим тестування активний:',
                           'Тест аудіо — вибери модель та надішли голосове або кружечок.',
-                          'Тест тексту — вибери модель та напиши запит.',
+                          'Тест тексту — вибери модель та надішли запит зі згадкою @Nebulavcbot або відповіддю на повідомлення бота.',
                           'Тест навантаження — текст або аудіо, від 1 до 100 завдань.',
                           'Маршрутизація: автоматично, вибрані API або всі API.',
                           'Для аудіотесту надішли один запис після запуску.',
@@ -1273,7 +1273,7 @@ async def text_message(m:Message):
             db.execute('INSERT OR IGNORE INTO text_notices VALUES (?)',(chat,))
             db.commit()
     if not group: await remember_group(chat,m.from_user.full_name+': '+raw,m.message_id,m.date.timestamp())
-    if not (mentioned or replied or not group): return
+    if not (mentioned or replied): return
     question=re.sub(r'(?<!\w)@Nebulavcbot(?!\w)','',raw,flags=re.I).strip()
     if not question: return
     if os.getenv('CLOUD_TEXT_ENABLED','auto')!='0' and await cloud_text_probe():
