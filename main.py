@@ -564,6 +564,29 @@ async def text_model_callback(c:CallbackQuery):
     await c.answer('Режим збережено')
     await c.message.edit_text(text_model_title(),reply_markup=text_model_menu())
 
+@dp.message(Command('ai_diagnose'),F.chat.type=='private',F.from_user.id==OWNER)
+async def text_diagnose(m:Message):
+    lines=[]
+    for route in TEXT_ROUTES:
+        if route[0] not in ('Routeway','Airforce'): continue
+        key,url,model=text_config(route)
+        if not key: 
+            lines.append(route[0]+': ключ відсутній')
+            continue
+        try:
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=20)) as session:
+                async with session.get(url.rsplit('/chat/completions',1)[0]+'/models',headers={'Authorization':'Bearer '+key},allow_redirects=False) as response:
+                    lines.append(f'{route[0]}: HTTP {response.status}, ID: {model}')
+                    if response.status!=200: continue
+                    data=await response.json()
+                    ids=[x.get('id','') for x in data.get('data',[]) if isinstance(x,dict)]
+                    lines.append('Поточний ID: '+('знайдено' if model in ids else 'не знайдено'))
+                    free=[x for x in ids if isinstance(x,str) and x.endswith(':free')]
+                    lines.append('Free ID: '+(', '.join(free[:25]) or 'не знайдено'))
+        except Exception as e:
+            lines.append(route[0]+': '+type(e).__name__)
+    await m.answer('\n'.join(lines)[:3900],parse_mode=None)
+
 @dp.message(Command('ai_status'),F.chat.type=='private',F.from_user.id==OWNER)
 async def text_status(m:Message):
     lines=['🤖 Закритий тест текстового ШІ',f'Локальний облік: {text_used()} / 30000 токенів (UTC)']
@@ -599,6 +622,8 @@ async def text_question(m:Message):
             try:
                 async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=45)) as session:
                     async with session.post(url,headers={'Authorization':'Bearer '+key},json={'model':model,'messages':messages,'max_tokens':500},allow_redirects=False) as response:
+                        if selected!='auto' and response.status!=200:
+                            await m.answer(f'{name}: HTTP {response.status}, модель: {model}',parse_mode=None)
                         if response.status==429:
                             try: delay=max(60,float(response.headers.get('Retry-After','60')))
                             except ValueError: delay=60
