@@ -468,6 +468,8 @@ async def run_load_test(message,config):
             await asyncio.sleep(5)
             rows=await d1_query(history_session,'SELECT * FROM load_results WHERE run=? ORDER BY idx',(run,))
             if len(rows)>=config['count']: break
+        await reconcile_load_stats()
+        await d1_snapshot(history_session)
         events=sorted([(r['started'],1) for r in rows]+[(r['ended'],-1) for r in rows],key=lambda x:(x[0],x[1]))
         peak=active=0
         for _,delta in events:
@@ -532,6 +534,7 @@ async def run_audio_load(m,config):
                             await transcribe(k,p)
                             usage(k,success=1)
                             winner=NAMES[k]
+                            overview_add(m,voices=int(bool(m.voice)),circles=int(bool(m.video_note)))
                             attempts.append(winner+': OK')
                             break
                         except RateLimited as e:
@@ -548,6 +551,7 @@ async def run_audio_load(m,config):
                     active-=1
         start=time.monotonic()
         results=await asyncio.gather(*(job(i) for i in range(config['count'])))
+    await d1_snapshot(history_session)
     ok=sum(bool(x[0]) for x in results)
     chunk=f"FadeHost: {ok}/{len(results)} успішно; пік обробників {peak}; час {time.monotonic()-start:.2f} с\n"
     for _,line in results:
@@ -910,12 +914,12 @@ def text_report():
     groups=db.execute('SELECT COUNT(*) FROM text_groups').fetchone()[0]
     group_tokens=db.execute('SELECT COALESCE(SUM(tokens),0) FROM text_group_usage WHERE day=?',(day,)).fetchone()[0]
     lines=['🤖 <b>Статистика текстового ШІ</b>',f'📅 {day} (UTC)','Автоматичний режим','', '<b>Загальна статистика</b>',panel([('Токени (оцінка)',sum(r[0] for r in rows.values())),('Спроби',sum(r[1] for r in rows.values())),('Токени чатів',group_tokens),('Активні групи',groups),('Обробка',f'{len(group_busy)} / 4'),('Групи Free/Prem','40k / 100k'),('ЛС Free/Prem','10k / 40k')])]
-    for route in TEXT_ROUTES:
-        name=route[0]
+    for name in dict.fromkeys([r[0] for r in TEXT_ROUTES]+['Requesty 2','Airforce 2']):
+        route=next((r for r in TEXT_ROUTES if r[0]==name),None)
         tokens,attempts=rows.get(name,(0,0))
         remaining=max(0,int(blocked('text:'+name)-time.time()))
-        state='⚪ Не налаштовано' if not all(text_config(route)) else '🟡 Пауза' if remaining else '🟢 Налаштовано'
-        items=[('Токени (оцінка)',tokens),('Спроби',attempts),('Доступ', 'Групи + тест' if name in ('Groq 1','Groq 1 20B','OpenRouter') else 'Приватний тест'),('Квота API','невідома')]
+        state='🟡 Пауза (локально)' if remaining else '☁️ Cloudflare / локальний облік'
+        items=[('Токени (оцінка)',tokens),('Спроби',attempts),('Доступ', 'Cloudflare: усі чати'),('Квота API','невідома')]
         if remaining: items.append(('Пауза, с',remaining))
         lines.extend(['',f'<b>{html.escape(name)}</b> · {state}',panel(items)])
     lines.extend(['','<i>Локальний облік включає резерв невдалих спроб. Реальні залишки квот API не підтверджені.</i>'])
@@ -1166,9 +1170,24 @@ async def cloud_restore_reservations():
             if inserted.rowcount:
                 db.execute('INSERT INTO text_group_usage VALUES (?,?,?) ON CONFLICT(day,chat) DO UPDATE SET tokens=tokens+excluded.tokens',(row['day'],row['chat'],row['budget']))
 
+async def reconcile_load_stats():
+    await d1_query(history_session,'CREATE TABLE IF NOT EXISTS load_results (run TEXT, idx INTEGER, started INTEGER, ended INTEGER, queued INTEGER, route TEXT, tokens INTEGER, attempts TEXT, ok INTEGER, PRIMARY KEY(run,idx))')
+    db.execute('CREATE TABLE IF NOT EXISTS load_accounted (run TEXT, idx INTEGER, PRIMARY KEY(run,idx))')
+    db.commit()
+    rows=await d1_query(history_session,'SELECT run,idx,queued,tokens,attempts FROM load_results')
+    for row in rows:
+        day=datetime.datetime.fromtimestamp(row['queued']/1000,datetime.timezone.utc).date().isoformat()
+        with db:
+            if not db.execute('INSERT OR IGNORE INTO load_accounted VALUES (?,?)',(row['run'],row['idx'])).rowcount: continue
+            db.execute('INSERT INTO overview_daily VALUES (?,?,?,?,?) ON CONFLICT(day,scope) DO UPDATE SET requests=requests+excluded.requests',(day,'private',0,0,1))
+            db.execute('INSERT INTO text_group_usage VALUES (?,?,?) ON CONFLICT(day,chat) DO UPDATE SET tokens=tokens+excluded.tokens',(day,OWNER,max(0,int(row['tokens']))))
+            for name,v in json.loads(row['attempts']).items():
+                db.execute('INSERT INTO text_usage VALUES (?,?,?,?) ON CONFLICT(day,route) DO UPDATE SET tokens=tokens+excluded.tokens,attempts=attempts+excluded.attempts',(day,name,max(0,int(v['tokens'])),int(v['attempts'])))
+
 async def cloud_reconcile():
     while True:
         try:
+            await reconcile_load_stats()
             pending=db.execute('SELECT id,chat,day,budget FROM cloud_pending').fetchall()
             for job_id,chat,day,budget in pending:
                 rows=await d1_query(history_session,'SELECT tokens,routes FROM worker_results_v2 WHERE id=?',(job_id,))
