@@ -17,6 +17,7 @@ db.execute('CREATE TABLE IF NOT EXISTS control (id INTEGER PRIMARY KEY, enabled 
 db.execute('INSERT OR IGNORE INTO control VALUES (1,1)')
 db.execute('CREATE TABLE IF NOT EXISTS usage_daily (day TEXT, provider TEXT, attempts INTEGER, seconds INTEGER, successes INTEGER, limited INTEGER, PRIMARY KEY(day,provider))')
 db.execute('CREATE TABLE IF NOT EXISTS quota_headers (provider TEXT PRIMARY KEY, info TEXT)')
+db.execute('CREATE TABLE IF NOT EXISTS ovh_requests (at REAL)')
 db.commit()
 def enabled():
     return bool(db.execute('SELECT enabled FROM control WHERE id=1').fetchone()[0])
@@ -44,11 +45,14 @@ def report():
             lines.append(f'Ліміт використано: ≈ {duration(b)} / {duration(estimated)}')
             lines.append(f'Залишилось: ≈ {duration(max(0,estimated-b))} (локальна оцінка)')
         elif k.startswith('cf'):
-            lines.append(f'Ліміт використано: {duration(b)} аудіо у спробах')
-            lines.append('Залишилось: невідомо (квота в neurons, потрібні дані API)')
+            used=min(10000,b*46.63/60)
+            left=10000-used
+            lines.append(f'Ліміт використано: ≈ {used:.1f} / 10000 neurons ({used/100:.1f}%)')
+            lines.append(f'Залишилось: ≈ {left:.1f} neurons / {duration(int(left*60/46.63))} аудіо')
         else:
-            lines.append(f'Ліміт використано: {a} спроб за добу')
-            lines.append('Залишилось: добова квота не визначена; 2 запити/хв')
+            recent=db.execute('SELECT COUNT(*) FROM ovh_requests WHERE at>?',(time.time()-60,)).fetchone()[0]
+            lines.append(f'Ліміт використано: ≈ {recent} / 2 запити за останні 60 с')
+            lines.append(f'Залишилось: ≈ {max(0,2-recent)} запити; добова квота не визначена')
         if d: lines.append(f'Відмов через ліміт: {d}')
         if remaining: lines.append(f'Повторна перевірка через: {duration(remaining)}')
         h=db.execute('SELECT info FROM quota_headers WHERE provider=?',(k,)).fetchone()
@@ -125,6 +129,9 @@ async def ovh_transcribe(s,path):
     with wave.open(str(pcm),'rb') as audio:
         if audio.getnframes()>15*16000: raise ValueError('OVH: максимум 15 секунд')
         block('ovh',31)
+        db.execute('DELETE FROM ovh_requests WHERE at<=?',(time.time()-60,))
+        db.execute('INSERT INTO ovh_requests VALUES (?)',(time.time(),))
+        db.commit()
         session=await request(s,'https://oai.endpoints.kepler.ai.cloud.ovh.net/gladia/v2/live?region=eu-west',{},json={'model':'solaria-3','encoding':'wav/pcm','sample_rate':16000,'bit_depth':16,'channels':1,'messages_config':{'receive_final_transcripts':True}})
         url=session['url']
         if not url.startswith('wss://'): raise ValueError('OVH: некоректна адреса сесії')
