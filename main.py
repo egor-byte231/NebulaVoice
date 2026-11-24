@@ -921,6 +921,14 @@ async def submit_cloud_text(m,question,group,replied,reply):
         logging.warning('Cloud submission uncertain; reservation retained for reconciliation')
         await status.edit_text('Не вдалося підтвердити прийняття запиту. Спробуй пізніше.')
 
+async def cloud_restore_reservations():
+    rows=await d1_query(history_session,'SELECT id,chat,day,budget FROM cloud_reservations WHERE day=?',(text_day(),))
+    for row in rows:
+        with db:
+            inserted=db.execute('INSERT OR IGNORE INTO cloud_pending VALUES (?,?,?,?)',(row['id'],row['chat'],row['day'],row['budget']))
+            if inserted.rowcount:
+                db.execute('INSERT INTO text_group_usage VALUES (?,?,?) ON CONFLICT(day,chat) DO UPDATE SET tokens=tokens+excluded.tokens',(row['day'],row['chat'],row['budget']))
+
 async def cloud_reconcile():
     while True:
         try:
@@ -934,6 +942,8 @@ async def cloud_reconcile():
                     for name,usage in json.loads(rows[0]['routes']).items():
                         db.execute('INSERT INTO text_usage VALUES (?,?,?,?) ON CONFLICT(day,route) DO UPDATE SET tokens=tokens+excluded.tokens,attempts=attempts+excluded.attempts',(day,name,usage['tokens'],usage['attempts']))
                     db.execute('DELETE FROM cloud_pending WHERE id=?',(job_id,))
+                await d1_snapshot(history_session)
+                await d1_query(history_session,'DELETE FROM cloud_reservations WHERE id=?',(job_id,))
         except Exception as e:
             logging.warning('Cloud reconciliation: %s',type(e).__name__)
         await asyncio.sleep(15)
@@ -1083,7 +1093,9 @@ async def main():
     tasks=[asyncio.create_task(worker()) for _ in range(4)]
     if cloud_ready: tasks.append(asyncio.create_task(d1_monitor(session)))
     tasks.append(asyncio.create_task(quota_reset_monitor()))
-    if os.getenv('CLOUD_TEXT_ENABLED')=='1': tasks.append(asyncio.create_task(cloud_reconcile()))
+    if os.getenv('CLOUD_TEXT_ENABLED')=='1':
+        await cloud_restore_reservations()
+        tasks.append(asyncio.create_task(cloud_reconcile()))
     try: await dp.start_polling(bot,handle_as_tasks=True)
     finally:
         for task in tasks: task.cancel()
