@@ -1,6 +1,11 @@
-name: Cloudflare worker validation
+name: Cloudflare worker validation and deployment
 on:
   workflow_dispatch:
+    inputs:
+      deploy:
+        description: Deploy staged worker (not FadeHost cutover)
+        type: boolean
+        default: false
   push:
     paths:
       - 'cloudflare/**'
@@ -17,5 +22,10 @@ jobs:
           node-version: '22'
       - run: node --input-type=module --check < cloudflare/worker.js
       - run: npx --yes wrangler@4 deploy --dry-run --config cloudflare/wrangler.jsonc
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      - name: Deploy staged Worker
+        if: github.event_name == 'workflow_dispatch' && inputs.deploy
+        run: npx --yes wrangler@4 deploy --config cloudflare/wrangler.jsonc --keep-vars
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
