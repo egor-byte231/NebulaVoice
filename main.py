@@ -282,7 +282,11 @@ def confidence(j):
         if isinstance(cr,(int,float)) and cr>2.4: bad=True
         ns=seg.get('no_speech_prob')
         if isinstance(ns,(int,float)) and ns>0.6 and isinstance(lp,(int,float)) and lp < -1.0: bad=True
-    suspicious=language_check(j)
+    lang=str(j.get('language') or j.get('detected_language') or '').lower().strip()
+    text=str(j.get('text') or '')
+    # Latin-script output containing transliterated East Slavic profanity
+    # is a reason to seek a second model, not to reject genuine Czech.
+    suspicious=language_check(j) or bool(re.search(r'\b(?:bláď|bljať|blyat|bljad|blatj|suka|nahuj|nachuj)\b',text,re.I) and not re.search(r'[А-Яа-яІіЇїЄєҐґ]',text))
     return (bad or suspicious, sum(scores)/len(scores) if scores else None, suspicious)
 DISCLAIMER='NebulaVoice може помилятися через сторонні шуми, нечітку вимову або низьку якість аудіо.'
 async def deliver_transcript(m,status,result):
@@ -407,7 +411,7 @@ async def process_voice(m,status):
                 await notify_error('Нормалізація аудіо',ValueError('FFmpeg'))
                 if m.video_note: raise ValueError('Не вдалося витягти аудіо')
             else: p=out
-        order=[k for k in ORDER if k!='ovh' or item.duration<=15]
+        order=[k for k in ('groq1','groq1t','cf1','ovh','groq2','groq2t','cf2') if k!='ovh' or item.duration<=15]
         # Secondary credentials must represent independently permitted quotas; only use after primary HTTP 429.
         deadline=time.time()+86400
         notified=False
