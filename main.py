@@ -1185,7 +1185,15 @@ async def group_ai_control(m:Message):
             await d1_query(history_session,'DELETE FROM chat_history WHERE chat=?',(chat,))
         await m.answer('ШІ вимкнено, історію очищено.')
     else:
-        return await m.answer(f'ШІ: {"увімкнено" if group_enabled(chat) else "вимкнено"}\nДобовий облік: {group_used(chat)} / {group_limit(chat)} токенів (UTC)\nІсторія: {len(await read_history(chat))}/50')
+        history=await read_history(chat)
+        authors={}
+        for line in history:
+            match=re.match(r'^(.+?\[ID:(\d+)\]):\s*',line)
+            name=match.group(1) if match else line.partition(':')[0]
+            key=match.group(2) if match else name
+            authors[key]=(name,authors.get(key,('',0))[1]+1)
+        report='\n'.join(f'{name}: {count}' for name,count in sorted(authors.values(),key=lambda item:-item[1]))
+        return await m.answer((f'ШІ: {"увімкнено" if group_enabled(chat) else "вимкнено"}\nДобовий облік: {group_used(chat)} / {group_limit(chat)} токенів (UTC)\nІсторія D1: {len(history)}/50\nУнікальних авторів: {len(authors)}\n'+report)[:3900],parse_mode=None)
     db.commit()
 def needs_history(question,history=(),replied=False):
     if replied: return True
