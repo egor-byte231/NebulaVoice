@@ -15,11 +15,16 @@ db=sqlite3.connect('state.db')
 db.execute('CREATE TABLE IF NOT EXISTS cooldowns (provider TEXT PRIMARY KEY, until REAL)')
 db.execute('CREATE TABLE IF NOT EXISTS control (id INTEGER PRIMARY KEY, enabled INTEGER)')
 db.execute('INSERT OR IGNORE INTO control VALUES (1,1)')
+db.execute('CREATE TABLE IF NOT EXISTS development_mode (id INTEGER PRIMARY KEY, enabled INTEGER)')
+db.execute('INSERT OR IGNORE INTO development_mode VALUES (1,1)')
 db.execute('CREATE TABLE IF NOT EXISTS usage_daily (day TEXT, provider TEXT, attempts INTEGER, seconds INTEGER, successes INTEGER, limited INTEGER, PRIMARY KEY(day,provider))')
 db.execute('CREATE TABLE IF NOT EXISTS quota_headers (provider TEXT PRIMARY KEY, info TEXT)')
 db.execute('CREATE TABLE IF NOT EXISTS ovh_requests (at REAL)')
 db.execute('CREATE TABLE IF NOT EXISTS quota_alerts (period TEXT, provider TEXT, threshold INTEGER, PRIMARY KEY(period,provider,threshold))')
 db.commit()
+def development_enabled():
+    return bool(db.execute('SELECT enabled FROM development_mode WHERE id=1').fetchone()[0])
+
 def enabled():
     return bool(db.execute('SELECT enabled FROM control WHERE id=1').fetchone()[0])
 def usage(k,seconds=0,attempt=0,success=0,limited=0):
@@ -299,7 +304,7 @@ async def deliver_transcript(m,status,result):
     chunks=[result[i:i+3700] for i in range(0,len(result),3700)]
     for i,chunk in enumerate(chunks):
         body='<blockquote expandable>'+html.escape(chunk)+'</blockquote>'
-        if i==len(chunks)-1: body+='\n\n<i>'+DISCLAIMER+'</i>'
+        if i==len(chunks)-1 and development_enabled(): body+='\n\n<i>'+DISCLAIMER+'</i>'
         if i==0: await status.edit_text(body,parse_mode='HTML')
         else: await m.reply(body,parse_mode='HTML')
 async def transcribe(k,path):
@@ -340,7 +345,7 @@ active_providers=set()
 active_jobs={}
 DISABLED='⚠️ Транскрипцію тимчасово вимкнено.'
 def owner_menu():
-    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='⏸ Вимкнути' if enabled() else '▶️ Увімкнути',callback_data='owner:toggle')],[InlineKeyboardButton(text='📊 Статистика',callback_data='owner:stats')],[InlineKeyboardButton(text='🤖 Статистика ШІ',callback_data='owner:ai')]])
+    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='⏸ Вимкнути' if enabled() else '▶️ Увімкнути',callback_data='owner:toggle')],[InlineKeyboardButton(text='📊 Статистика',callback_data='owner:stats')],[InlineKeyboardButton(text='🤖 Статистика ШІ',callback_data='owner:ai')],[InlineKeyboardButton(text='🟢 Режим розробки: ON' if development_enabled() else '🔴 Режим розробки: OFF',callback_data='owner:development')]])
 error_alert_times={}
 async def notify_error(where,error):
     raw=str(error)
@@ -400,6 +405,10 @@ async def owner_action(c:CallbackQuery):
         return
     if c.data=='owner:back':
         return await c.message.edit_text('Панель власника',reply_markup=owner_menu())
+    if c.data=='owner:development':
+        db.execute('UPDATE development_mode SET enabled=1-enabled WHERE id=1')
+        db.commit()
+        return await c.message.edit_reply_markup(reply_markup=owner_menu())
     if c.data!='owner:toggle': return
     if enabled(): await disable('Вимкнено власником')
     else:
@@ -738,11 +747,11 @@ async def generate_text(m,question,context='',group=False,history_context=''):
             answer='Недостатньо інформації в історії розмови.'
         if group:
             if not group_enabled(chat): return
-            await m.reply(answer[:3700]+'\n\n'+DISCLAIMER,parse_mode=None)
+            await m.reply(answer[:3700]+('\n\n'+DISCLAIMER if development_enabled() else ''),parse_mode=None)
             remember_group(chat,'ШІ: '+answer[:1000])
         else:
             remember_group(chat,'ШІ: '+answer[:1000])
-            await m.reply(answer[:3700]+'\n\n'+DISCLAIMER,parse_mode=None)
+            await m.reply(answer[:3700]+('\n\n'+DISCLAIMER if development_enabled() else ''),parse_mode=None)
         return
     await m.reply('Текстовий ШІ тимчасово недоступний.')
 @dp.message(Command('premium'),F.chat.type.in_({'group','supergroup','private'}))
