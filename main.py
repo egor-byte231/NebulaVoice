@@ -496,12 +496,12 @@ async def run_load_test(message,config):
             active+=delta
             peak=max(peak,active)
         ok=sum(r['ok'] for r in rows)
-        lines=[f"Тест: {len(rows)}/{config['count']} завершено",f"Успішно: {ok}; помилки: {len(rows)-ok}; без результату: {config['count']-len(rows)}",f"Пік обробників: {peak}",f"Токени (оцінка, якщо API не повернув usage): {sum(r['tokens'] for r in rows)}"]
+        lines=[f"Тест: {len(rows)}/{config['count']} завершено",f"Успішно: {ok}; помилки: {len(rows)-ok}; без результату: {config['count']-len(rows)}",f"Пік обробників: {peak}",f"Токени (фактичні + оцінені): {sum(r['tokens'] for r in rows)}",f"Спроби з невідомими витратами: {sum(v.get('unknown',0) for r in rows for v in json.loads(r['attempts']).values())}"]
         if rows:
             lines.append(f"Макс. очікування: {max(r['started']-r['queued'] for r in rows)/1000:.2f} с")
         for r in rows:
             attempts=json.loads(r['attempts'])
-            detail=', '.join(f"{name}: {v.get('status',v.get('error','?'))} ({v['attempts']} спр.)" for name,v in attempts.items())
+            detail=', '.join(f"{name}: {v.get('error',v.get('status','?'))} ({v['attempts']} спр.)" for name,v in attempts.items())
             lines.append(f"#{r['idx']+1} {r['route'] or 'Помилка'} | черга {(r['started']-r['queued'])/1000:.2f} с | обробка {(r['ended']-r['started'])/1000:.2f} с | {r['tokens']} ток. | {detail}")
         chunk=''
         for line in lines:
