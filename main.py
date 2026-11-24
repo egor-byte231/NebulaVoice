@@ -161,7 +161,7 @@ async def request(s,url,headers,**kw):
                     message+='\nGoogle не повернув доступний JSON-опис помилки'
             raise ValueError(message)
         return await r.json(content_type=None)
-ASR_PROMPT = "Дослівна розмовна транскрипція: українська, русский язык, суржик, сленг, матюки. Без перекладу, цензури, виправлення граматики чи вигаданих слів. Зберігати перемикання мов."
+ASR_PROMPT = "Дослівний запис розмови українською, російською або змішаною мовою. Зберігай оригінальні слова, сленг і перемикання мов без перекладу та цензури."
 GEMINI_PROMPT = "Transcribe verbatim in the original spoken languages. Preserve Ukrainian, Russian, Surzhyk, code-switching, slang, profanity and grammatical mistakes. Do not translate, censor, normalize or invent words. Return only the transcript."
 async def ovh_transcribe(s,path):
     pcm=path.with_name('ovh.wav')
@@ -200,6 +200,31 @@ async def ovh_transcribe(s,path):
                 for task in tasks: task.cancel()
                 await asyncio.gather(*tasks,return_exceptions=True)
         return {'text':' '.join(finals)}
+def confidence(j):
+    # Whisper segment log probabilities are heuristics, not calibrated word confidence.
+    segments=j.get('segments') or []
+    scores=[]
+    bad=False
+    for seg in segments:
+        if not isinstance(seg,dict): continue
+        lp=seg.get('avg_logprob')
+        if isinstance(lp,(int,float)):
+            scores.append(lp)
+            if lp < -1.0: bad=True
+        cr=seg.get('compression_ratio')
+        if isinstance(cr,(int,float)) and cr>2.4: bad=True
+        ns=seg.get('no_speech_prob')
+        if isinstance(ns,(int,float)) and ns>0.6 and isinstance(lp,(int,float)) and lp < -1.0: bad=True
+    return (bad, sum(scores)/len(scores) if scores else None)
+DISCLAIMER='NebulaVoice може помилятися через сторонні шуми, нечітку вимову або низьку якість аудіо.'
+async def deliver_transcript(m,status,result):
+    if not enabled(): return await mark_disabled(status)
+    chunks=[result[i:i+3700] for i in range(0,len(result),3700)]
+    for i,chunk in enumerate(chunks):
+        body='<blockquote expandable>'+html.escape(chunk)+'</blockquote>'
+        if i==len(chunks)-1: body+='\n\n<i>'+DISCLAIMER+'</i>'
+        if i==0: await status.edit_text(body,parse_mode='HTML')
+        else: await m.reply(body,parse_mode='HTML')
 async def transcribe(k,path):
     provider,n,model=MODELS[k]
     data=path.read_bytes()
@@ -207,7 +232,7 @@ async def transcribe(k,path):
         if provider=='ovh':
             j=await ovh_transcribe(s,path)
         elif provider=='groq':
-            f=aiohttp.FormData(); f.add_field('file',data,filename=path.name,content_type='audio/ogg' if path.suffix=='.ogg' else 'audio/wav'); f.add_field('model',model); f.add_field('temperature','0'); f.add_field('prompt',ASR_PROMPT)
+            f=aiohttp.FormData(); f.add_field('file',data,filename=path.name,content_type='audio/ogg' if path.suffix=='.ogg' else 'audio/wav'); f.add_field('model',model); f.add_field('temperature','0'); f.add_field('prompt',ASR_PROMPT); f.add_field('response_format','verbose_json')
             j=await request(s,'https://api.groq.com/openai/v1/audio/transcriptions',{'Authorization':'Bearer '+need(f'GROQ_API_KEY_{n}')},data=f)
         elif provider=='cf':
             j=await request(s,'https://api.cloudflare.com/client/v4/accounts/'+need(f'CF_ACCOUNT_ID_{n}')+'/ai/run/'+model,{'Authorization':'Bearer '+need(f'CF_API_TOKEN_{n}')},json={'audio':base64.b64encode(data).decode(),'task':'transcribe','initial_prompt':ASR_PROMPT,'condition_on_previous_text':False,'vad_filter':True}); j=j.get('result') or {}
@@ -215,7 +240,7 @@ async def transcribe(k,path):
             j=await request(s,'https://generativelanguage.googleapis.com/v1beta/models/'+model+':generateContent',{'x-goog-api-key':need('GEMINI_API_KEY')},json={'generationConfig':{'temperature':0},'contents':[{'parts':[{'text':GEMINI_PROMPT},{'inline_data':{'mime_type':'audio/ogg' if path.suffix=='.ogg' else 'audio/wav','data':base64.b64encode(data).decode()}}]}]}); j={'text':''.join(p.get('text','') for p in j['candidates'][0]['content']['parts'])}
         text=j.get('text') if isinstance(j,dict) else None
         if not isinstance(text,str) or not text.strip(): raise ValueError('API не повернув текст')
-        return text.strip()
+        return text.strip(), confidence(j)
 @dp.message(F.voice | F.video_note)
 async def voice(m:Message):
     if m.from_user and m.from_user.is_bot: return
@@ -275,18 +300,23 @@ async def process_voice(m,status):
     with tempfile.TemporaryDirectory() as d:
         p=Path(d)/('voice.ogg' if m.voice else 'circle.mp4')
         await bot.download(item,destination=p)
-        if m.video_note:
-            out=Path(d)/'audio.wav'
-            proc=await asyncio.create_subprocess_exec('ffmpeg','-nostdin','-loglevel','error','-i',str(p),'-vn','-ac','1','-ar','16000',str(out),stderr=asyncio.subprocess.DEVNULL)
-            if await proc.wait()!=0: raise ValueError('Не вдалося витягти аудіо')
-            p=out
+        if m.voice or m.video_note:
+            out=Path(d)/'normalized.ogg'
+            proc=await asyncio.create_subprocess_exec('ffmpeg','-nostdin','-loglevel','error','-i',str(p),'-vn','-ac','1','-ar','16000','-af','dynaudnorm=f=250:g=15','-c:a','libopus','-b:a','32k',str(out),stderr=asyncio.subprocess.DEVNULL)
+            if await proc.wait()!=0:
+                await notify_error('Нормалізація аудіо',ValueError('FFmpeg'))
+                if m.video_note: raise ValueError('Не вдалося витягти аудіо')
+            else: p=out
         order=[k for k in ORDER if k!='ovh' or item.duration<=15]
         # Secondary credentials must represent independently permitted quotas; only use after primary HTTP 429.
         deadline=time.time()+86400
         notified=False
+        candidate=None
+        tried_models=set()
         while time.time()<deadline and enabled():
             for k in order:
                 if blocked(k)>time.time() or k in active_providers: continue
+                if candidate and MODELS[k][2] in tried_models: continue
                 if MODELS[k][1]==2:
                     primary={'groq2':'groq1','groq2t':'groq1t','cf2':'cf1'}[k]
                     if blocked('quota:'+primary)<=time.time(): continue
@@ -295,7 +325,7 @@ async def process_voice(m,status):
                 usage(k,seconds=item.duration,attempt=1)
                 try:
                     if k!='ovh': await quota_alert(k)
-                    result=await transcribe(k,p)
+                    result,quality=await transcribe(k,p)
                 except RateLimited as e:
                     block(k,e.seconds)
                     block('quota:'+k,e.seconds)
@@ -313,9 +343,18 @@ async def process_voice(m,status):
                     active_providers.discard(k)
                 usage(k,success=1)
                 if not enabled(): return await mark_disabled(status)
-                await status.edit_text('<blockquote expandable>'+html.escape(result[:3900])+'</blockquote>',parse_mode='HTML')
-                for i in range(3900,len(result),3900): await m.reply('<blockquote expandable>'+html.escape(result[i:i+3900])+'</blockquote>',parse_mode='HTML')
-                return
+                tried_models.add(MODELS[k][2])
+                if candidate:
+                    old_text,old_quality=candidate
+                    if quality[1] is None or (quality[0] and old_quality[1] is not None and quality[1]<=old_quality[1]):
+                        result=old_text
+                    return await deliver_transcript(m,status,result)
+                if quality[0]:
+                    candidate=(result,quality)
+                    continue
+                return await deliver_transcript(m,status,result)
+            if candidate:
+                return await deliver_transcript(m,status,candidate[0])
             if not active_providers and all(blocked('quota:'+k)>time.time() for k in ORDER):
                 await disable('Усі сім API-профілів одночасно повернули HTTP 429; це може бути тимчасовий ліміт, не обов’язково добовий.')
                 return await mark_disabled(status)
