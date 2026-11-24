@@ -21,9 +21,24 @@
         "queue": "nebulavoice-queue",
         "max_batch_size": 1,
         "max_concurrency": 20,
-        "max_retries": 2,
-        "max_batch_timeout": 0
+        "max_retries": 2
       }
     ]
-  }
+  },
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "DISPATCHER",
+        "class_name": "Dispatcher"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": [
+        "Dispatcher"
+      ]
+    }
+  ]
 }
