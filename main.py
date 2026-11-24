@@ -1,4 +1,4 @@
-import os, asyncio, time, tempfile, logging, base64, json, sqlite3
+import re, os, asyncio, time, tempfile, logging, base64, json, sqlite3
 from pathlib import Path
 import aiohttp
 from aiogram import Bot, Dispatcher, F
@@ -31,7 +31,25 @@ def need(k):
     return v
 async def request(s,url,headers,**kw):
     async with s.post(url,headers=headers,**kw) as r:
-        if r.status>=400: raise ValueError(f'API HTTP {r.status}'+(' — ліміт або обмеження' if r.status==429 else ''))
+        if r.status>=400:
+            message=f'API HTTP {r.status}'+(' — ліміт або обмеження' if r.status==429 else '')
+            if url.startswith('https://generativelanguage.googleapis.com/'):
+                try:
+                    payload=await r.json(content_type=None)
+                    err=payload.get('error',{})
+                    parts=[str(err.get('status','')),str(err.get('message',''))]
+                    for detail in err.get('details',[]):
+                        if isinstance(detail,dict):
+                            parts.extend(str(detail.get(key,'')) for key in ('reason','domain'))
+                    diagnostic=' | '.join(p for p in parts if p)
+                    for key,value in os.environ.items():
+                        if value and ('TOKEN' in key or 'KEY' in key or 'SECRET' in key):
+                            diagnostic=diagnostic.replace(value,'[REDACTED]')
+                    diagnostic=re.sub(r'(?i)(?:AIza|gsk_|cfut_|AQ\\.)[A-Za-z0-9_.-]+','[REDACTED]',diagnostic)
+                    message+='\\n'+(diagnostic[:1800] or 'Google не повернув опис помилки')
+                except Exception:
+                    message+='\\nGoogle не повернув доступний JSON-опис помилки'
+            raise ValueError(message)
         return await r.json(content_type=None)
 async def transcribe(k,path):
     provider,n,model=MODELS[k]
