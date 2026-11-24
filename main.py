@@ -39,6 +39,16 @@ def report():
         primary={'groq2':'groq1','groq2t':'groq1t','cf2':'cf1'}.get(k)
         state='🔴 Ліміт досягнуто' if remaining else '🟡 Обробляє аудіо' if k in active_providers else '⚪ Резерв' if primary and blocked('quota:'+primary)<=time.time() else '🟡 Тимчасова пауза' if blocked(k)>time.time() else '🟢 Готовий'
         lines.extend(['',f'<b>{html.escape(NAMES[k])}</b>',state,f'Транскрипцій: {c} | Аудіо у спробах: {duration(b)}'])
+        if k.startswith('groq'):
+            estimated=28800
+            lines.append(f'Ліміт використано: ≈ {duration(b)} / {duration(estimated)}')
+            lines.append(f'Залишилось: ≈ {duration(max(0,estimated-b))} (локальна оцінка)')
+        elif k.startswith('cf'):
+            lines.append(f'Ліміт використано: {duration(b)} аудіо у спробах')
+            lines.append('Залишилось: невідомо (квота в neurons, потрібні дані API)')
+        else:
+            lines.append(f'Ліміт використано: {a} спроб за добу')
+            lines.append('Залишилось: добова квота не визначена; 2 запити/хв')
         if d: lines.append(f'Відмов через ліміт: {d}')
         if remaining: lines.append(f'Повторна перевірка через: {duration(remaining)}')
         h=db.execute('SELECT info FROM quota_headers WHERE provider=?',(k,)).fetchone()
