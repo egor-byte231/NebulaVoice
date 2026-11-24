@@ -505,7 +505,7 @@ async def run_load_test(message,config):
             lines.append(f"Макс. очікування: {max(r['started']-r['queued'] for r in rows)/1000:.2f} с")
         for r in rows:
             attempts=json.loads(r['attempts'])
-            detail=', '.join(f"{name}: {v.get('error',v.get('status','?'))} ({v['attempts']} спр.)" for name,v in attempts.items())
+            detail=', '.join(f"{name}: {v.get('error',v.get('status','?'))} {v.get('origin','')} {v.get('error_detail','')} ({v['attempts']} спр.)" for name,v in attempts.items())
             lines.append(f"#{r['idx']+1} {r['route'] or 'Помилка'} | черга {(r['started']-r['queued'])/1000:.2f} с | обробка {(r['ended']-r['started'])/1000:.2f} с | {r['tokens']} ток. | {detail}")
         chunk=''
         for line in lines:
