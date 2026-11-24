@@ -267,6 +267,11 @@ def language_check(j):
     if lang in {'cs','pl','en','de','fr','sk','es','it','pt','nl','ro','hu'}:
         return cyr>=8 and cyr/total>=0.20
     return mixed
+def unsupported_language(j):
+    lang=str(j.get('language') or j.get('detected_language') or '').lower().strip()
+    lang=lang.replace('_','-').split('-')[0]
+    return bool(lang and lang not in {'uk','ru','pl','en','ukrainian','russian','polish','english','surzhyk','mixed','unknown','und','auto'})
+
 def confidence(j):
     # Whisper segment log probabilities are heuristics, not calibrated word confidence.
     segments=j.get('segments') or []
@@ -313,6 +318,10 @@ async def transcribe(k,path):
         text=j.get('text') if isinstance(j,dict) else None
         if not isinstance(text,str) or not text.strip(): raise RejectedTranscript('Порожня транскрипція')
         if prompt_echo(text): raise RejectedTranscript('Повторення старого промпту')
+        if re.search(r'\b(?:bláď|bljať|blyat|bljad|blatj)\b',text,re.I) and not re.search(r'[А-Яа-яІіЇїЄєҐґ]',text):
+            raise RejectedTranscript('Підозріла транслітерація мовлення')
+        if unsupported_language(j):
+            raise RejectedTranscript('Мова поза списком підтримуваних')
         return text.strip(), confidence(j)
 @dp.message(F.voice | F.video_note)
 async def voice(m:Message):
