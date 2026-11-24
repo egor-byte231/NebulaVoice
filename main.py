@@ -10,27 +10,32 @@ logging.basicConfig(level=logging.INFO)
 MODELS={'groq1':('groq',1,'whisper-large-v3'),'groq1t':('groq',1,'whisper-large-v3-turbo'),'groq2':('groq',2,'whisper-large-v3'),'groq2t':('groq',2,'whisper-large-v3-turbo'),'cf1':('cf',1,'@cf/openai/whisper-large-v3-turbo'),'cf2':('cf',2,'@cf/openai/whisper-large-v3-turbo'),'ovh':('ovh',1,'solaria-3')}
 NAMES={k:f"{ {'groq':'Groq','cf':'Cloudflare','gemini':'Gemini','ovh':'OVHcloud Gladia'}[p]} #{n} • {model.split('/')[-1]}" for k,(p,n,model) in MODELS.items()}
 OWNER=int(os.environ['OWNER_ID']); bot=Bot(os.environ['BOT_TOKEN']); dp=Dispatcher(); lock=asyncio.Lock()
-db=sqlite3.connect('state.db'); db.execute('CREATE TABLE IF NOT EXISTS settings (chat INTEGER PRIMARY KEY, provider TEXT)'); db.commit()
-def get(chat):
-    row=db.execute('SELECT provider FROM settings WHERE chat=?',(chat,)).fetchone(); return row[0] if row else None
-def menu(chat):
-    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=('✓ ' if get(chat)==k else '')+v,callback_data='pick:'+k)] for k,v in NAMES.items()]+[[InlineKeyboardButton(text='⏸ Вимкнути',callback_data='pick:off')]])
-@dp.message(Command('start','test'))
+ORDER=['ovh','groq1','groq1t','cf1','groq2','groq2t','cf2']
+db=sqlite3.connect('state.db')
+db.execute('CREATE TABLE IF NOT EXISTS cooldowns (provider TEXT PRIMARY KEY, until REAL)')
+db.commit()
+def blocked(k):
+    row=db.execute('SELECT until FROM cooldowns WHERE provider=?',(k,)).fetchone()
+    return row[0] if row else 0
+def block(k,seconds):
+    db.execute('INSERT OR REPLACE INTO cooldowns VALUES (?,?)',(k,time.time()+seconds))
+    db.commit()
+class RateLimited(Exception):
+    def __init__(self,seconds):
+        self.seconds=seconds
+@dp.message(Command('start'))
 async def start(m:Message):
-    if m.from_user and m.from_user.id==OWNER: await m.answer('NebulaVoice • Тестування\nВибери один API. Автоматичного перемикання немає.',reply_markup=menu(m.chat.id))
-@dp.callback_query(F.data.startswith('pick:'))
-async def pick(c:CallbackQuery):
-    if c.from_user.id!=OWNER: return await c.answer('Тільки власник',show_alert=True)
-    k=c.data.split(':')[1]
-    if k not in NAMES and k!='off': return await c.answer('Невідомий API')
-    db.execute('INSERT OR REPLACE INTO settings VALUES (?,?)',(c.message.chat.id,k)); db.commit()
-    await c.message.edit_reply_markup(reply_markup=menu(c.message.chat.id)); await c.answer(NAMES.get(k,'Вимкнено'))
+    await m.answer('NebulaVoice • Автоматична транскрипція голосових та кружечків.')
 def need(k):
     v=os.getenv(k)
     if not v: raise ValueError('Не налаштовано '+k)
     return v
 async def request(s,url,headers,**kw):
     async with s.post(url,headers=headers,**kw) as r:
+        if r.status==429:
+            try: delay=max(60,float(r.headers.get('Retry-After','60')))
+            except ValueError: delay=60
+            raise RateLimited(delay)
         if r.status>=400:
             message=f'API HTTP {r.status}'+(' — ліміт або обмеження' if r.status==429 else '')
             if url.startswith('https://generativelanguage.googleapis.com/'):
@@ -59,6 +64,7 @@ async def ovh_transcribe(s,path):
     if await proc.wait()!=0: raise ValueError('Не вдалося конвертувати аудіо для OVH')
     with wave.open(str(pcm),'rb') as audio:
         if audio.getnframes()>15*16000: raise ValueError('OVH: максимум 15 секунд')
+        block('ovh',31)
         session=await request(s,'https://oai.endpoints.kepler.ai.cloud.ovh.net/gladia/v2/live?region=eu-west',{},json={'model':'solaria-3','encoding':'wav/pcm','sample_rate':16000,'bit_depth':16,'channels':1,'messages_config':{'receive_final_transcripts':True}})
         url=session['url']
         if not url.startswith('wss://'): raise ValueError('OVH: некоректна адреса сесії')
@@ -101,54 +107,72 @@ async def transcribe(k,path):
         text=j.get('text') if isinstance(j,dict) else None
         if not isinstance(text,str) or not text.strip(): raise ValueError('API не повернув текст')
         return text.strip()
-@dp.message(Command('transcribe'))
-async def manual(m:Message):
-    if not m.from_user or m.from_user.id!=OWNER: return
-    target=m.reply_to_message
-    if not target or not (target.voice or target.video_note):
-        return await m.reply('Відповідай командою /transcribe на голосове або кружечок.')
-    if get(m.chat.id) not in NAMES:
-        return await m.reply('Спочатку вибери модель через /test.')
-    await target.reply('Готовий до транскрипції.',reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='🎙 Транскрибувати',callback_data='transcribe')]]))
-
-@dp.callback_query(F.data=='transcribe')
-async def manual_click(c:CallbackQuery):
-    if c.from_user.id!=OWNER: return await c.answer('Тільки власник',show_alert=True)
-    if not isinstance(c.message,Message): return await c.answer('Повідомлення недоступне',show_alert=True)
-    target=c.message.reply_to_message
-    if not target or not (target.voice or target.video_note): return await c.answer('Оригінал недоступний',show_alert=True)
-    if lock.locked(): return await c.answer('Попередній тест ще триває',show_alert=True)
-    if get(c.message.chat.id) not in NAMES: return await c.answer('Вибери модель через /test',show_alert=True)
-    await c.answer()
-    await process_voice(target,c.message)
-
 @dp.message(F.voice | F.video_note)
 async def voice(m:Message):
-    if not m.from_user or m.from_user.id!=OWNER: return
-    if get(m.chat.id) not in NAMES: return
-    await m.reply('Готовий до транскрипції.',reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='🎙 Транскрибувати',callback_data='transcribe')]]))
-
-async def process_voice(m:Message,status:Message):
-    k=get(m.chat.id)
-    if k not in NAMES: return
+    # Only the owner can enable automatic processing in a group by adding the bot.
+    if m.chat.type=='private' and (not m.from_user or m.from_user.id!=OWNER): return
+    if m.from_user and m.from_user.is_bot: return
     item=m.voice or m.video_note
-    if k=='ovh' and item.duration>15: return await status.edit_text('OVHcloud: максимум 15 секунд. Вибери іншу модель.',reply_markup=None)
-    if (item.file_size or 0)>10*1024*1024: return await m.reply('Файл завеликий для тестової версії (10 МБ).')
-    if lock.locked(): return await m.reply('Попередній тест ще триває. Повтори пізніше.')
-    async with lock:
-        await status.edit_text('⏳ Транскрибую...',reply_markup=None); t=time.monotonic()
+    if (item.file_size or 0)>10*1024*1024: return await m.reply('Файл завеликий (10 МБ).')
+    if waiting.qsize()>=50: return await m.reply('Черга заповнена. Повтори пізніше.')
+    status=await m.reply('⏳ У черзі...')
+    try: waiting.put_nowait((m,status))
+    except asyncio.QueueFull: await status.edit_text('Черга заповнена. Повтори пізніше.')
+
+waiting=asyncio.Queue(maxsize=50)
+async def process_voice(m,status):
+    item=m.voice or m.video_note
+    await status.edit_text('⏳ Транскрибую...')
+    with tempfile.TemporaryDirectory() as d:
+        p=Path(d)/('voice.ogg' if m.voice else 'circle.mp4')
+        await bot.download(item,destination=p)
+        if m.video_note:
+            out=Path(d)/'audio.wav'
+            proc=await asyncio.create_subprocess_exec('ffmpeg','-nostdin','-loglevel','error','-i',str(p),'-vn','-ac','1','-ar','16000',str(out),stderr=asyncio.subprocess.DEVNULL)
+            if await proc.wait()!=0: raise ValueError('Не вдалося витягти аудіо')
+            p=out
+        order=[k for k in ORDER if k!='ovh' or item.duration<=15]
+        # Secondary credentials must represent independently permitted quotas.
+        if os.getenv('ALLOW_SECONDARY_QUOTAS')!='true':
+            order=[k for k in order if MODELS[k][1]==1]
+        deadline=time.time()+86400
+        notified=False
+        while time.time()<deadline:
+            for k in order:
+                if blocked(k)>time.time(): continue
+                try:
+                    result=await transcribe(k,p)
+                except RateLimited as e:
+                    block(k,e.seconds)
+                    continue
+                except Exception as e:
+                    logging.warning('Provider %s failed: %s',k,type(e).__name__)
+                    block(k,60)
+                    continue
+                await status.edit_text('📝 '+result[:3900])
+                for i in range(3900,len(result),3900): await m.reply(result[i:i+3900])
+                return
+            if not notified:
+                await status.edit_text('⏳ API тимчасово недоступні. Очікую поновлення лімітів.')
+                notified=True
+            # Avoid repeated edits of identical Telegram messages.
+            delay=max(1,min(300,min(blocked(k) for k in order)-time.time()))
+            await asyncio.sleep(delay)
+        await status.edit_text('❌ Не вдалося транскрибувати протягом 24 годин.')
+async def worker():
+    while True:
+        m,status=await waiting.get()
         try:
-            with tempfile.TemporaryDirectory() as d:
-                p=Path(d)/('voice.ogg' if m.voice else 'circle.mp4'); await bot.download(item,destination=p)
-                if m.video_note:
-                    out=Path(d)/'audio.wav'; proc=await asyncio.create_subprocess_exec('ffmpeg','-nostdin','-loglevel','error','-i',str(p),'-vn','-ac','1','-ar','16000',str(out),stderr=asyncio.subprocess.DEVNULL)
-                    if await proc.wait()!=0: raise ValueError('Не вдалося витягти аудіо')
-                    p=out
-                text=await transcribe(k,p)
-            await status.edit_text('📝 '+text[:3900],reply_markup=None)
-            for i in range(3900,len(text),3900): await m.reply(text[i:i+3900])
-        except ValueError as e: await status.edit_text('❌ '+NAMES[k]+': '+str(e))
-        except Exception as e: await status.edit_text('❌ '+NAMES[k]+': '+type(e).__name__+' (перевір налаштування або мережу)')
+            await process_voice(m,status)
+        except Exception as e:
+            logging.warning('Job failed: %s',type(e).__name__)
+            try: await status.edit_text('❌ Не вдалося обробити аудіо.')
+            except Exception: pass
+        finally: waiting.task_done()
 async def main():
-    await dp.start_polling(bot,handle_as_tasks=True)
+    task=asyncio.create_task(worker())
+    try: await dp.start_polling(bot,handle_as_tasks=True)
+    finally:
+        task.cancel()
+        await asyncio.gather(task,return_exceptions=True)
 if __name__=='__main__': asyncio.run(main())
