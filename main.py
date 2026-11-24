@@ -506,11 +506,11 @@ TEXT_ROUTES=[
  ('Groq 1','GROQ_API_KEY_1','https://api.groq.com/openai/v1/chat/completions','openai/gpt-oss-120b'),
  ('Groq 1 20B','GROQ_API_KEY_1','https://api.groq.com/openai/v1/chat/completions','openai/gpt-oss-20b'),
  ('OpenRouter','OPENROUTER_API_KEY','https://openrouter.ai/api/v1/chat/completions','openrouter/free'),
- ('Requesty','REQUESTY_API_KEY','https://router.requesty.ai/v1/chat/completions',''),
- ('Routeway','ROUTEWAY_API_KEY','',''),
- ('Airforce','AIRFORCE_API_KEY','',''),
- ('DreamPrompting','DREAMPROMPTING_API_KEY','',''),
- ('xKiro','XKIRO_API_KEY','https://api.xkiro.com/v1/chat/completions',''),
+ ('Requesty','REQUESTY_API_KEY','https://router.requesty.ai/v1/chat/completions','google/gemma-4-31b-it'),
+ ('Routeway','ROUTEWAY_API_KEY','https://api.routeway.ai/v1/chat/completions','deepseek-v4.1-flash:free'),
+ ('Airforce','AIRFORCE_API_KEY','https://api.airforce/v1/chat/completions','deepseek-v3.2:free'),
+ ('DreamPrompting','DREAMPROMPTING_API_KEY','https://dreamprompting.com/api/v1/chat/completions','openai/gpt-oss-120b'),
+ ('xKiro','XKIRO_API_KEY','https://api.xkiro.com/v1/chat/completions','cohere/command-a'),
 ]
 db.execute('CREATE TABLE IF NOT EXISTS text_usage (day TEXT, route TEXT, tokens INTEGER, attempts INTEGER, PRIMARY KEY(day,route))')
 db.commit()
