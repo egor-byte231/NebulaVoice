@@ -58,7 +58,7 @@ async def ovh_transcribe(s,path):
     proc=await asyncio.create_subprocess_exec('ffmpeg','-nostdin','-loglevel','error','-i',str(path),'-ar','16000','-ac','1','-c:a','pcm_s16le',str(pcm),stderr=asyncio.subprocess.DEVNULL)
     if await proc.wait()!=0: raise ValueError('Не вдалося конвертувати аудіо для OVH')
     with wave.open(str(pcm),'rb') as audio:
-        if audio.getnframes()>45*16000: raise ValueError('OVH: максимум 45 секунд')
+        if audio.getnframes()>15*16000: raise ValueError('OVH: максимум 15 секунд')
         session=await request(s,'https://oai.endpoints.kepler.ai.cloud.ovh.net/gladia/v2/live?region=eu-west',{},json={'model':'solaria-3','encoding':'wav/pcm','sample_rate':16000,'bit_depth':16,'channels':1,'messages_config':{'receive_final_transcripts':True}})
         url=session['url']
         if not url.startswith('wss://'): raise ValueError('OVH: некоректна адреса сесії')
@@ -132,7 +132,7 @@ async def process_voice(m:Message,status:Message):
     k=get(m.chat.id)
     if k not in NAMES: return
     item=m.voice or m.video_note
-    if k=='ovh' and item.duration>45: return await status.edit_text('OVHcloud: максимум 45 секунд. Вибери іншу модель.',reply_markup=None)
+    if k=='ovh' and item.duration>15: return await status.edit_text('OVHcloud: максимум 15 секунд. Вибери іншу модель.',reply_markup=None)
     if (item.file_size or 0)>10*1024*1024: return await m.reply('Файл завеликий для тестової версії (10 МБ).')
     if lock.locked(): return await m.reply('Попередній тест ще триває. Повтори пізніше.')
     async with lock:
