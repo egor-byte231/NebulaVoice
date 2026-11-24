@@ -404,7 +404,7 @@ async def audio_diag_command(m:Message):
     row=db.execute('SELECT data FROM audio_diagnostics WHERE id=?',(int(arg[1].lstrip('#')),)).fetchone()
     if not row: return await m.answer('Транскрипцію не знайдено.')
     d=json.loads(row[0])
-    lines=[f"🔎 Транскрипція #{d['id']}",f"Стан: {d.get('state','очікування')}",f"Місце в черзі FadeHost: {d.get('queue','—')}",f"Очікування: {d.get('wait','—')} с",f"Обраний ШІ: {d.get('selected') or '—'}",f"Джерело: {d.get('source','—')}"]
+    lines=[f"🔎 Транскрипція #{d['id']}",f"Стан: {d.get('state','очікування')}",f"Місце в черзі FadeHost: {d.get('queue','—')}",f"Очікування: {d.get('wait','—')} с",f"Платформа транскрипції: {d.get('platform') or ('Cloudflare (за даними слота)' if any(a.get('slot') is not None for a in d.get('attempts',[])) else 'Не зафіксовано')}",f"Обраний ШІ: {d.get('selected') or '—'}",f"Джерело: {d.get('source','—')}"]
     for i,a in enumerate(d.get('attempts',[]),1):
         lines.append(f"\n{i}. {a['model']} | слот Cloudflare: {a.get('slot','—')}/{a.get('slots','—')} | {a.get('ms','—')} мс | очікування слота: {a.get('busy',0)*0.5:.1f} с (мін.)")
         if a.get('error'): lines.append('Помилка: '+a['error'])
@@ -468,7 +468,7 @@ async def cloud_audio(k,path):
                 audio_cloud_retry=time.monotonic()+30
                 return None
 async def transcribe(k,path):
-    d=audio_diag.get(); a={'model':NAMES[k],'busy':0}
+    d=audio_diag.get(); a={'model':NAMES[k],'busy':0,'platform':'Cloudflare'}
     if d: d['attempts'].append(a)
     try:
         j=await cloud_audio(k,path)
@@ -948,6 +948,7 @@ async def process_voice(m,status):
     finally:
         if d:
             d['selected']=selected[-1] if selected else None
+            d['platform']='Cloudflare' if selected else None
             d['errors']=[where+': '+type(error).__name__+': '+diag_safe(error) for where,error in failures]
             d['state']='результат обрано' if selected else 'не завершено'; diag_save(d)
         audio_diag.reset(token)
