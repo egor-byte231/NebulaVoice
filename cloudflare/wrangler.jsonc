@@ -1,0 +1,28 @@
+{
+  "name": "nebulavoice-ai",
+  "main": "worker.js",
+  "compatibility_date": "2026-11-24",
+  "d1_databases": [
+    {
+      "binding": "db",
+      "database_name": "nebulavoice-db",
+      "database_id": "1b287158-f5ab-4261-a4f3-539e015f434b"
+    }
+  ],
+  "queues": {
+    "producers": [
+      {
+        "binding": "JOBS",
+        "queue": "nebulavoice-queue"
+      }
+    ],
+    "consumers": [
+      {
+        "queue": "nebulavoice-queue",
+        "max_batch_size": 1,
+        "max_concurrency": 20,
+        "max_retries": 2
+      }
+    ]
+  }
+}
