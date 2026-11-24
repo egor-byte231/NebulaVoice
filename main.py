@@ -926,11 +926,13 @@ async def cloud_reconcile():
         try:
             pending=db.execute('SELECT id,chat,day,budget FROM cloud_pending').fetchall()
             for job_id,chat,day,budget in pending:
-                rows=await d1_query(history_session,'SELECT tokens FROM worker_results WHERE id=?',(job_id,))
+                rows=await d1_query(history_session,'SELECT tokens,routes FROM worker_results_v2 WHERE id=?',(job_id,))
                 if not rows: continue
                 actual=max(0,int(rows[0]['tokens']))
                 with db:
                     db.execute('UPDATE text_group_usage SET tokens=tokens+? WHERE day=? AND chat=?',(actual-budget,day,chat))
+                    for name,usage in json.loads(rows[0]['routes']).items():
+                        db.execute('INSERT INTO text_usage VALUES (?,?,?,?) ON CONFLICT(day,route) DO UPDATE SET tokens=tokens+excluded.tokens,attempts=attempts+excluded.attempts',(day,name,usage['tokens'],usage['attempts']))
                     db.execute('DELETE FROM cloud_pending WHERE id=?',(job_id,))
         except Exception as e:
             logging.warning('Cloud reconciliation: %s',type(e).__name__)
