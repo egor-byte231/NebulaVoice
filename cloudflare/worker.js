@@ -63,7 +63,8 @@ async function generate(j,env){
     const data=await r.json();if(Number.isSafeInteger(data.usage?.total_tokens)&&data.usage.total_tokens>=0){spent+=data.usage.total_tokens-reserve;usage.tokens+=data.usage.total_tokens-reserve;}const a=data.choices?.[0]?.message?.content?.trim();
     if(!a)continue;
     if(a.toLowerCase()==="історія"){need=true;break;}
-    return finish(a);
+    const others=ROUTES.filter(r=>r[0]!==name&&env[r[1]]).map(r=>r[0]);
+    return finish(j.diagnostic?a.slice(0,2800)+"\n\n🧪 Платформа: Cloudflare\nAPI: "+name+"\nМодель: "+String(data.model||model)+"\nІнші налаштовані API: "+(others.join(", ")||"немає"):a);
    }catch{}
   }
   if(!need)break;
