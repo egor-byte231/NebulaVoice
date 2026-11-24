@@ -7,7 +7,8 @@ from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKe
 from dotenv import load_dotenv
 load_dotenv()
 logging.basicConfig(level=logging.INFO)
-NAMES={'ovh':'OVHcloud AI','groq':'Groq','cf':'Cloudflare AI','gemini':'Google Gemini','hf':'Hugging Face'}
+MODELS={'groq1':('groq',1,'whisper-large-v3'),'groq1t':('groq',1,'whisper-large-v3-turbo'),'groq2':('groq',2,'whisper-large-v3'),'groq2t':('groq',2,'whisper-large-v3-turbo'),'cf1':('cf',1,'@cf/openai/whisper-large-v3-turbo'),'cf2':('cf',2,'@cf/openai/whisper-large-v3-turbo'),'gemini':('gemini',1,os.getenv('GEMINI_MODEL','gemini-2.5-flash'))}
+NAMES={k:f"{ {'groq':'Groq','cf':'Cloudflare','gemini':'Gemini'}[p]} #{n} • {model.split('/')[-1]}" for k,(p,n,model) in MODELS.items()}
 OWNER=int(os.environ['OWNER_ID']); bot=Bot(os.environ['BOT_TOKEN']); dp=Dispatcher(); lock=asyncio.Lock()
 db=sqlite3.connect('state.db'); db.execute('CREATE TABLE IF NOT EXISTS settings (chat INTEGER PRIMARY KEY, provider TEXT)'); db.commit()
 def get(chat):
@@ -33,20 +34,16 @@ async def request(s,url,headers,**kw):
         if r.status>=400: raise ValueError(f'API HTTP {r.status}'+(' — ліміт або обмеження' if r.status==429 else ''))
         return await r.json(content_type=None)
 async def transcribe(k,path):
+    provider,n,model=MODELS[k]
     data=path.read_bytes()
     async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=120)) as s:
-        if k=='groq':
-            f=aiohttp.FormData(); f.add_field('file',data,filename=path.name,content_type='audio/ogg' if path.suffix=='.ogg' else 'audio/wav'); f.add_field('model','whisper-large-v3'); f.add_field('language','uk')
-            j=await request(s,'https://api.groq.com/openai/v1/audio/transcriptions',{'Authorization':'Bearer '+need('GROQ_API_KEY')},data=f)
-        elif k=='cf':
-            j=await request(s,'https://api.cloudflare.com/client/v4/accounts/'+need('CF_ACCOUNT_ID')+'/ai/run/@cf/openai/whisper-large-v3-turbo',{'Authorization':'Bearer '+need('CF_API_TOKEN')},json={'audio':base64.b64encode(data).decode(),'language':'uk','task':'transcribe'}); j=j.get('result') or {}
-        elif k=='gemini':
-            j=await request(s,'https://generativelanguage.googleapis.com/v1beta/models/'+need('GEMINI_MODEL')+':generateContent',{'x-goog-api-key':need('GEMINI_API_KEY')},json={'contents':[{'parts':[{'text':'Transcribe this audio verbatim in its original language. Do not translate. Return only the transcript.'},{'inline_data':{'mime_type':'audio/ogg' if path.suffix=='.ogg' else 'audio/wav','data':base64.b64encode(data).decode()}}]}]}); j={'text':''.join(p.get('text','') for p in j['candidates'][0]['content']['parts'])}
-        else:
-            prefix='OVH' if k=='ovh' else 'HF'; url=need(prefix+'_URL'); token=os.getenv(prefix+'_TOKEN'); headers={'Authorization':'Bearer '+token} if token else {}
-            f=aiohttp.FormData(); f.add_field('file',data,filename=path.name); f.add_field('language','uk'); model=os.getenv(prefix+'_MODEL')
-            if model: f.add_field('model',model)
-            j=await request(s,url,headers,data=f)
+        if provider=='groq':
+            f=aiohttp.FormData(); f.add_field('file',data,filename=path.name,content_type='audio/ogg' if path.suffix=='.ogg' else 'audio/wav'); f.add_field('model',model); f.add_field('language','uk')
+            j=await request(s,'https://api.groq.com/openai/v1/audio/transcriptions',{'Authorization':'Bearer '+need(f'GROQ_API_KEY_{n}')},data=f)
+        elif provider=='cf':
+            j=await request(s,'https://api.cloudflare.com/client/v4/accounts/'+need(f'CF_ACCOUNT_ID_{n}')+'/ai/run/'+model,{'Authorization':'Bearer '+need(f'CF_API_TOKEN_{n}')},json={'audio':base64.b64encode(data).decode(),'language':'uk','task':'transcribe'}); j=j.get('result') or {}
+        elif provider=='gemini':
+            j=await request(s,'https://generativelanguage.googleapis.com/v1beta/models/'+model+':generateContent',{'x-goog-api-key':need('GEMINI_API_KEY')},json={'contents':[{'parts':[{'text':'Transcribe this audio verbatim in its original language. Do not translate. Return only the transcript.'},{'inline_data':{'mime_type':'audio/ogg' if path.suffix=='.ogg' else 'audio/wav','data':base64.b64encode(data).decode()}}]}]}); j={'text':''.join(p.get('text','') for p in j['candidates'][0]['content']['parts'])}
         text=j.get('text') if isinstance(j,dict) else None
         if not isinstance(text,str) or not text.strip(): raise ValueError('API не повернув текст')
         return text.strip()
