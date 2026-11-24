@@ -1101,21 +1101,17 @@ def text_stats_menu():
     return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='🔄 Оновити',callback_data='owner:ai')],[InlineKeyboardButton(text='⬅️ Назад',callback_data='owner:back')]])
 def text_report():
     day=text_day()
-    rows={r[0]:r[1:] for r in db.execute('SELECT route,tokens,attempts FROM text_usage WHERE day=?',(day,))}
-    def panel(items):
-        return '<pre>'+html.escape('\n'.join(f'{label:<17} {str(value):>10}' for label,value in items))+'</pre>'
+    rows=list(db.execute('SELECT route,tokens,attempts FROM text_usage WHERE day=?',(day,)))
+    f=db.execute('SELECT attempts,ok,needed,tokens,ms,bypass FROM classifier_daily WHERE day=?',(day,)).fetchone() or (0,0,0,0,0,0)
+    attempts,ok,needed,tokens,ms,bypass=f
+    active=5-history_classifier_slots._value
+    pending=db.execute('SELECT COUNT(*) FROM cloud_pending').fetchone()[0]
     groups=db.execute('SELECT COUNT(*) FROM text_groups').fetchone()[0]
-    group_tokens=db.execute('SELECT COALESCE(SUM(tokens),0) FROM text_group_usage WHERE day=?',(day,)).fetchone()[0]
-    lines=['🤖 <b>Статистика текстового ШІ</b>',f'📅 {day} (UTC)','Автоматичний режим','', '<b>Загальна статистика</b>',panel([('Токени (оцінка)',sum(r[0] for r in rows.values())),('Спроби',sum(r[1] for r in rows.values())),('Токени чатів',group_tokens),('Активні групи',groups),('Обробка',f'{len(group_busy)} / 4'),('Групи Free/Prem','40k / 100k'),('ЛС Free/Prem','10k / 40k')])]
-    for name in dict.fromkeys([r[0] for r in TEXT_ROUTES]+['Requesty 2','Airforce 2']):
-        route=next((r for r in TEXT_ROUTES if r[0]==name),None)
-        tokens,attempts=rows.get(name,(0,0))
-        remaining=max(0,int(blocked('text:'+name)-time.time()))
-        state='🟡 Пауза (локально)' if remaining else '☁️ Cloudflare / локальний облік'
-        items=[('Токени (оцінка)',tokens),('Спроби',attempts),('Доступ', 'Cloudflare: усі чати'),('Квота API','невідома')]
-        if remaining: items.append(('Пауза, с',remaining))
-        lines.extend(['',f'<b>{html.escape(name)}</b> · {state}',panel(items)])
-    lines.extend(['','<i>Локальний облік включає резерв невдалих спроб. Реальні залишки квот API не підтверджені.</i>'])
+    charged=db.execute('SELECT COALESCE(SUM(tokens),0) FROM text_group_usage WHERE day=?',(day,)).fetchone()[0]
+    lines=['🤖 <b>Статистика текстового ШІ</b>',f'📅 {day} (UTC)','', '🖥 <b>FadeHost — визначення історії</b>',f'Активні слоти: {active}/5',f'Черга: {max(0,history_classifier_admitted-active)}/2',f'Спроби: {attempts}',f'Успішні: {ok} | Невдалі: {attempts-ok}',f'Історія потрібна: {needed} | Непотрібна: {ok-needed}',f'Напряму Cloudflare: {bypass}',f'Токени (за API): {tokens}',f'Середній час API: {ms/attempts/1000:.2f} с' if attempts else 'Середній час API: —','', '☁️ <b>Cloudflare — відповіді</b>',f'Незавершений облік: {pending}', 'Активні слоти / черга: немає телеметрії', 'Успішність / час: немає телеметрії','', '<b>Зведений облік API (включно з тестами)</b>',f'Токени: {sum(x[1] for x in rows)} | Спроби: {sum(x[2] for x in rows)}',f'Токени чатів: {charged} | Групи: {groups}','Групи Free/Prem: 40k / 100k','ЛС Free/Prem: 10k / 40k','']
+    for name,t,a in rows:
+        lines.append(f'{html.escape(name)}: {t} ток. / {a} спроб')
+    lines.extend(['','<i>Зведені дані можуть включати FadeHost; не додавайте їх до його токенів. Квоти API невідомі. Нові лічильники — з моменту оновлення.</i>'])
     return '\n'.join(lines)
 @dp.message(Command('ai_status'),F.chat.type=='private',F.from_user.id==OWNER)
 async def text_status(m:Message):
@@ -1332,17 +1328,29 @@ async def show_limit(m:Message):
     tariff='Premium' if premium_until(chat)>time.time() else 'Free'
     await m.reply(f'📊 Ліміт ШІ — {tariff}\n\nВикористано: {used:,} / {limit:,}\nЗалишилося: {left:,} токенів\n'+ '█'*filled+'░'*(10-filled)+f' {pct:.1f}%\n\nСкидання через {minutes//60} г {minutes%60} хв (00:00 UTC)\nОблік сумарний для всіх API.'.replace(',', ' '),parse_mode=None)
 
+db.execute('CREATE TABLE IF NOT EXISTS classifier_daily (day TEXT PRIMARY KEY, attempts INTEGER, ok INTEGER, needed INTEGER, tokens INTEGER, ms INTEGER, bypass INTEGER)')
+db.commit()
+def classifier_record(attempts=0,ok=0,needed=0,tokens=0,ms=0,bypass=0):
+    with db:
+        db.execute('INSERT INTO classifier_daily VALUES (?,?,?,?,?,?,?) ON CONFLICT(day) DO UPDATE SET attempts=attempts+excluded.attempts,ok=ok+excluded.ok,needed=needed+excluded.needed,tokens=tokens+excluded.tokens,ms=ms+excluded.ms,bypass=bypass+excluded.bypass',(text_day(),attempts,ok,needed,tokens,ms,bypass))
 history_classifier_slots=asyncio.Semaphore(5)
 history_classifier_admitted=0
 async def classify_history(question,replied,budget):
     global history_classifier_admitted
-    if history_classifier_admitted>=7 or budget<1000: return {}
+    if history_classifier_admitted>=7 or budget<1000:
+        classifier_record(bypass=1)
+        return {}
     key=os.getenv('GROQ_API_KEY_1') or os.getenv('GROQ_API_KEY_2')
-    if not key: return {}
+    if not key:
+        classifier_record(bypass=1)
+        return {}
     route='Groq 1 20B' if os.getenv('GROQ_API_KEY_1') else 'Groq 2 20B'
     history_classifier_admitted+=1
+    started=None
+    result={}
     try:
         async with history_classifier_slots:
+            started=time.monotonic()
             prompt='Визнач, чи для відповіді потрібні попередні повідомлення чату. Питання про учасників, їхню поведінку, попередні репліки або атмосферу потребують історії. Поверни виключно ІСТОРІЯ ПОТРІБНА або ІСТОРІЯ НЕПОТРІБНА. Не відповідай на саме питання.'
             messages=[{'role':'system','content':prompt},{'role':'user','content':('Це відповідь на попереднє повідомлення.\n' if replied else '')+question[:4000]}]
             async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=3)) as session:
@@ -1359,6 +1367,8 @@ async def classify_history(question,replied,budget):
         return {}
     finally:
         history_classifier_admitted-=1
+        if started is not None:
+            classifier_record(attempts=1,ok=int("historyDecision" in result),needed=int(result.get("historyDecision") is True),tokens=result.get("classifierTokens",0),ms=int((time.monotonic()-started)*1000))
 
 async def submit_cloud_text(m,question,group,replied,reply):
     chat=m.chat.id
