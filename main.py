@@ -420,7 +420,7 @@ async def process_voice(m,status):
                 await notify_error('Нормалізація аудіо',ValueError('FFmpeg'))
                 if m.video_note: raise ValueError('Не вдалося витягти аудіо')
             else: p=out
-        order=[k for k in ('groq1','groq1t','cf1','ovh','groq2','groq2t','cf2') if k!='ovh' or item.duration<=15]
+        order=[k for k in ORDER if k!='ovh' or item.duration<=15]
         # Secondary credentials must represent independently permitted quotas; only use after primary HTTP 429.
         deadline=time.time()+86400
         notified=False
