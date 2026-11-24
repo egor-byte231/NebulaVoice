@@ -426,8 +426,17 @@ dp.pre_checkout_query.outer_middleware(testing_gate)
 dp.my_chat_member.outer_middleware(testing_gate)
 dp.chat_member.outer_middleware(testing_gate)
 
+test_selection={'audio':'','text':''}
+def test_route(kind,m):
+    return test_selection[kind] if testing_enabled() and m.from_user and m.from_user.id==OWNER else ''
+
+def test_menu(kind):
+    names=list(ORDER) if kind=='audio' else [r[0] for r in TEXT_ROUTES]+['Requesty 2','Airforce 2']
+    names=list(dict.fromkeys(names))
+    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=('✓ ' if test_selection[kind]==name else '')+(NAMES.get(name,name) if kind=='audio' else name),callback_data='owner:testpick:'+kind+':'+name)] for name in names]+[[InlineKeyboardButton(text='Автоматично',callback_data='owner:testpick:'+kind+':')],[InlineKeyboardButton(text='Назад',callback_data='owner:back')]])
+
 def owner_menu():
-    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='⏸ Вимкнути' if enabled() else '▶️ Увімкнути',callback_data='owner:toggle')],[InlineKeyboardButton(text='📊 Статистика',callback_data='owner:stats')],[InlineKeyboardButton(text='🤖 Статистика ШІ',callback_data='owner:ai')],[InlineKeyboardButton(text='📈 Загальна статистика',callback_data='owner:overview')],[InlineKeyboardButton(text='🟢 Режим розробки: ON' if development_enabled() else '🔴 Режим розробки: OFF',callback_data='owner:development')],[InlineKeyboardButton(text='🧪 Режим тестування: ON' if testing_enabled() else '🧪 Режим тестування: OFF',callback_data='owner:testing')],[InlineKeyboardButton(text='🔄 Обнулити мій ліміт',callback_data='owner:reset_limit')]])
+    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='⏸ Вимкнути' if enabled() else '▶️ Увімкнути',callback_data='owner:toggle')],[InlineKeyboardButton(text='📊 Статистика',callback_data='owner:stats')],[InlineKeyboardButton(text='🤖 Статистика ШІ',callback_data='owner:ai')],[InlineKeyboardButton(text='📈 Загальна статистика',callback_data='owner:overview')],[InlineKeyboardButton(text='🟢 Режим розробки: ON' if development_enabled() else '🔴 Режим розробки: OFF',callback_data='owner:development')],[InlineKeyboardButton(text='🧪 Режим тестування: ON' if testing_enabled() else '🧪 Режим тестування: OFF',callback_data='owner:testing')],[InlineKeyboardButton(text='🔄 Обнулити мій ліміт',callback_data='owner:reset_limit')]]+([[InlineKeyboardButton(text='🎙 Тест аудіо',callback_data='owner:testmenu:audio')],[InlineKeyboardButton(text='💬 Тест тексту',callback_data='owner:testmenu:text')]] if testing_enabled() else []))
 error_alert_times={}
 async def notify_error(where,error):
     raw=str(error)
@@ -496,6 +505,17 @@ async def owner_action(c:CallbackQuery):
         return
     if c.data=='owner:back':
         return await c.message.edit_text('Панель власника',reply_markup=owner_menu())
+    if c.data.startswith('owner:testmenu:') or c.data.startswith('owner:testpick:'):
+        if not testing_enabled(): return
+        parts=c.data.split(':',3)
+        kind=parts[2]
+        if kind not in test_selection: return
+        if parts[1]=='testpick':
+            value=parts[3]
+            allowed=list(ORDER) if kind=='audio' else [r[0] for r in TEXT_ROUTES]+['Requesty 2','Airforce 2']
+            if value and value not in allowed: return
+            test_selection[kind]=value
+        return await c.message.edit_text('Тестова модель: '+(test_selection[kind] or 'Автоматично'),reply_markup=test_menu(kind))
     if c.data=='owner:reset_limit':
         day=text_day()
         # Preserve outstanding reservations so reconciliation cannot create negative usage.
@@ -535,6 +555,25 @@ async def process_voice(m,status):
                 await notify_error('Нормалізація аудіо',ValueError('FFmpeg'))
                 if m.video_note: raise ValueError('Не вдалося витягти аудіо')
             else: p=out
+        forced=test_route('audio',m)
+        if forced:
+            if forced=='ovh' and item.duration>15: return await status.edit_text('OVH: максимум 15 секунд')
+            if blocked(forced)>time.time() or forced in active_providers: return await status.edit_text('Тест: API зайнятий або ліміт вичерпано')
+            active_providers.add(forced)
+            usage(forced,seconds=item.duration,attempt=1)
+            try:
+                result,quality=await transcribe(forced,p)
+                usage(forced,success=1)
+                return await deliver_transcript(m,status,result+'\n\n🧪 FadeHost: '+NAMES[forced])
+            except RateLimited as e:
+                block(forced,e.seconds)
+                block('quota:'+forced,e.seconds)
+                usage(forced,limited=1)
+                return await status.edit_text('Тест: '+NAMES[forced]+' — HTTP 429')
+            except Exception as e:
+                return await status.edit_text('Тест: '+NAMES[forced]+' — '+type(e).__name__)
+            finally:
+                active_providers.discard(forced)
         order=[k for k in ORDER if k!='ovh' or item.duration<=15]
         # Secondary credentials must represent independently permitted quotas; only use after primary HTTP 429.
         deadline=time.time()+86400
@@ -952,7 +991,7 @@ async def submit_cloud_text(m,question,group,replied,reply):
     try:
         await d1_query(history_session,'INSERT INTO cloud_reservations VALUES (?,?,?,?)',(job_id,chat,day,budget))
         payload={'chat':chat,'message':status.message_id,'source':m.message_id,'question':question[:4000],
-                 'budget':budget,'development':development_enabled(),'diagnostic':m.from_user.id==OWNER,
+                 'budget':budget,'forcedRoute':test_route('text',m),'development':development_enabled(),'diagnostic':m.from_user.id==OWNER,
                  'contextNeeded':bool(replied or needs_history(question)),
                  'replyText':(reply.text or '')[:1500] if replied else ''}
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15)) as session:
@@ -1040,6 +1079,7 @@ async def text_message(m:Message):
     if os.getenv('CLOUD_TEXT_ENABLED','auto')!='0' and await cloud_text_probe():
         overview_add(m,requests=1)
         return await submit_cloud_text(m,question,group,replied,reply)
+    if test_route('text',m): return await m.reply('Тест текстової моделі потребує доступного Cloudflare.')
     await text_slots.acquire()
     job=asyncio.current_task()
     group_busy.add(job)
