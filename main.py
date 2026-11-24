@@ -535,6 +535,14 @@ async def safe_audio_load(m,config):
 
 async def run_audio_load(m,config):
     try: await run_audio_load_inner(m,config)
+    except asyncio.CancelledError:
+        await m.reply('Тест скасовано під час підготовки.')
+    except Exception as e:
+        logging.exception('Audio load failed')
+        await m.reply('Помилка тесту аудіо: '+type(e).__name__)
+
+async def run_audio_load_inner(m,config):
+    try: await run_audio_load_inner(m,config)
     except asyncio.CancelledError: await m.reply('Тест скасовано під час підготовки.')
     except Exception as e:
         logging.exception('Audio load failed')
@@ -649,6 +657,8 @@ async def run_audio_load_inner(m,config,progress):
             chunk=''
         chunk+=line+'\n'
     if chunk: await m.answer(chunk,parse_mode=None)
+    try: await asyncio.wait_for(d1_snapshot(history_session),30)
+    except Exception as e: logging.warning('Audio test snapshot: %s',type(e).__name__)
     try: await asyncio.wait_for(d1_snapshot(history_session),timeout=30)
     except Exception as e: logging.warning('Audio test snapshot: %s',type(e).__name__)
     try: await d1_snapshot(history_session)
@@ -671,6 +681,9 @@ async def load_action(c):
             load_task.cancel()
             return await c.message.answer('Скасування тесту…')
         return await c.message.answer('Активного тесту немає.')
+    if action=='cancel':
+        if load_task and not load_task.done(): load_task.cancel()
+        return
     if action=='kind':
         load_config['kind']='audio' if load_config['kind']=='text' else 'text'
         load_config['routes'].clear()
