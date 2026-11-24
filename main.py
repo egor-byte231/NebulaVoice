@@ -393,6 +393,8 @@ async def deliver_transcript(m,status,result):
         else: await m.reply(body,parse_mode='HTML')
     if chunks: overview_add(m,voices=int(bool(m.voice)),circles=int(bool(m.video_note)))
 audio_cloud_retry=0
+audio_http_session=None
+audio_binary_supported=False
 audio_local_active=0
 def audio_platform():
     return 'Cloudflare' if os.getenv('WORKER_SECRET') and time.monotonic()>=audio_cloud_retry else 'FadeHost'
@@ -408,29 +410,37 @@ async def cloud_audio(k,path):
         finally:
             if proc.returncode is None: proc.kill(); await proc.wait()
         if proc.returncode or len(data)>480000: raise ValueError('OVH PCM')
-    payload={'route':k,'audio':base64.b64encode(data).decode(),'slots':audio_settings()[2]}
-    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=75)) as session:
-        while True:
-            try:
-                async with session.post('https://nebulavoice-ai.maxvyn09.workers.dev/audio/transcribe',json=payload,headers={'Authorization':'Bearer '+os.environ['WORKER_SECRET']},allow_redirects=False) as response:
-                    if response.status==429:
-                        await asyncio.sleep(0.5)
-                        continue
-                    if response.status in (401,404,502,503,504):
-                        audio_cloud_retry=time.monotonic()+30
-                        return None
-                    j=await response.json(content_type=None)
-                    if response.status==422:
-                        if j.get('providerStatus')==429:
-                            try: delay=max(1,int(j.get('retryAfter') or 60))
-                            except ValueError: delay=60
-                            raise RateLimited(delay)
-                        raise ValueError(j.get('error','ProviderFailure'))
-                    if response.status!=200 or not isinstance(j.get('result'),dict): raise ValueError('Cloudflare audio response')
-                    return j['result']
-            except (aiohttp.ClientConnectionError,aiohttp.ServerTimeoutError,asyncio.TimeoutError):
-                audio_cloud_retry=time.monotonic()+30
-                return None
+    global audio_http_session
+    if audio_http_session is None or audio_http_session.closed:
+        audio_http_session=aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=75),connector=aiohttp.TCPConnector(limit=40,keepalive_timeout=60))
+    session=audio_http_session
+    headers={'Authorization':'Bearer '+os.environ['WORKER_SECRET']}
+    if audio_binary_supported:
+        headers.update({'Content-Type':'application/octet-stream','X-Audio-Route':k,'X-Audio-Slots':str(audio_settings()[2])})
+        payload={'data':data}
+    else:
+        payload={'json':{'route':k,'audio':base64.b64encode(data).decode(),'slots':audio_settings()[2]}}
+    while True:
+        try:
+            async with session.post('https://nebulavoice-ai.maxvyn09.workers.dev/audio/transcribe',headers=headers,allow_redirects=False,**payload) as response:
+                if response.status==429:
+                    await asyncio.sleep(0.5)
+                    continue
+                if response.status in (401,404,502,503,504):
+                    audio_cloud_retry=time.monotonic()+30
+                    return None
+                j=await response.json(content_type=None)
+                if response.status==422:
+                    if j.get('providerStatus')==429:
+                        try: delay=max(1,int(j.get('retryAfter') or 60))
+                        except ValueError: delay=60
+                        raise RateLimited(delay)
+                    raise ValueError(j.get('error','ProviderFailure'))
+                if response.status!=200 or not isinstance(j.get('result'),dict): raise ValueError('Cloudflare audio response')
+                return j['result']
+        except (aiohttp.ClientConnectionError,aiohttp.ServerTimeoutError,asyncio.TimeoutError):
+            audio_cloud_retry=time.monotonic()+30
+            return None
 async def transcribe(k,path):
     global audio_local_active
     j=await cloud_audio(k,path)
@@ -1524,7 +1534,7 @@ async def d1_monitor(session):
         except Exception as e: logging.error('D1 snapshot failed: %s',type(e).__name__)
 
 async def main():
-    global history_session
+    global history_session,audio_binary_supported
     session=aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30))
     logging.info('D1 environment: %s', {k: bool(os.getenv(k,'').strip()) for k in ('CF_D1_API_TOKEN','CF_D1_TOKEN','D1_API_TOKEN','CLOUDFLARE_D1_API_TOKEN','CF_D1_ACCOUNT_ID','CF_ACCOUNT_ID_1','CF_D1_DATABASE_ID')})
     cloud_ready=False
@@ -1540,6 +1550,10 @@ async def main():
         await session.close()
         raise
     history_session=session
+    try:
+        async with session.get('https://nebulavoice-ai.maxvyn09.workers.dev/health',timeout=aiohttp.ClientTimeout(total=5)) as response:
+            audio_binary_supported=bool((await response.json()).get('audioBinary')) if response.ok else False
+    except Exception: audio_binary_supported=False
     db.execute('CREATE TABLE IF NOT EXISTS cloud_completed (id TEXT PRIMARY KEY)')
     db.execute('CREATE TABLE IF NOT EXISTS cloud_pending (id TEXT PRIMARY KEY,chat INTEGER,day TEXT,budget INTEGER)')
     db.commit()
@@ -1556,5 +1570,7 @@ async def main():
         await asyncio.gather(*tasks,return_exceptions=True)
         try:
             if cloud_ready: await d1_snapshot(session)
-        finally: await session.close()
+        finally:
+            if audio_http_session is not None: await audio_http_session.close()
+            await session.close()
 if __name__=='__main__': asyncio.run(main())
