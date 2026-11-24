@@ -6,6 +6,10 @@ export default {
   if(req.method!=="POST"||!env.WORKER_SECRET||req.headers.get("Authorization")!=="Bearer "+env.WORKER_SECRET) return new Response("Unauthorized",{status:401});
   if(!env.BOT_TOKEN) return new Response("Not configured",{status:503});
   const j=await req.json();
+  if(new URL(req.url).pathname==="/slots"){
+   if(j.slots!==undefined&&(!Number.isInteger(j.slots)||j.slots<1||j.slots>50))return new Response("Invalid slots",{status:400});
+   return env.DISPATCHER.get(env.DISPATCHER.idFromName("global")).fetch("https://dispatcher/slots",{method:"POST",body:JSON.stringify(j)});
+  }
   if(new URL(req.url).pathname==="/load-test"){
    if(!Number.isInteger(j.count)||j.count<1||j.count>100||!["auto","selected","all"].includes(j.mode)||typeof j.run!=="string"||! /^[a-f0-9]{32}$/.test(j.run))return new Response("Invalid",{status:400});
    const selected=ROUTES.filter(r=>env[r[1]]&&(j.mode==="all"||j.mode==="selected"&&Array.isArray(j.routes)&&j.routes.includes(r[0])));
@@ -62,6 +66,15 @@ export class Dispatcher {
  }
  async fetch(req){
   const path=new URL(req.url).pathname;
+  if(path==="/slots"){
+   const j=await req.json();
+   if(j.slots!==undefined){
+    if(!Number.isInteger(j.slots)||j.slots<1||j.slots>50)return new Response("Invalid slots",{status:400});
+    await this.ctx.storage.put("slots",j.slots);
+    if(this.sql.exec("SELECT id FROM jobs WHERE state='pending' LIMIT 1").toArray().length)await this.ctx.storage.setAlarm(Date.now()+1);
+   }
+   return Response.json({slots:await this.ctx.storage.get("slots")??20});
+  }
   if(path==="/requesty/acquire"){const token=crypto.randomUUID();const acquired=await this.ctx.storage.transaction(async tx=>{const now=Date.now();const lease=await tx.get("requestyLease");if(lease&&lease.until>now)return false;await tx.put("requestyLease",{token,until:now+120000});return true;});return acquired?Response.json({token}):new Response("Busy",{status:409});}
   if(path==="/requesty/release"){const {token}=await req.json();await this.ctx.storage.transaction(async tx=>{const lease=await tx.get("requestyLease");if(lease?.token===token)await tx.delete("requestyLease");});return new Response("OK");}
   const jobs=await req.json();
@@ -80,8 +93,9 @@ export class Dispatcher {
   await Promise.all(running.map(async row=>{
    try{const stub=this.env.EXECUTOR.get(this.env.EXECUTOR.idFromName(row.id));const response=await stub.fetch("https://executor/status");const status=await response.json();if(status.done)this.sql.exec("DELETE FROM jobs WHERE id=?",row.id);else if(!status.exists)this.sql.exec("UPDATE jobs SET state='pending' WHERE id=?",row.id);}catch{}
   }));
+  const slots=await this.ctx.storage.get("slots")??20;
   const count=this.sql.exec("SELECT COUNT(*) AS n FROM jobs WHERE state='running'").one().n;
-  const rows=this.sql.exec("SELECT id,payload,tries FROM jobs WHERE state='pending' ORDER BY queued,rowid LIMIT ?",Math.max(0,20-count)).toArray();
+  const rows=this.sql.exec("SELECT id,payload,tries FROM jobs WHERE state='pending' ORDER BY queued,rowid LIMIT ?",Math.max(0,Math.min(slots-count,50-running.length))).toArray();
   for(const row of rows)this.sql.exec("UPDATE jobs SET state='running',tries=tries+1 WHERE id=?",row.id);
   await Promise.all(rows.map(row=>this.run(row)));
   if(!this.sql.exec("SELECT id FROM jobs WHERE state IN ('pending','running') LIMIT 1").toArray().length)await this.ctx.storage.deleteAlarm();
