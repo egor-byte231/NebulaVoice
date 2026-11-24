@@ -910,7 +910,8 @@ async def text_message(m:Message):
     if not (mentioned or replied or not group): return
     question=re.sub(r'(?<!\w)@Nebulavcbot(?!\w)','',raw,flags=re.I).strip()
     if not question: return
-    if chat in group_busy or len(group_busy)>=4: return await m.reply('⏳ ШІ зайнятий. Спробуй трохи пізніше.')
+    while chat in group_busy or len(group_busy)>=4:
+        await asyncio.sleep(0.25)
     group_busy.add(chat)
     try:
         overview_add(m,requests=1)
