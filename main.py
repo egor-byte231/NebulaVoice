@@ -868,7 +868,7 @@ async def generate_text(m,question,context='',group=False,history_context=''):
             answer='Недостатньо інформації в історії розмови.'
         if context and re.search(r'як там люди|как там люди|хто себе як|кто себя как|хто.*повод|кто.*вед[её]т|атмосфер',question,re.I) and re.search(r'люди.{0,30}різні|люди.{0,30}разные|хтось.{0,30}зайнятий|хтось.{0,30}відпочиває|кто-то.{0,30}отдыхает',answer,re.I):
             continue
-        if testing_enabled() and m.from_user.id==OWNER:
+        if m.from_user.id==OWNER:
             others=[r[0] for r in routes if r[0]!=name and text_config(r)[0]]
             answer=answer[:2800]+'\n\n🧪 Платформа: FadeHost\nAPI: '+name+'\nМодель: '+str(data.get('model') or model)+'\nІнші налаштовані API: '+(', '.join(others) or 'немає')
         if group:
@@ -952,7 +952,7 @@ async def submit_cloud_text(m,question,group,replied,reply):
     try:
         await d1_query(history_session,'INSERT INTO cloud_reservations VALUES (?,?,?,?)',(job_id,chat,day,budget))
         payload={'chat':chat,'message':status.message_id,'source':m.message_id,'question':question[:4000],
-                 'budget':budget,'development':development_enabled(),'diagnostic':testing_enabled() and m.from_user.id==OWNER,
+                 'budget':budget,'development':development_enabled(),'diagnostic':m.from_user.id==OWNER,
                  'contextNeeded':bool(replied or needs_history(question)),
                  'replyText':(reply.text or '')[:1500] if replied else ''}
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15)) as session:
