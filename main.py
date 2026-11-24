@@ -413,7 +413,7 @@ async def voice(m:Message):
         if load_task and not load_task.done(): return await m.reply('Тест уже триває.')
         config=audio_load_wait
         audio_load_wait=None
-        load_task=asyncio.create_task(run_audio_load(m,config))
+        load_task=asyncio.create_task(safe_audio_load(m,config))
         return await m.reply('Тест аудіо запущено.')
     if m.from_user and m.from_user.is_bot: return
     if not enabled(): return await m.reply(DISABLED)
@@ -519,7 +519,15 @@ async def run_load_test(message,config):
 
 audio_load_wait=None
 load_count_wait=False
+async def safe_audio_load(m,config):
+    try: await run_audio_load(m,config)
+    except asyncio.CancelledError: await m.reply('Тест скасовано під час підготовки.')
+    except Exception as e:
+        logging.exception('Audio load test failed')
+        await m.reply('Тест перервано: '+type(e).__name__)
+
 async def run_audio_load(m,config):
+    progress=await m.reply('⏳ Підготовка аудіо...',reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='Скасувати тест',callback_data='owner:load:cancel')]]))
     item=m.voice or m.video_note
     routes=config['routes'] if config['mode']=='selected' else list(ORDER)
     if item.duration>15: routes=[k for k in routes if k!='ovh']
@@ -528,12 +536,19 @@ async def run_audio_load(m,config):
     start=time.monotonic()
     slots=asyncio.Semaphore(audio_settings()[3])
     peak=active=0
+    results=[]
+    tasks=[]
     async with tempfile.TemporaryDirectory() as d:
         src=Path(d)/'source'
         p=Path(d)/'normalized.ogg'
-        await bot.download(item,destination=src)
+        await asyncio.wait_for(bot.download(item,destination=src),30)
         proc=await asyncio.create_subprocess_exec('ffmpeg','-nostdin','-loglevel','error','-i',str(src),'-vn','-ac','1','-ar','16000','-af','dynaudnorm=f=250:g=15','-c:a','libopus','-b:a','32k',str(p),stderr=asyncio.subprocess.DEVNULL)
-        if await proc.wait()!=0: return await m.reply('FFmpeg: помилка нормалізації.')
+        try:
+            code=await asyncio.wait_for(proc.wait(),30)
+        except (asyncio.TimeoutError,asyncio.CancelledError):
+            if proc.returncode is None: proc.kill(); await proc.wait()
+            raise
+        if code!=0: return await m.reply('FFmpeg: помилка нормалізації.')
         async def job(i):
             nonlocal peak,active
             async with slots:
@@ -555,7 +570,7 @@ async def run_audio_load(m,config):
                         active_providers.add(k)
                         try:
                             usage(k,seconds=item.duration,attempt=1)
-                            await transcribe(k,p)
+                            await asyncio.wait_for(transcribe(k,p),30)
                             usage(k,success=1)
                             winner=NAMES[k]
                             overview_add(m,voices=int(bool(m.voice)),circles=int(bool(m.video_note)))
@@ -574,8 +589,26 @@ async def run_audio_load(m,config):
                 finally:
                     active-=1
         start=time.monotonic()
-        results=await asyncio.gather(*(job(i) for i in range(config['count'])))
-    await d1_snapshot(history_session)
+        tasks=[asyncio.create_task(job(i)) for i in range(config['count'])]
+        pending=set(tasks)
+        cancelled=False
+        try:
+            while pending and time.monotonic()-start<180:
+                done,pending=await asyncio.wait(pending,timeout=min(5,max(0,180-(time.monotonic()-start))))
+                for t in done:
+                    try: results.append(t.result())
+                    except Exception as e: results.append(('',type(e).__name__))
+                try: await progress.edit_text(f'⏳ FadeHost: {len(results)}/{config["count"]}; активні: {active}; час: {time.monotonic()-start:.0f} с',reply_markup=progress.reply_markup)
+                except Exception: pass
+        except asyncio.CancelledError:
+            cancelled=True
+        finally:
+            for t in pending: t.cancel()
+            await asyncio.gather(*pending,return_exceptions=True)
+        for t in pending:
+            results.append(('',f'#{tasks.index(t)+1}: '+('Скасовано' if cancelled else 'Загальний таймаут')))
+    try: await progress.edit_text('Тест скасовано.' if cancelled else 'Тест завершено.')
+    except Exception: pass
     ok=sum(bool(x[0]) for x in results)
     chunk=f"FadeHost: {ok}/{len(results)} успішно; пік обробників {peak}; час {time.monotonic()-start:.2f} с\n"
     for _,line in results:
@@ -584,12 +617,17 @@ async def run_audio_load(m,config):
             chunk=''
         chunk+=line+'\n'
     if chunk: await m.answer(chunk,parse_mode=None)
+    try: await asyncio.wait_for(d1_snapshot(history_session),30)
+    except Exception as e: logging.warning('Audio test snapshot: %s',type(e).__name__)
 
 async def load_action(c):
     global load_task,audio_load_wait,load_count_wait
     if not testing_enabled(): return
     parts=c.data.split(':')
     action=parts[2] if len(parts)>2 else ''
+    if action=='cancel':
+        if load_task and not load_task.done(): load_task.cancel()
+        return await c.message.answer('Запит на скасування тесту надіслано.')
     if action=='kind':
         load_config['kind']='audio' if load_config['kind']=='text' else 'text'
         load_config['routes'].clear()
