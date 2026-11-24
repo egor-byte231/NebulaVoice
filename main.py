@@ -131,6 +131,27 @@ WELCOME = """🇺🇦 Привіт! Я NebulaVoice — український б
 Просто надсилайте голосові або кружечки, а решту я зроблю сам!
 
 Для розпізнавання аудіо передається зовнішнім ШІ-сервісам.</blockquote>"""
+@dp.message(Command('help'))
+async def help_command(m:Message):
+    lines=['📚 Допомога NebulaVoice','',
+           '/start — інформація про бота',
+           '/help — список команд',
+           '/limit — використані та доступні токени',
+           '/ai_stats — статистика ШІ (у групі для адмінів)',
+           '/premium — Premium на 30 днів',
+           '/paysupport — підтримка платежів у ЛС','',
+           '🎙 Надішли голосове або кружечок для транскрипції.',
+           '🤖 У ЛС просто напиши запит. У групі згадай @Nebulavcbot або відповідай на повідомлення бота.',
+           'Історія до 50 повідомлень передається зовнішньому ШІ лише за потреби.',
+           'Free: 10 000 токенів у ЛС / 40 000 у групі на добу.',
+           'Premium: 40 000 у ЛС / 100 000 у групі на добу.',
+           'Скидання лімітів о 00:00 UTC.']
+    if m.chat.type in ('group','supergroup'):
+        lines.extend(['','Команди адміністраторів:','/ai_on — увімкнути ШІ','/ai_off — вимкнути ШІ та очистити історію'])
+    if m.chat.type=='private' and m.from_user and m.from_user.id==OWNER:
+        lines.extend(['','Команди власника:','/ai_status — статистика провайдерів','/ai_diagnose — діагностика Routeway та Airforce'])
+    await m.reply('\n'.join(lines),parse_mode=None)
+
 @dp.message(Command('start'))
 async def start(m:Message):
     await m.answer(WELCOME,parse_mode='HTML')
