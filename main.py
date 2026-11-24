@@ -507,11 +507,10 @@ TEXT_ROUTES=[
  ('Groq 1 20B','GROQ_API_KEY_1','https://api.groq.com/openai/v1/chat/completions','openai/gpt-oss-20b'),
  ('OpenRouter','OPENROUTER_API_KEY','https://openrouter.ai/api/v1/chat/completions','openrouter/free'),
  ('Requesty','REQUESTY_API_KEY','https://router.requesty.ai/v1/chat/completions',''),
- ('SambaNova','SAMBANOVA_API_KEY','https://api.sambanova.ai/v1/chat/completions',''),
  ('Routeway','ROUTEWAY_API_KEY','',''),
  ('Airforce','AIRFORCE_API_KEY','',''),
  ('DreamPrompting','DREAMPROMPTING_API_KEY','',''),
- ('xKiro','XKIRO_API_KEY','',''),
+ ('xKiro','XKIRO_API_KEY','https://api.xkiro.com/v1/chat/completions',''),
 ]
 db.execute('CREATE TABLE IF NOT EXISTS text_usage (day TEXT, route TEXT, tokens INTEGER, attempts INTEGER, PRIMARY KEY(day,route))')
 db.commit()
@@ -533,7 +532,9 @@ async def text_status(m:Message):
     lines=['🤖 Закритий тест текстового ШІ',f'Локальний облік: {text_used()} / 30000 токенів (UTC)']
     for route in TEXT_ROUTES:
         key,url,model=text_config(route)
-        lines.append(route[0]+': '+('налаштовано' if key and url and model else 'очікує налаштування'))
+        row=db.execute('SELECT tokens, attempts FROM text_usage WHERE day=? AND route=?',(text_day(),route[0])).fetchone() or (0,0)
+        state='очікує налаштування' if not (key and url and model) else ('пауза' if blocked('text:'+route[0])>time.time() else 'налаштовано')
+        lines.append(f'{route[0]}: {state} | {row[0]} ток. | {row[1]} спроб')
     await m.answer('\n'.join(lines))
 @dp.message(Command('ai','ai_history'),F.chat.type=='private',F.from_user.id==OWNER)
 async def text_question(m:Message):
@@ -577,7 +578,7 @@ async def text_question(m:Message):
                 continue
             text_history.extend(['Власник: '+question[:2000],'ШІ: '+answer[:2000]])
             del text_history[:-100]
-            return await m.answer(answer[:4000])
+            return await m.answer(answer[:3700]+'\n\n'+'Модель: '+name,parse_mode=None)
         await m.answer('Текстовий ШІ тимчасово недоступний.')
 
 async def main():
