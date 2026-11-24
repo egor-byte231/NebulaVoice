@@ -234,6 +234,11 @@ active_jobs={}
 DISABLED='⚠️ Транскрипцію тимчасово вимкнено.'
 def owner_menu():
     return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='⏸ Вимкнути' if enabled() else '▶️ Увімкнути',callback_data='owner:toggle')],[InlineKeyboardButton(text='📊 Статистика',callback_data='owner:stats')]])
+async def notify_error(where,error):
+    try:
+        await bot.send_message(OWNER,f'⚠️ Помилка NebulaVoice\n\nЕтап: {where}\nТип: {type(error).__name__}\n'+(str(error)[:120] if isinstance(error,ValueError) and str(error).startswith('API HTTP ') else 'Деталі безпечного журналу: '+type(error).__name__))
+    except Exception as e:
+        logging.warning('Owner error notification failed: %s',type(e).__name__)
 async def mark_disabled(status):
     try: await status.edit_text(DISABLED)
     except Exception: pass
@@ -302,6 +307,7 @@ async def process_voice(m,status):
                 except Exception as e:
                     logging.warning('Provider %s failed: %s',k,type(e).__name__)
                     block(k,60)
+                    await notify_error(NAMES[k],e)
                     continue
                 finally:
                     active_providers.discard(k)
@@ -314,13 +320,14 @@ async def process_voice(m,status):
                 await disable('Усі сім API-профілів одночасно повернули HTTP 429; це може бути тимчасовий ліміт, не обов’язково добовий.')
                 return await mark_disabled(status)
             if not notified:
-                await status.edit_text('⏳ API тимчасово недоступні. Очікую поновлення лімітів.')
+                await mark_disabled(status)
                 notified=True
             # Avoid repeated edits of identical Telegram messages.
             delay=max(1,min(300,min((blocked(k) for k in order if blocked(k)>time.time()),default=time.time()+60)-time.time()))
             await asyncio.sleep(min(delay,1) if active_providers else delay)
         if not enabled(): return await mark_disabled(status)
-        await status.edit_text('❌ Не вдалося транскрибувати протягом 24 годин.')
+        await notify_error('Черга: 24 години очікування',TimeoutError())
+        await mark_disabled(status)
 async def worker():
     while True:
         m,status=await waiting.get()
@@ -337,8 +344,8 @@ async def worker():
             finally: active_jobs.pop(job,None)
         except Exception as e:
             logging.warning('Job failed: %s',type(e).__name__)
-            try: await status.edit_text('❌ Не вдалося обробити аудіо.')
-            except Exception: pass
+            await notify_error('Обробка аудіо',e)
+            await mark_disabled(status)
         finally: waiting.task_done()
 async def main():
     tasks=[asyncio.create_task(worker()) for _ in range(4)]
