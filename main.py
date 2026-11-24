@@ -1,4 +1,4 @@
-import re, os, asyncio, time, tempfile, logging, base64, json, sqlite3
+import wave, re, os, asyncio, time, tempfile, logging, base64, json, sqlite3
 from pathlib import Path
 import aiohttp
 from aiogram import Bot, Dispatcher, F
@@ -7,8 +7,8 @@ from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKe
 from dotenv import load_dotenv
 load_dotenv()
 logging.basicConfig(level=logging.INFO)
-MODELS={'groq1':('groq',1,'whisper-large-v3'),'groq1t':('groq',1,'whisper-large-v3-turbo'),'groq2':('groq',2,'whisper-large-v3'),'groq2t':('groq',2,'whisper-large-v3-turbo'),'cf1':('cf',1,'@cf/openai/whisper-large-v3-turbo'),'cf2':('cf',2,'@cf/openai/whisper-large-v3-turbo'),'gemini':('gemini',1,os.getenv('GEMINI_MODEL','gemini-2.5-flash'))}
-NAMES={k:f"{ {'groq':'Groq','cf':'Cloudflare','gemini':'Gemini'}[p]} #{n} • {model.split('/')[-1]}" for k,(p,n,model) in MODELS.items()}
+MODELS={'groq1':('groq',1,'whisper-large-v3'),'groq1t':('groq',1,'whisper-large-v3-turbo'),'groq2':('groq',2,'whisper-large-v3'),'groq2t':('groq',2,'whisper-large-v3-turbo'),'cf1':('cf',1,'@cf/openai/whisper-large-v3-turbo'),'cf2':('cf',2,'@cf/openai/whisper-large-v3-turbo'),'ovh':('ovh',1,'solaria-3')}
+NAMES={k:f"{ {'groq':'Groq','cf':'Cloudflare','gemini':'Gemini','ovh':'OVHcloud Gladia'}[p]} #{n} • {model.split('/')[-1]}" for k,(p,n,model) in MODELS.items()}
 OWNER=int(os.environ['OWNER_ID']); bot=Bot(os.environ['BOT_TOKEN']); dp=Dispatcher(); lock=asyncio.Lock()
 db=sqlite3.connect('state.db'); db.execute('CREATE TABLE IF NOT EXISTS settings (chat INTEGER PRIMARY KEY, provider TEXT)'); db.commit()
 def get(chat):
@@ -53,11 +53,45 @@ async def request(s,url,headers,**kw):
         return await r.json(content_type=None)
 ASR_PROMPT = "Дослівна розмовна транскрипція: українська, русский язык, суржик, сленг, матюки. Без перекладу, цензури, виправлення граматики чи вигаданих слів. Зберігати перемикання мов."
 GEMINI_PROMPT = "Transcribe verbatim in the original spoken languages. Preserve Ukrainian, Russian, Surzhyk, code-switching, slang, profanity and grammatical mistakes. Do not translate, censor, normalize or invent words. Return only the transcript."
+async def ovh_transcribe(s,path):
+    pcm=path.with_name('ovh.wav')
+    proc=await asyncio.create_subprocess_exec('ffmpeg','-nostdin','-loglevel','error','-i',str(path),'-ar','16000','-ac','1','-c:a','pcm_s16le',str(pcm),stderr=asyncio.subprocess.DEVNULL)
+    if await proc.wait()!=0: raise ValueError('Не вдалося конвертувати аудіо для OVH')
+    with wave.open(str(pcm),'rb') as audio:
+        if audio.getnframes()>45*16000: raise ValueError('OVH: максимум 45 секунд')
+        session=await request(s,'https://oai.endpoints.kepler.ai.cloud.ovh.net/gladia/v2/live?region=eu-west',{},json={'model':'solaria-3','encoding':'wav/pcm','sample_rate':16000,'bit_depth':16,'channels':1,'messages_config':{'receive_final_transcripts':True}})
+        url=session['url']
+        if not url.startswith('wss://'): raise ValueError('OVH: некоректна адреса сесії')
+        finals=[]
+        async with s.ws_connect(url) as ws:
+            async def send():
+                while chunk:=audio.readframes(1600):
+                    await ws.send_bytes(chunk)
+                    await asyncio.sleep(len(chunk)/32000)
+                await ws.send_json({'type':'stop_recording'})
+            async def receive():
+                async for msg in ws:
+                    if msg.type==aiohttp.WSMsgType.TEXT:
+                        event=json.loads(msg.data)
+                        data=event.get('data') or {}
+                        if event.get('type')=='transcript' and data.get('is_final'):
+                            finals.append(data.get('utterance',{}).get('text',''))
+                        if event.get('type')=='error': raise ValueError('OVH: помилка live-сесії')
+                    elif msg.type==aiohttp.WSMsgType.ERROR: raise ValueError('OVH: помилка WebSocket')
+            tasks=[asyncio.create_task(send()),asyncio.create_task(receive())]
+            try:
+                await asyncio.wait_for(asyncio.gather(*tasks),timeout=100)
+            finally:
+                for task in tasks: task.cancel()
+                await asyncio.gather(*tasks,return_exceptions=True)
+        return {'text':' '.join(finals)}
 async def transcribe(k,path):
     provider,n,model=MODELS[k]
     data=path.read_bytes()
     async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=120)) as s:
-        if provider=='groq':
+        if provider=='ovh':
+            j=await ovh_transcribe(s,path)
+        elif provider=='groq':
             f=aiohttp.FormData(); f.add_field('file',data,filename=path.name,content_type='audio/ogg' if path.suffix=='.ogg' else 'audio/wav'); f.add_field('model',model); f.add_field('temperature','0'); f.add_field('prompt',ASR_PROMPT)
             j=await request(s,'https://api.groq.com/openai/v1/audio/transcriptions',{'Authorization':'Bearer '+need(f'GROQ_API_KEY_{n}')},data=f)
         elif provider=='cf':
@@ -98,6 +132,7 @@ async def process_voice(m:Message,status:Message):
     k=get(m.chat.id)
     if k not in NAMES: return
     item=m.voice or m.video_note
+    if k=='ovh' and item.duration>45: return await status.edit_text('OVHcloud: максимум 45 секунд. Вибери іншу модель.',reply_markup=None)
     if (item.file_size or 0)>10*1024*1024: return await m.reply('Файл завеликий для тестової версії (10 МБ).')
     if lock.locked(): return await m.reply('Попередній тест ще триває. Повтори пізніше.')
     async with lock:
