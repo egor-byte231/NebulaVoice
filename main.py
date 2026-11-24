@@ -527,6 +527,16 @@ async def safe_audio_load(m,config):
         await m.reply('Тест перервано: '+type(e).__name__)
 
 async def run_audio_load(m,config):
+    progress=await m.reply('FadeHost: підготовка аудіо...',reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='Скасувати тест',callback_data='owner:load:cancel')]]))
+    try:
+        await asyncio.wait_for(audio_load_inner(m,config,progress),timeout=195)
+    except asyncio.CancelledError:
+        await progress.edit_text('Тест скасовано.')
+        raise
+    except Exception as e:
+        await progress.edit_text('Тест перервано: '+type(e).__name__)
+
+async def audio_load_inner(m,config,progress):
     try:
         await asyncio.wait_for(run_audio_load_inner(m,config),210)
     except asyncio.TimeoutError:
@@ -630,6 +640,9 @@ async def run_audio_load_inner(m,config):
             chunk=''
         chunk+=line+'\n'
     if chunk: await m.answer(chunk,parse_mode=None)
+    await progress.edit_text(f'Тест завершено: {ok}/{len(results)} успішно.')
+    try: await asyncio.wait_for(d1_snapshot(history_session),10)
+    except Exception: logging.warning('Audio test snapshot failed')
     try: await asyncio.wait_for(d1_snapshot(history_session),10)
     except Exception as e: logging.warning('Audio test snapshot: %s',type(e).__name__)
 
@@ -641,6 +654,9 @@ async def load_action(c):
     if action=='cancel':
         if load_task and not load_task.done(): load_task.cancel()
         return await c.message.answer('Запит на скасування тесту надіслано.')
+    if action=='cancel':
+        if load_task and not load_task.done(): load_task.cancel()
+        return
     if action=='kind':
         load_config['kind']='audio' if load_config['kind']=='text' else 'text'
         load_config['routes'].clear()
