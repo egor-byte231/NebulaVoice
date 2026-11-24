@@ -304,7 +304,7 @@ async def deliver_transcript(m,status,result):
     chunks=[result[i:i+3700] for i in range(0,len(result),3700)]
     for i,chunk in enumerate(chunks):
         body='<blockquote expandable>'+html.escape(chunk)+'</blockquote>'
-        if i==len(chunks)-1 and development_enabled(): body+='\n\n<i>'+DISCLAIMER+'</i>'
+        if i==len(chunks)-1 and development_enabled(): body+='\n\n<blockquote>'+html.escape(DISCLAIMER)+'</blockquote>'
         if i==0: await status.edit_text(body,parse_mode='HTML')
         else: await m.reply(body,parse_mode='HTML')
 async def transcribe(k,path):
@@ -747,11 +747,11 @@ async def generate_text(m,question,context='',group=False,history_context=''):
             answer='Недостатньо інформації в історії розмови.'
         if group:
             if not group_enabled(chat): return
-            await m.reply(answer[:3700]+('\n\n'+DISCLAIMER if development_enabled() else ''),parse_mode=None)
+            await m.reply(html.escape(answer[:3700])+('\n\n<blockquote>'+html.escape(DISCLAIMER)+'</blockquote>' if development_enabled() else ''),parse_mode='HTML')
             remember_group(chat,'ШІ: '+answer[:1000])
         else:
             remember_group(chat,'ШІ: '+answer[:1000])
-            await m.reply(answer[:3700]+('\n\n'+DISCLAIMER if development_enabled() else ''),parse_mode=None)
+            await m.reply(html.escape(answer[:3700])+('\n\n<blockquote>'+html.escape(DISCLAIMER)+'</blockquote>' if development_enabled() else ''),parse_mode='HTML')
         return
     await m.reply('Текстовий ШІ тимчасово недоступний.')
 @dp.message(Command('premium'),F.chat.type.in_({'group','supergroup','private'}))
