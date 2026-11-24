@@ -18,6 +18,7 @@ db.execute('INSERT OR IGNORE INTO control VALUES (1,1)')
 db.execute('CREATE TABLE IF NOT EXISTS usage_daily (day TEXT, provider TEXT, attempts INTEGER, seconds INTEGER, successes INTEGER, limited INTEGER, PRIMARY KEY(day,provider))')
 db.execute('CREATE TABLE IF NOT EXISTS quota_headers (provider TEXT PRIMARY KEY, info TEXT)')
 db.execute('CREATE TABLE IF NOT EXISTS ovh_requests (at REAL)')
+db.execute('CREATE TABLE IF NOT EXISTS quota_alerts (period TEXT, provider TEXT, threshold INTEGER, PRIMARY KEY(period,provider,threshold))')
 db.commit()
 def enabled():
     return bool(db.execute('SELECT enabled FROM control WHERE id=1').fetchone()[0])
@@ -25,6 +26,46 @@ def usage(k,seconds=0,attempt=0,success=0,limited=0):
     day=datetime.datetime.now(datetime.timezone.utc).date().isoformat()
     db.execute('INSERT INTO usage_daily VALUES (?,?,?,?,?,?) ON CONFLICT(day,provider) DO UPDATE SET attempts=attempts+excluded.attempts, seconds=seconds+excluded.seconds, successes=successes+excluded.successes, limited=limited+excluded.limited',(day,k,attempt,seconds,success,limited))
     db.commit()
+async def quota_alert(k,rate_error=False):
+    day=datetime.datetime.now(datetime.timezone.utc).date().isoformat()
+    row=db.execute('SELECT seconds FROM usage_daily WHERE day=? AND provider=?',(day,k)).fetchone()
+    seconds=row[0] if row else 0
+    period=day
+    if k=='ovh':
+        recent=db.execute('SELECT at FROM ovh_requests WHERE at>? ORDER BY at',(time.time()-60,)).fetchall()
+        if not recent: return
+        period='ovh:'+str(int(recent[0][0]))
+        used=len(recent)
+        limit=2
+        unit='запитів за 60 с'
+    elif k.startswith('groq'):
+        used=seconds
+        limit=28800
+        unit='с аудіо за добу'
+    else:
+        used=seconds*46.63/60
+        limit=10000
+        unit='neurons за добу'
+    left=max(0,limit-used)
+    percent=100*left/limit
+    thresholds=[t for t in (0,5,20,50) if percent<=t]
+    if rate_error:
+        period=day+':429'
+        thresholds=[-1]
+    if not thresholds: return
+    threshold=thresholds[0]
+    if db.execute('SELECT 1 FROM quota_alerts WHERE period=? AND provider=? AND threshold=?',(period,k,threshold)).fetchone(): return
+    for t in thresholds:
+        db.execute('INSERT OR IGNORE INTO quota_alerts VALUES (?,?,?)',(period,k,t))
+    db.commit()
+    title='🚨 API відхилив запит через ліміт (HTTP 429)' if rate_error else {50:'🟡 Залишилось 50% або менше',20:'🟠 Залишилось 20% або менше',5:'🔴 Залишилось 5% або менше',0:'🚨 Розрахунковий ліміт вичерпано'}[threshold]
+    msg=f'{title}\n\n{NAMES[k]}\n\nЛіміт використано: ≈ {used:g} / {limit:g} {unit}\nЗалишилось: ≈ {left:g} {unit} ({percent:.1f}%)\n\nЛокальна оцінка, не офіційний баланс API.'
+    if rate_error: msg+='\nAPI обмежив запити; це не обов’язково означає вичерпання добової квоти.'
+    try: await bot.send_message(OWNER,msg)
+    except Exception as e:
+        db.executemany('DELETE FROM quota_alerts WHERE period=? AND provider=? AND threshold=?',[(period,k,t) for t in thresholds])
+        db.commit()
+        logging.warning('Quota alert failed: %s',type(e).__name__)
 def report():
     day=datetime.datetime.now(datetime.timezone.utc).date().isoformat()
     rows={r[0]:r[1:] for r in db.execute('SELECT provider,attempts,seconds,successes,limited FROM usage_daily WHERE day=?',(day,))}
@@ -132,6 +173,7 @@ async def ovh_transcribe(s,path):
         db.execute('DELETE FROM ovh_requests WHERE at<=?',(time.time()-60,))
         db.execute('INSERT INTO ovh_requests VALUES (?)',(time.time(),))
         db.commit()
+        await quota_alert('ovh')
         session=await request(s,'https://oai.endpoints.kepler.ai.cloud.ovh.net/gladia/v2/live?region=eu-west',{},json={'model':'solaria-3','encoding':'wav/pcm','sample_rate':16000,'bit_depth':16,'channels':1,'messages_config':{'receive_final_transcripts':True}})
         url=session['url']
         if not url.startswith('wss://'): raise ValueError('OVH: некоректна адреса сесії')
@@ -247,6 +289,7 @@ async def process_voice(m,status):
                 active_providers.add(k)
                 usage(k,seconds=item.duration,attempt=1)
                 try:
+                    if k!='ovh': await quota_alert(k)
                     result=await transcribe(k,p)
                 except RateLimited as e:
                     block(k,e.seconds)
@@ -254,6 +297,7 @@ async def process_voice(m,status):
                     usage(k,limited=1)
                     db.execute('INSERT OR REPLACE INTO quota_headers VALUES (?,?)',(k,e.info or 'API не повідомив залишок'))
                     db.commit()
+                    await quota_alert(k,rate_error=True)
                     continue
                 except Exception as e:
                     logging.warning('Provider %s failed: %s',k,type(e).__name__)
