@@ -615,7 +615,7 @@ async def load_action(c):
         if 'message is not modified' not in str(e).lower(): raise
 
 def owner_menu():
-    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='⏸ Вимкнути' if enabled() else '▶️ Увімкнути',callback_data='owner:toggle')],[InlineKeyboardButton(text='📊 Статистика',callback_data='owner:stats')],[InlineKeyboardButton(text='🤖 Статистика ШІ',callback_data='owner:ai')],[InlineKeyboardButton(text='📈 Загальна статистика',callback_data='owner:overview')],[InlineKeyboardButton(text='🟢 Режим розробки: ON' if development_enabled() else '🔴 Режим розробки: OFF',callback_data='owner:development')],[InlineKeyboardButton(text='🧪 Режим тестування: ON' if testing_enabled() else '🧪 Режим тестування: OFF',callback_data='owner:testing')],[InlineKeyboardButton(text='🔄 Обнулити мій ліміт',callback_data='owner:reset_limit')]]+([[InlineKeyboardButton(text='🎙 Тест аудіо',callback_data='owner:testmenu:audio')],[InlineKeyboardButton(text='💬 Тест тексту',callback_data='owner:testmenu:text')],[InlineKeyboardButton(text='⚡ Тест навантаження',callback_data='owner:load')]] if testing_enabled() else []))
+    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='⏸ Вимкнути' if enabled() else '▶️ Увімкнути',callback_data='owner:toggle')],[InlineKeyboardButton(text='📊 Статистика',callback_data='owner:stats')],[InlineKeyboardButton(text='🤖 Статистика ШІ',callback_data='owner:ai')],[InlineKeyboardButton(text='⚙️ Кількість слотів ШІ',callback_data='owner:slots')],[InlineKeyboardButton(text='📈 Загальна статистика',callback_data='owner:overview')],[InlineKeyboardButton(text='🟢 Режим розробки: ON' if development_enabled() else '🔴 Режим розробки: OFF',callback_data='owner:development')],[InlineKeyboardButton(text='🧪 Режим тестування: ON' if testing_enabled() else '🧪 Режим тестування: OFF',callback_data='owner:testing')],[InlineKeyboardButton(text='🔄 Обнулити мій ліміт',callback_data='owner:reset_limit')]]+([[InlineKeyboardButton(text='🎙 Тест аудіо',callback_data='owner:testmenu:audio')],[InlineKeyboardButton(text='💬 Тест тексту',callback_data='owner:testmenu:text')],[InlineKeyboardButton(text='⚡ Тест навантаження',callback_data='owner:load')]] if testing_enabled() else []))
 error_alert_times={}
 async def notify_error(where,error):
     raw=str(error)
@@ -658,11 +658,35 @@ async def disable(reason):
     for status in queued: await mark_disabled(status)
     try: await bot.send_message(OWNER,'🔴 <b>Транскрипцію вимкнено</b>\nПричина: '+html.escape(reason)+f'\nВидалено з черги: {len(queued)}; скасовано активних: {len(jobs)}.\n\n'+report(),parse_mode='HTML',reply_markup=stats_menu())
     except Exception as e: logging.warning('Owner notification failed: %s',type(e).__name__)
+async def slots_action(c):
+    payload={}
+    if c.data.startswith('owner:slots:'):
+        raw=c.data.rsplit(':',1)[-1]
+        if not raw.isdigit() or not 1<=int(raw)<=50: return
+        payload={'slots':int(raw)}
+    try:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session:
+            async with session.post('https://nebulavoice-ai.maxvyn09.workers.dev/slots',json=payload,headers={'Authorization':'Bearer '+os.environ['WORKER_SECRET']},allow_redirects=False) as response:
+                response.raise_for_status()
+                n=(await response.json())['slots']
+                if type(n) is not int or not 1<=n<=50: raise ValueError('Invalid slots')
+    except Exception:
+        return await c.message.edit_text('Не вдалося отримати або змінити слоти Cloudflare. Спробуй ще раз після деплою.',reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='🔄 Повторити',callback_data='owner:slots')],[InlineKeyboardButton(text='Назад',callback_data='owner:back')]]))
+    rows=[]
+    for start in range(1,51,5):
+        rows.append([InlineKeyboardButton(text=('✓ ' if i==n else '')+str(i),callback_data='owner:slots:'+str(i)) for i in range(start,start+5)])
+    rows.append([InlineKeyboardButton(text='Назад',callback_data='owner:back')])
+    try:
+        await c.message.edit_text(f'⚙️ Кількість слотів текстового ШІ: {n}\nОбери новий ліміт. Активні завдання не перериваються.',reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+    except Exception as e:
+        if 'message is not modified' not in str(e).lower(): raise
+
 @dp.callback_query(F.data.startswith('owner:'))
 async def owner_action(c:CallbackQuery):
     if c.from_user.id!=OWNER or not isinstance(c.message,Message) or c.message.chat.type!='private':
         return await c.answer('Тільки власник',show_alert=True)
     await c.answer()
+    if c.data=='owner:slots' or c.data.startswith('owner:slots:'): return await slots_action(c)
     if c.data=='owner:overview':
         return await c.message.edit_text('📈 Загальна статистика — обери розділ',reply_markup=overview_menu())
     if c.data.startswith('owner:overview:'):
