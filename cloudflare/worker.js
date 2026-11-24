@@ -6,6 +6,8 @@ export default {
   if(req.method!=="POST"||!env.WORKER_SECRET||req.headers.get("Authorization")!=="Bearer "+env.WORKER_SECRET) return new Response("Unauthorized",{status:401});
   if(!env.BOT_TOKEN) return new Response("Not configured",{status:503});
   const j=await req.json();
+  if(new URL(req.url).pathname==="/audio/transcribe") return audioTranscribe(j,env);
+
   if(new URL(req.url).pathname==="/slots"){
    if(j.slots!==undefined&&(!Number.isInteger(j.slots)||j.slots<1||j.slots>50))return new Response("Invalid slots",{status:400});
    return env.DISPATCHER.get(env.DISPATCHER.idFromName("global")).fetch("https://dispatcher/slots",{method:"POST",body:JSON.stringify(j)});
@@ -214,4 +216,23 @@ async function generate(j,env){
   context=history;
  }
  return finish("Текстовий ШІ тимчасово недоступний.");
+}
+
+async function audioTranscribe(j,env){
+ const routes={groq1:["GROQ_API_KEY_1","whisper-large-v3"],groq1t:["GROQ_API_KEY_1","whisper-large-v3-turbo"],groq2:["GROQ_API_KEY_2","whisper-large-v3"],groq2t:["GROQ_API_KEY_2","whisper-large-v3-turbo"],cf1:["CF_API_TOKEN_1","CF_ACCOUNT_ID_1"],cf2:["CF_API_TOKEN_2","CF_ACCOUNT_ID_2"]};
+ if(typeof j.audio!=="string"||j.audio.length>15000000||!Object.hasOwn(routes,j.route))return Response.json({error:"Invalid audio route or payload"},{status:400});
+ const [key,model]=routes[j.route];
+ if(!env[key]|| (j.route.startsWith("cf")&&!env[model]))return Response.json({error:"ProviderNotConfigured"},{status:422});
+ try{
+ let r;
+ if(j.route.startsWith("groq")){
+ const bytes=Uint8Array.from(atob(j.audio),c=>c.charCodeAt(0));
+ const f=new FormData();f.append("file",new Blob([bytes],{type:"audio/ogg"}),"audio.ogg");f.append("model",model);f.append("temperature","0");f.append("response_format","verbose_json");
+ r=await fetch("https://api.groq.com/openai/v1/audio/transcriptions",{method:"POST",headers:{Authorization:"Bearer "+env[key]},body:f,signal:AbortSignal.timeout(30000)});
+ }else{
+ r=await fetch("https://api.cloudflare.com/client/v4/accounts/"+env[model]+"/ai/run/@cf/openai/whisper-large-v3-turbo",{method:"POST",headers:{Authorization:"Bearer "+env[key],"Content-Type":"application/json"},body:JSON.stringify({audio:j.audio,task:"transcribe",condition_on_previous_text:false,vad_filter:true}),signal:AbortSignal.timeout(30000)});
+ }
+ if(!r.ok)return Response.json({error:"ProviderHTTP",providerStatus:r.status,retryAfter:r.headers.get("Retry-After")},{status:422});
+ const data=await r.json();return Response.json({result:j.route.startsWith("cf")?data.result:data});
+ }catch(e){return Response.json({error:"ProviderFailure"},{status:422});}
 }
