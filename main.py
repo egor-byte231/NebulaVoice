@@ -277,7 +277,14 @@ GEMINI_PROMPT = "Transcribe verbatim in the original spoken languages. Preserve 
 async def ovh_transcribe(s,path):
     pcm=path.with_name('ovh.wav')
     proc=await asyncio.create_subprocess_exec('ffmpeg','-nostdin','-loglevel','error','-i',str(path),'-ar','16000','-ac','1','-c:a','pcm_s16le',str(pcm),stderr=asyncio.subprocess.DEVNULL)
-    if await proc.wait()!=0: raise ValueError('Не вдалося конвертувати аудіо для OVH')
+    try:
+        code=await asyncio.wait_for(proc.wait(),15)
+    except (asyncio.TimeoutError,asyncio.CancelledError):
+        if proc.returncode is None:
+            proc.kill()
+            await proc.wait()
+        raise
+    if code!=0: raise ValueError('Не вдалося конвертувати аудіо для OVH')
     with wave.open(str(pcm),'rb') as audio:
         if audio.getnframes()>15*16000: raise ValueError('OVH: максимум 15 секунд')
         block('ovh',31)
@@ -541,7 +548,7 @@ async def run_audio_load_inner(m,config,progress):
     item=m.voice or m.video_note
     routes=config['routes'] if config['mode']=='selected' else list(ORDER)
     if item.duration>15: routes=[k for k in routes if k!='ovh']
-    if not routes: return await m.reply('Немає сумісних моделей.')
+    if not routes: return await progress.edit_text('Немає сумісних моделей.',reply_markup=None)
     if (item.file_size or 0)>10*1024*1024: return await m.reply('Файл завеликий.')
     start=time.monotonic()
     deadline=start+180
@@ -559,7 +566,7 @@ async def run_audio_load_inner(m,config,progress):
         except (asyncio.TimeoutError,asyncio.CancelledError):
             if proc.returncode is None: proc.kill(); await proc.wait()
             raise
-        if code!=0: return await m.reply('FFmpeg: помилка нормалізації.')
+        if code!=0: return await progress.edit_text('FFmpeg: помилка нормалізації.',reply_markup=None)
         async def job(i):
             nonlocal peak,active
             async with slots:
@@ -604,7 +611,7 @@ async def run_audio_load_inner(m,config,progress):
         cancelled=False
         try:
             while pending and time.monotonic()<deadline:
-                done,pending=await asyncio.wait(pending,timeout=min(5,max(0,deadline-time.monotonic())),return_when=asyncio.FIRST_COMPLETED)
+                done,pending=await asyncio.wait(pending,timeout=min(5,max(0,deadline-time.monotonic())),return_when=asyncio.ALL_COMPLETED)
                 for t in done:
                     try: results.append(t.result())
                     except Exception as e: results.append(('',type(e).__name__))
