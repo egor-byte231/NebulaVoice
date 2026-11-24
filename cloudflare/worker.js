@@ -21,7 +21,7 @@ export default {
  async queue(batch,env){
   await Promise.all(batch.messages.map(async msg=>{
    const j=msg.body;
-   try{await processJob(j,env);msg.ack();}catch{msg.retry();}
+   try{const response=await dispatch(env,[j]);if(!response.ok)throw Error('Dispatcher rejected job');msg.ack();}catch{msg.retry();}
   }));
  }
 };
@@ -43,7 +43,7 @@ async function processJob(j,env){
       resultRow=await env.db.prepare("SELECT answer,tokens,routes FROM worker_results_v2 WHERE id=?").bind(id).first();
     }
     let answer=resultRow.answer;
-    const r=await fetch("https://api.telegram.org/bot"+env.BOT_TOKEN+"/editMessageText",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({chat_id:j.chat,message_id:j.message,text:answer.slice(0,3700)+(j.development?"\n\nБот перебуває на стадії розробки. Можливі помилки, перепрошуємо.":"")})});
+    const r=await fetch("https://api.telegram.org/bot"+env.BOT_TOKEN+"/editMessageText",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({chat_id:j.chat,message_id:j.message,text:answer.slice(0,3700)+(j.development?"\n\nБот перебуває на стадії розробки. Можливі помилки, перепрошуємо.":"")}),signal:AbortSignal.timeout(15000)});
     const result=await r.json();
     if(!result.ok&&!String(result.description).includes("message is not modified")) throw Error("Telegram edit failed");
 
@@ -55,7 +55,7 @@ async function dispatch(env,jobs){
 }
 export class Dispatcher {
  constructor(ctx,env){
-  this.ctx=ctx;this.env=env;this.active=new Set();
+  this.ctx=ctx;this.env=env;this.active=new Set();this.draining=false;
   this.sql=ctx.storage.sql;
   this.sql.exec("CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, payload TEXT NOT NULL, queued INTEGER NOT NULL, tries INTEGER NOT NULL DEFAULT 0, state TEXT NOT NULL DEFAULT 'pending')");
   this.sql.exec("UPDATE jobs SET state='pending' WHERE state='running'");
@@ -72,6 +72,9 @@ export class Dispatcher {
   return Response.json({accepted:jobs.length},{status:202});
  }
  async alarm(){
+  if(this.draining){await this.ctx.storage.setAlarm(Date.now()+1000);return;}
+  this.draining=true;
+  try{
   await this.ctx.storage.setAlarm(Date.now()+30000);
   const running=new Set();
   const launch=()=>{
@@ -87,6 +90,8 @@ export class Dispatcher {
   launch();
   while(running.size){await Promise.race(running);launch();}
   if(this.sql.exec("SELECT id FROM jobs WHERE state='pending' LIMIT 1").toArray().length)await this.ctx.storage.setAlarm(Date.now()+1);
+  else await this.ctx.storage.deleteAlarm();
+  }finally{this.draining=false;}
  }
  async run(row){
   const j=JSON.parse(row.payload);
