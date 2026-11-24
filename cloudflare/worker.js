@@ -2,7 +2,7 @@ const SYSTEM="Твоє ім’я — NebulaVoice AI. Ти AI-асистент Te
 const ROUTES=[["Groq 1","GROQ_API_KEY_1","https://api.groq.com/openai/v1/chat/completions","openai/gpt-oss-120b"],["Groq 1 20B","GROQ_API_KEY_1","https://api.groq.com/openai/v1/chat/completions","openai/gpt-oss-20b"],["OpenRouter","OPENROUTER_API_KEY","https://openrouter.ai/api/v1/chat/completions","openrouter/free"],["Requesty","REQUESTY_API_KEY","https://router.requesty.ai/v1/chat/completions","google/gemma-4-31b-it"],["Routeway","ROUTEWAY_API_KEY","https://api.routeway.ai/v1/chat/completions","gemma-4-26b-a4b-it-chimerax:free"],["Airforce","AIRFORCE_API_KEY","https://api.airforce/v1/chat/completions","gemma3-270m:free"],["DreamPrompting","DREAMPROMPTING_API_KEY","https://dreamprompting.com/api/v1/chat/completions","openai/gpt-oss-120b"],["xKiro","XKIRO_API_KEY","https://api.xkiro.com/v1/chat/completions","cohere/command-a"],["Requesty 2","REQUESTY_API_KEY_2","https://router.requesty.ai/v1/chat/completions","google/gemma-4-31b-it"],["Airforce 2","AIRFORCE_API_KEY_2","https://api.airforce/v1/chat/completions","gemma3-270m:free"]];
 export default {
  async fetch(req,env){
-  if(new URL(req.url).pathname==="/health") return Response.json({ready:!!(env.db&&env.JOBS&&env.BOT_TOKEN&&env.WORKER_SECRET)});
+  if(new URL(req.url).pathname==="/health") return Response.json({version:2,ready:!!(env.db&&env.JOBS&&env.BOT_TOKEN&&env.WORKER_SECRET)});
   if(req.method!=="POST"||!env.WORKER_SECRET||req.headers.get("Authorization")!=="Bearer "+env.WORKER_SECRET) return new Response("Unauthorized",{status:401});
   if(!env.BOT_TOKEN) return new Response("Not configured",{status:503});
   const j=await req.json();
