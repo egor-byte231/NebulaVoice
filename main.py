@@ -894,6 +894,16 @@ async def show_limit(m:Message):
     tariff='Premium' if premium_until(chat)>time.time() else 'Free'
     await m.reply(f'📊 Ліміт ШІ — {tariff}\n\nВикористано: {used:,} / {limit:,}\nЗалишилося: {left:,} токенів\n'+ '█'*filled+'░'*(10-filled)+f' {pct:.1f}%\n\nСкидання через {minutes//60} г {minutes%60} хв (00:00 UTC)\nОблік сумарний для всіх API.'.replace(',', ' '),parse_mode=None)
 
+async def cloud_text_probe():
+    secret=os.getenv('WORKER_SECRET','').strip()
+    if not secret: return False
+    try:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=8)) as session:
+            async with session.get('https://nebulavoice-ai.maxvyn09.workers.dev/health',allow_redirects=False) as response:
+                return response.status==200 and bool((await response.json()).get('ready'))
+    except Exception:
+        return False
+
 @dp.message(F.text,F.chat.type.in_({'group','supergroup','private'}))
 async def text_message(m:Message):
     if not m.from_user or m.from_user.is_bot: return
@@ -1019,6 +1029,7 @@ async def main():
         await session.close()
         raise
     history_session=session
+    logging.info('Cloud text Worker readiness: %s',await cloud_text_probe())
     tasks=[asyncio.create_task(worker()) for _ in range(4)]
     if cloud_ready: tasks.append(asyncio.create_task(d1_monitor(session)))
     tasks.append(asyncio.create_task(quota_reset_monitor()))
