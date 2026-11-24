@@ -161,7 +161,7 @@ async def request(s,url,headers,**kw):
                     message+='\nGoogle не повернув доступний JSON-опис помилки'
             raise ValueError(message)
         return await r.json(content_type=None)
-ASR_PROMPT = "Дослівний запис розмови українською, російською або змішаною мовою. Зберігай оригінальні слова, сленг і перемикання мов без перекладу та цензури."
+ASR_PROMPT = "Дослівний запис мовлення оригінальними мовами. Зберігай слова, суржик, сленг і природне перемикання мов без перекладу та цензури."
 GEMINI_PROMPT = "Transcribe verbatim in the original spoken languages. Preserve Ukrainian, Russian, Surzhyk, code-switching, slang, profanity and grammatical mistakes. Do not translate, censor, normalize or invent words. Return only the transcript."
 async def ovh_transcribe(s,path):
     pcm=path.with_name('ovh.wav')
@@ -200,6 +200,22 @@ async def ovh_transcribe(s,path):
                 for task in tasks: task.cancel()
                 await asyncio.gather(*tasks,return_exceptions=True)
         return {'text':' '.join(finals)}
+def language_check(j):
+    # API language is an estimate of audio language; script checks are only a heuristic.
+    lang=str(j.get('language') or j.get('detected_language') or '').lower().strip()
+    aliases={'ukrainian':'uk','russian':'ru','belarusian':'be','bulgarian':'bg','macedonian':'mk','czech':'cs','polish':'pl','english':'en','german':'de','french':'fr','slovak':'sk','spanish':'es','italian':'it'}
+    lang=aliases.get(lang,lang.split('-')[0])
+    text=j.get('text') or ''
+    latin=len(re.findall(r'[A-Za-zÀ-ÖØ-öø-ÿĀ-ž]',text))
+    cyr=len(re.findall(r'[А-Яа-яЁёІіЇїЄєҐґЎў]',text))
+    total=latin+cyr
+    if total<12: return False
+    mixed=latin>=5 and cyr>=5 and min(latin,cyr)/total>=0.12
+    if lang in {'uk','ru','be','bg','mk'}:
+        return latin>=8 and latin/total>=0.20
+    if lang in {'cs','pl','en','de','fr','sk','es','it','pt','nl','ro','hu'}:
+        return cyr>=8 and cyr/total>=0.20
+    return mixed
 def confidence(j):
     # Whisper segment log probabilities are heuristics, not calibrated word confidence.
     segments=j.get('segments') or []
@@ -215,7 +231,8 @@ def confidence(j):
         if isinstance(cr,(int,float)) and cr>2.4: bad=True
         ns=seg.get('no_speech_prob')
         if isinstance(ns,(int,float)) and ns>0.6 and isinstance(lp,(int,float)) and lp < -1.0: bad=True
-    return (bad, sum(scores)/len(scores) if scores else None)
+    suspicious=language_check(j)
+    return (bad or suspicious, sum(scores)/len(scores) if scores else None, suspicious)
 DISCLAIMER='NebulaVoice може помилятися через сторонні шуми, нечітку вимову або низьку якість аудіо.'
 async def deliver_transcript(m,status,result):
     if not enabled(): return await mark_disabled(status)
@@ -346,7 +363,7 @@ async def process_voice(m,status):
                 tried_models.add(MODELS[k][2])
                 if candidate:
                     old_text,old_quality=candidate
-                    if quality[1] is None or (quality[0] and old_quality[1] is not None and quality[1]<=old_quality[1]):
+                    if (quality[2] and not old_quality[2]) or (quality[2]==old_quality[2] and (quality[1] is None or (quality[0] and old_quality[1] is not None and quality[1]<=old_quality[1]))):
                         result=old_text
                     return await deliver_transcript(m,status,result)
                 if quality[0]:
