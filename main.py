@@ -708,7 +708,7 @@ async def generate_text(m,question,context='',group=False,history_context=''):
             remember_group(chat,'ШІ: '+answer[:1000])
         else:
             remember_group(chat,'ШІ: '+answer[:1000])
-            await m.answer(answer[:3700],parse_mode=None)
+            await m.reply(answer[:3700],parse_mode=None)
         return
     await m.reply('Текстовий ШІ тимчасово недоступний.')
 @dp.message(Command('premium'),F.chat.type.in_({'group','supergroup','private'}))
