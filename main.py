@@ -527,6 +527,18 @@ async def safe_audio_load(m,config):
         await m.reply('Тест перервано: '+type(e).__name__)
 
 async def run_audio_load(m,config):
+    try:
+        await asyncio.wait_for(run_audio_load_inner(m,config),260)
+    except asyncio.TimeoutError:
+        await m.reply('⚠️ Тест аудіо: перевищено загальний час очікування.')
+    except asyncio.CancelledError:
+        await m.reply('Тест аудіо скасовано.')
+        raise
+    except Exception as e:
+        logging.exception('Audio load test failed')
+        await m.reply('⚠️ Тест аудіо перервано: '+type(e).__name__)
+
+async def run_audio_load_inner(m,config):
     progress=await m.reply('⏳ Підготовка аудіо...',reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='Скасувати тест',callback_data='owner:load:cancel')]]))
     item=m.voice or m.video_note
     routes=config['routes'] if config['mode']=='selected' else list(ORDER)
@@ -611,7 +623,7 @@ async def run_audio_load(m,config):
     except Exception: pass
     ok=sum(bool(x[0]) for x in results)
     chunk=f"FadeHost: {ok}/{len(results)} успішно; пік обробників {peak}; час {time.monotonic()-start:.2f} с\n"
-    for _,line in results:
+    for _,line in sorted(results,key=lambda x: int(re.match(r'#(\d+)',x[1]).group(1)) if re.match(r'#(\d+)',x[1]) else 0):
         if len(chunk)+len(line)>3500:
             await m.answer(chunk,parse_mode=None)
             chunk=''
@@ -648,7 +660,7 @@ async def load_action(c):
             return await c.message.answer('Надішли голосове або кружечок для тесту.')
         load_task=asyncio.create_task(run_load_test(c.message,config))
         return await c.message.answer('Тест запущено. Реальні квоти API витрачаються.')
-    try: await c.message.edit_text('⚡ Тест навантаження (текст). Реальні API-запити.',reply_markup=load_menu())
+    try: await c.message.edit_text('⚡ Тест навантаження ('+('аудіо' if load_config['kind']=='audio' else 'текст')+'). Реальні API-запити.',reply_markup=load_menu())
     except Exception as e:
         if 'message is not modified' not in str(e).lower(): raise
 
