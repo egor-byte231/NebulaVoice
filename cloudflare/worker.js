@@ -35,7 +35,7 @@ async function generate(j,env){
  let history;
  let spent=0;
  const routes={};
- const finish=answer=>({answer,tokens:spent,routes});
+ const finish=answer=>({answer:j.diagnostic&&!answer.includes("🧪 Платформа:")?answer+"\n\n🧪 Платформа: Cloudflare\nAPI: відповіді не отримано\nСпроби: "+(Object.keys(routes).join(", ")||"немає")+"\nНалаштовані API: "+ROUTES.filter(r=>env[r[1]]).map(r=>r[0]).join(", "):answer,tokens:spent,routes});
  async function loadHistory(){
  const rows=await env.db.prepare("SELECT line FROM chat_history WHERE chat=? AND message_id<? ORDER BY message_id DESC LIMIT 50").bind(j.chat,j.source).all();
  return rows.results.reverse().map(r=>r.line).join("\n");
