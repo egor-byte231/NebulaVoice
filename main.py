@@ -10,7 +10,7 @@ logging.basicConfig(level=logging.INFO)
 MODELS={'groq1':('groq',1,'whisper-large-v3'),'groq1t':('groq',1,'whisper-large-v3-turbo'),'groq2':('groq',2,'whisper-large-v3'),'groq2t':('groq',2,'whisper-large-v3-turbo'),'cf1':('cf',1,'@cf/openai/whisper-large-v3-turbo'),'cf2':('cf',2,'@cf/openai/whisper-large-v3-turbo'),'ovh':('ovh',1,'solaria-3')}
 NAMES={k:f"{ {'groq':'Groq','cf':'Cloudflare','gemini':'Gemini','ovh':'OVHcloud Gladia'}[p]} #{n} • {model.split('/')[-1]}" for k,(p,n,model) in MODELS.items()}
 OWNER=int(os.environ['OWNER_ID']); bot=Bot(os.environ['BOT_TOKEN']); dp=Dispatcher(); lock=asyncio.Lock()
-ORDER=['ovh','groq1','groq1t','cf1','groq2','groq2t','cf2']
+ORDER=['groq1','groq2','groq1t','groq2t','cf1','cf2','ovh']
 db=sqlite3.connect('state.db')
 db.execute('CREATE TABLE IF NOT EXISTS cooldowns (provider TEXT PRIMARY KEY, until REAL)')
 db.execute('CREATE TABLE IF NOT EXISTS control (id INTEGER PRIMARY KEY, enabled INTEGER)')
@@ -371,11 +371,11 @@ def confidence(j):
         lp=seg.get('avg_logprob')
         if isinstance(lp,(int,float)):
             scores.append(lp)
-            if lp < -1.0: bad=True
+            if lp < -0.65: bad=True
         cr=seg.get('compression_ratio')
-        if isinstance(cr,(int,float)) and cr>2.4: bad=True
+        if isinstance(cr,(int,float)) and cr>2.0: bad=True
         ns=seg.get('no_speech_prob')
-        if isinstance(ns,(int,float)) and ns>0.6 and isinstance(lp,(int,float)) and lp < -1.0: bad=True
+        if isinstance(ns,(int,float)) and ns>0.45 and isinstance(lp,(int,float)) and lp < -0.65: bad=True
     lang=str(j.get('language') or j.get('detected_language') or '').lower().strip()
     text=str(j.get('text') or '')
     # Latin-script output containing transliterated East Slavic profanity
@@ -600,7 +600,7 @@ async def run_audio_load_inner(m,config,progress):
         src=Path(d)/'source'
         p=Path(d)/'normalized.ogg'
         await asyncio.wait_for(bot.download(item,destination=src),30)
-        proc=await asyncio.create_subprocess_exec('ffmpeg','-nostdin','-loglevel','error','-i',str(src),'-vn','-ac','1','-ar','16000','-af','dynaudnorm=f=250:g=15','-c:a','libopus','-b:a','32k',str(p),stderr=asyncio.subprocess.DEVNULL)
+        proc=await asyncio.create_subprocess_exec('ffmpeg','-nostdin','-loglevel','error','-i',str(src),'-vn','-ac','1','-ar','16000','-c:a','libopus','-b:a','64k',str(p),stderr=asyncio.subprocess.DEVNULL)
         try:
             code=await asyncio.wait_for(proc.wait(),30)
         except (asyncio.TimeoutError,asyncio.CancelledError):
@@ -884,9 +884,9 @@ async def process_voice(m,status):
     with tempfile.TemporaryDirectory() as d:
         p=Path(d)/('voice.ogg' if m.voice else 'circle.mp4')
         await bot.download(item,destination=p)
-        if m.voice or m.video_note:
+        if m.video_note:
             out=Path(d)/'normalized.ogg'
-            proc=await asyncio.create_subprocess_exec('ffmpeg','-nostdin','-loglevel','error','-i',str(p),'-vn','-ac','1','-ar','16000','-af','dynaudnorm=f=250:g=15','-c:a','libopus','-b:a','32k',str(out),stderr=asyncio.subprocess.DEVNULL)
+            proc=await asyncio.create_subprocess_exec('ffmpeg','-nostdin','-loglevel','error','-i',str(p),'-vn','-ac','1','-ar','16000','-c:a','libopus','-b:a','64k',str(out),stderr=asyncio.subprocess.DEVNULL)
             if await proc.wait()!=0:
                 await notify_error('Нормалізація аудіо',ValueError('FFmpeg'))
                 if m.video_note: raise ValueError('Не вдалося витягти аудіо')
