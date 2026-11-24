@@ -1,0 +1,25 @@
+name: Cloudflare setup
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  setup:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Verify access and provision queue
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          set -eu
+          npx --yes wrangler@4 whoami
+          npx --yes wrangler@4 queues list
+          if npx --yes wrangler@4 queues list | grep -Fq nebulavoice-queue; then
+            echo "Queue already exists"
+          else
+            npx --yes wrangler@4 queues create nebulavoice-queue
+          fi
+          npx --yes wrangler@4 queues list
