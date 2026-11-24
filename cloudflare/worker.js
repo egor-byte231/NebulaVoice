@@ -2,12 +2,9 @@ const SYSTEM="Ти NebulaVoice AI, асистент Telegram. Відповіда
 const ROUTES=[["Groq 1","GROQ_API_KEY_1","https://api.groq.com/openai/v1/chat/completions","openai/gpt-oss-120b"],["Groq 1 20B","GROQ_API_KEY_1","https://api.groq.com/openai/v1/chat/completions","openai/gpt-oss-20b"],["Groq 2","GROQ_API_KEY_2","https://api.groq.com/openai/v1/chat/completions","openai/gpt-oss-120b"],["Groq 2 20B","GROQ_API_KEY_2","https://api.groq.com/openai/v1/chat/completions","openai/gpt-oss-20b"],["OpenRouter","OPENROUTER_API_KEY","https://openrouter.ai/api/v1/chat/completions","openrouter/free"],["Requesty","REQUESTY_API_KEY","https://router.requesty.ai/v1/chat/completions","google/gemma-4-31b-it"],["Routeway","ROUTEWAY_API_KEY","https://api.routeway.ai/v1/chat/completions","gemma-4-26b-a4b-it-chimerax:free"],["Airforce","AIRFORCE_API_KEY","https://api.airforce/v1/chat/completions","gemma3-270m:free"],["DreamPrompting","DREAMPROMPTING_API_KEY","https://dreamprompting.com/api/v1/chat/completions","openai/gpt-oss-120b"],["xKiro","XKIRO_API_KEY","https://api.xkiro.com/v1/chat/completions","cohere/command-a"],["Requesty 2","REQUESTY_API_KEY_2","https://router.requesty.ai/v1/chat/completions","google/gemma-4-31b-it"],["Airforce 2","AIRFORCE_API_KEY_2","https://api.airforce/v1/chat/completions","gemma3-270m:free"]];
 export default {
  async fetch(req,env){
-  if(new URL(req.url).pathname==="/health") return Response.json({version:2,audioBinary:true,dispatcher:"isolated-executors",ready:!!(env.db&&env.DISPATCHER&&env.EXECUTOR&&env.BOT_TOKEN&&env.WORKER_SECRET)});
+  if(new URL(req.url).pathname==="/health") return Response.json({version:2,dispatcher:"isolated-executors",ready:!!(env.db&&env.DISPATCHER&&env.EXECUTOR&&env.BOT_TOKEN&&env.WORKER_SECRET)});
   if(req.method!=="POST"||!env.WORKER_SECRET||req.headers.get("Authorization")!=="Bearer "+env.WORKER_SECRET) return new Response("Unauthorized",{status:401});
   if(!env.BOT_TOKEN) return new Response("Not configured",{status:503});
-  if(new URL(req.url).pathname==="/audio/transcribe"&&req.headers.get("Content-Type")==="application/octet-stream"){
-   return env.DISPATCHER.get(env.DISPATCHER.idFromName("audio")).fetch("https://dispatcher/audio",{method:"POST",headers:{"Content-Type":"application/octet-stream","X-Audio-Route":req.headers.get("X-Audio-Route")||"","X-Audio-Slots":req.headers.get("X-Audio-Slots")||"20"},body:req.body});
-  }
   const j=await req.json();
   if(new URL(req.url).pathname==="/audio/transcribe") return env.DISPATCHER.get(env.DISPATCHER.idFromName("audio")).fetch("https://dispatcher/audio",{method:"POST",body:JSON.stringify(j)});
 
@@ -72,7 +69,7 @@ export class Dispatcher {
  async fetch(req){
   const path=new URL(req.url).pathname;
   if(path==="/audio"){
-   const j=req.headers.get("Content-Type")==="application/octet-stream"?{route:req.headers.get("X-Audio-Route"),slots:Number(req.headers.get("X-Audio-Slots")),bytes:new Uint8Array(await req.arrayBuffer())}:await req.json();
+   const j=await req.json();
    const slots=Math.max(1,Math.min(40,Number(j.slots)||20));
    if(this.active.size>=slots)return Response.json({error:"Busy"},{status:429});
    const id=crypto.randomUUID();this.active.add(id);
@@ -231,17 +228,17 @@ async function generate(j,env){
 async function audioTranscribe(j,env){
  if(j.route==="ovh")return audioOvh(j,env);
  const routes={groq1:["GROQ_API_KEY_1","whisper-large-v3"],groq1t:["GROQ_API_KEY_1","whisper-large-v3-turbo"],groq2:["GROQ_API_KEY_2","whisper-large-v3"],groq2t:["GROQ_API_KEY_2","whisper-large-v3-turbo"],cf1:["CF_API_TOKEN_1","CF_ACCOUNT_ID_1"],cf2:["CF_API_TOKEN_2","CF_ACCOUNT_ID_2"]};
- if((j.bytes?j.bytes.length>11250000:typeof j.audio!=="string"||j.audio.length>15000000)||!Object.hasOwn(routes,j.route))return Response.json({error:"Invalid audio route or payload"},{status:400});
+ if(typeof j.audio!=="string"||j.audio.length>15000000||!Object.hasOwn(routes,j.route))return Response.json({error:"Invalid audio route or payload"},{status:400});
  const [key,model]=routes[j.route];
  if(!env[key]|| (j.route.startsWith("cf")&&!env[model]))return Response.json({error:"ProviderNotConfigured"},{status:422});
  try{
  let r;
  if(j.route.startsWith("groq")){
- const bytes=j.bytes||Uint8Array.from(atob(j.audio),c=>c.charCodeAt(0));
+ const bytes=Uint8Array.from(atob(j.audio),c=>c.charCodeAt(0));
  const f=new FormData();f.append("file",new Blob([bytes],{type:"audio/ogg"}),"audio.ogg");f.append("model",model);f.append("temperature","0");f.append("response_format","verbose_json");
  r=await fetch("https://api.groq.com/openai/v1/audio/transcriptions",{method:"POST",headers:{Authorization:"Bearer "+env[key]},body:f,signal:AbortSignal.timeout(30000)});
  }else{
- r=await fetch("https://api.cloudflare.com/client/v4/accounts/"+env[model]+"/ai/run/@cf/openai/whisper-large-v3-turbo",{method:"POST",headers:{Authorization:"Bearer "+env[key],"Content-Type":"application/json"},body:JSON.stringify({audio:j.audio??bytesToBase64(j.bytes),task:"transcribe",condition_on_previous_text:false,vad_filter:true}),signal:AbortSignal.timeout(30000)});
+ r=await fetch("https://api.cloudflare.com/client/v4/accounts/"+env[model]+"/ai/run/@cf/openai/whisper-large-v3-turbo",{method:"POST",headers:{Authorization:"Bearer "+env[key],"Content-Type":"application/json"},body:JSON.stringify({audio:j.audio,task:"transcribe",condition_on_previous_text:false,vad_filter:true}),signal:AbortSignal.timeout(30000)});
  }
  if(!r.ok)return Response.json({error:"ProviderHTTP",providerStatus:r.status,retryAfter:r.headers.get("Retry-After")},{status:422});
  const data=await r.json();return Response.json({result:j.route.startsWith("cf")?data.result:data});
@@ -249,9 +246,9 @@ async function audioTranscribe(j,env){
 }
 
 async function audioOvh(j,env){
- if((j.bytes?j.bytes.length>480000:typeof j.audio!=="string"||j.audio.length>650000))return Response.json({error:"Invalid PCM"},{status:400});
+ if(typeof j.audio!=="string"||j.audio.length>650000)return Response.json({error:"Invalid PCM"},{status:400});
  try{
- const bytes=j.bytes||Uint8Array.from(atob(j.audio),c=>c.charCodeAt(0));
+ const bytes=Uint8Array.from(atob(j.audio),c=>c.charCodeAt(0));
  if(bytes.length>480000||bytes.length%2)return Response.json({error:"Invalid PCM"},{status:400});
  const r=await fetch("https://oai.endpoints.kepler.ai.cloud.ovh.net/gladia/v2/live?region=eu-west",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({model:"solaria-3",encoding:"wav/pcm",sample_rate:16000,bit_depth:16,channels:1,messages_config:{receive_final_transcripts:true}}),signal:AbortSignal.timeout(15000)});
  if(!r.ok)return Response.json({error:"ProviderHTTP",providerStatus:r.status,retryAfter:r.headers.get("Retry-After")},{status:422});
@@ -271,5 +268,3 @@ async function audioOvh(j,env){
  return Response.json({result:{text:await result}});
  }catch{return Response.json({error:"ProviderFailure"},{status:422});}
 }
-
-function bytesToBase64(bytes){let parts=[];for(let i=0;i<bytes.length;i+=24576)parts.push(btoa(String.fromCharCode(...bytes.subarray(i,i+24576))));return parts.join("");}
