@@ -246,10 +246,10 @@ async function audioTranscribe(j,env){
  let r;
  if(j.route.startsWith("groq")){
  const bytes=Uint8Array.from(atob(j.audio),c=>c.charCodeAt(0));
- const f=new FormData();f.append("file",new Blob([bytes],{type:"audio/ogg"}),"audio.ogg");f.append("model",model);f.append("temperature","0");f.append("prompt","Розмовна українська, суржик, русский язык, język polski, English. Дослівне мовлення, включая сленг и ненормативную лексику.");f.append("response_format","verbose_json");
+ const f=new FormData();f.append("file",new Blob([bytes],{type:"audio/ogg"}),"audio.ogg");f.append("model",model);f.append("temperature","0");f.append("prompt","Мутити, мутить, мутит, замутив, замутил, банити, банить, забанив, забанил, розбанити, разбанить, кікнути, кикнуть, дав бан, дал бан, дав мут, дал мут, замутив мікрофон, замутил микрофон, адмін, админ, модер, войс.");f.append("response_format","verbose_json");
  r=await fetch("https://api.groq.com/openai/v1/audio/transcriptions",{method:"POST",headers:{Authorization:"Bearer "+env[key]},body:f,signal:AbortSignal.timeout(30000)});
  }else{
- r=await fetch("https://api.cloudflare.com/client/v4/accounts/"+env[model]+"/ai/run/@cf/openai/whisper-large-v3-turbo",{method:"POST",headers:{Authorization:"Bearer "+env[key],"Content-Type":"application/json"},body:JSON.stringify({audio:j.audio,task:"transcribe",initial_prompt:"Розмовна українська, суржик, русский язык, język polski, English. Дослівне мовлення, включая сленг и ненормативную лексику.",condition_on_previous_text:false,vad_filter:true,log_prob_threshold:-0.65,compression_ratio_threshold:2.0,no_speech_threshold:0.45}),signal:AbortSignal.timeout(30000)});
+ r=await fetch("https://api.cloudflare.com/client/v4/accounts/"+env[model]+"/ai/run/@cf/openai/whisper-large-v3-turbo",{method:"POST",headers:{Authorization:"Bearer "+env[key],"Content-Type":"application/json"},body:JSON.stringify({audio:j.audio,task:"transcribe",initial_prompt:"Мутити, мутить, мутит, замутив, замутил, банити, банить, забанив, забанил, розбанити, разбанить, кікнути, кикнуть, дав бан, дал бан, дав мут, дал мут, замутив мікрофон, замутил микрофон, адмін, админ, модер, войс.",condition_on_previous_text:false,vad_filter:true,log_prob_threshold:-0.65,compression_ratio_threshold:2.0,no_speech_threshold:0.45}),signal:AbortSignal.timeout(30000)});
  }
  if(!r.ok)return Response.json({error:"ProviderHTTP",providerStatus:r.status,retryAfter:r.headers.get("Retry-After")},{status:422});
  const data=await r.json();return Response.json({result:j.route.startsWith("cf")?data.result:data});
