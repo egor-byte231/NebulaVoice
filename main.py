@@ -828,7 +828,11 @@ async def text_message(m:Message):
         db.execute('INSERT OR IGNORE INTO text_groups VALUES (?)',(chat,))
         db.commit()
         if db.execute('SELECT 1 FROM text_notices WHERE chat=?',(chat,)).fetchone():
-            remember_group(chat,(m.from_user.full_name or 'Учасник')+': '+raw)
+            author=m.from_user.full_name or 'Учасник'
+            if m.from_user.username:
+                author+=' (@'+m.from_user.username+')'
+            author+=' [ID:'+str(m.from_user.id)+']'
+            remember_group(chat,author+': '+raw)
         elif mentioned or replied:
             await m.reply('🤖 ШІ увімкнено автоматично. Після цього повідомлення бот зберігатиме до 50 текстових повідомлень для контексту та може передавати їх зовнішнім AI API. /ai_off — вимкнути (адмін). /premium — тариф.')
             db.execute('INSERT OR IGNORE INTO text_notices VALUES (?)',(chat,))
