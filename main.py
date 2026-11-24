@@ -690,7 +690,10 @@ async def generate_text(m,question,context='',group=False):
                 group_charge(chat,day,actual-reserve)
             answer=data['choices'][0]['message']['content']
             if not isinstance(answer,str) or not answer.strip(): continue
-            answer=re.sub(r'(?im)^\s*(?:Модель|Model|Провайдер|Provider):[^\n]*
+            answer=re.sub(r'(?im)^[ \t]*(?:Модель|Model|Провайдер|Provider):[^\n]*$', '', answer).strip()
+            if not answer or re.search(r'(?i)/ai_model|(?:обрана|выбранная) модель.{0,100}(?:недоступна|не доступна)',answer):
+                block('text:'+name,60)
+                continue
         except Exception as e:
             block('text:'+name,120)
             logging.warning('Text AI %s: %s',name,type(e).__name__)
