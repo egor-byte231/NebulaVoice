@@ -27,12 +27,23 @@ def usage(k,seconds=0,attempt=0,success=0,limited=0):
 def report():
     day=datetime.datetime.now(datetime.timezone.utc).date().isoformat()
     rows={r[0]:r[1:] for r in db.execute('SELECT provider,attempts,seconds,successes,limited FROM usage_daily WHERE day=?',(day,))}
-    lines=['Статистика NebulaVoice • '+day+' UTC','Локальні спроби та тривалість аудіо у спробах (не офіційний баланс):']
+    def duration(n):
+        h,r=divmod(n,3600)
+        m,sec=divmod(r,60)
+        return ' '.join(([f'{h} год'] if h else [])+([f'{m} хв'] if m else [])+([f'{sec} с'] if sec or not n else []))
+    total=[sum(r[i] for r in rows.values()) for i in range(4)]
+    lines=['📊 <b>Статистика NebulaVoice</b>',f'📅 {day} (UTC)', '🟢 Транскрипція увімкнена' if enabled() else '🔴 Транскрипція вимкнена', '', '<b>Загальна статистика</b>',f'Успішних транскрипцій: {total[2]}',f'Спроб обробки: {total[0]}',f'Аудіо у спробах: {duration(total[1])}',f'У черзі: {waiting.qsize()} / 50',f'Активних завдань: {len(active_jobs)} / 4']
     for k in ORDER:
         a,b,c,d=rows.get(k,(0,0,0,0))
-        h=db.execute('SELECT info FROM quota_headers WHERE provider=?',(k,)).fetchone()
         remaining=max(0,int(blocked('quota:'+k)-time.time()))
-        lines.append(f'{NAMES[k]}: спроб {a}, аудіо {b} с, успішних {c}, HTTP 429: {d}; пауза квоти {remaining} с. '+(h[0] if h else 'Залишок API невідомий'))
+        primary={'groq2':'groq1','groq2t':'groq1t','cf2':'cf1'}.get(k)
+        state='🔴 Ліміт досягнуто' if remaining else '🟡 Обробляє аудіо' if k in active_providers else '⚪ Резерв' if primary and blocked('quota:'+primary)<=time.time() else '🟡 Тимчасова пауза' if blocked(k)>time.time() else '🟢 Готовий'
+        lines.extend(['',f'<b>{html.escape(NAMES[k])}</b>',state,f'Транскрипцій: {c} | Аудіо у спробах: {duration(b)}'])
+        if d: lines.append(f'Відмов через ліміт: {d}')
+        if remaining: lines.append(f'Повторна перевірка через: {duration(remaining)}')
+        h=db.execute('SELECT info FROM quota_headers WHERE provider=?',(k,)).fetchone()
+        if h and remaining: lines.append('<blockquote expandable>'+html.escape(h[0])+'</blockquote>')
+    lines.extend(['','<i>Статистика з моменту початку обліку. Тривалість включає повторні спроби. Точний залишок квот залежить від даних API.</i>'])
     return '\n'.join(lines)
 def blocked(k):
     row=db.execute('SELECT until FROM cooldowns WHERE provider=?',(k,)).fetchone()
@@ -180,14 +191,14 @@ async def disable(reason):
     jobs=[(t,status) for t,status in active_jobs.items() if t is not current]
     for t,status in jobs: t.cancel()
     for status in queued: await mark_disabled(status)
-    try: await bot.send_message(OWNER,('Транскрипцію вимкнено. Причина: '+reason+f'\nВидалено з черги: {len(queued)}; скасовано активних: {len(jobs)}.\n'+report())[:4000],reply_markup=owner_menu())
+    try: await bot.send_message(OWNER,'🔴 <b>Транскрипцію вимкнено</b>\nПричина: '+html.escape(reason)+f'\nВидалено з черги: {len(queued)}; скасовано активних: {len(jobs)}.\n\n'+report(),parse_mode='HTML',reply_markup=owner_menu())
     except Exception as e: logging.warning('Owner notification failed: %s',type(e).__name__)
 @dp.callback_query(F.data.startswith('owner:'))
 async def owner_action(c:CallbackQuery):
     if c.from_user.id!=OWNER or not isinstance(c.message,Message) or c.message.chat.type!='private':
         return await c.answer('Тільки власник',show_alert=True)
     await c.answer()
-    if c.data=='owner:stats': return await c.message.answer(report()[:4000])
+    if c.data=='owner:stats': return await c.message.answer(report(),parse_mode='HTML')
     if enabled(): await disable('Вимкнено власником')
     else:
         db.execute('UPDATE control SET enabled=1 WHERE id=1')
