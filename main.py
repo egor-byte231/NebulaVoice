@@ -132,18 +132,20 @@ async def process_voice(m,status):
             if await proc.wait()!=0: raise ValueError('Не вдалося витягти аудіо')
             p=out
         order=[k for k in ORDER if k!='ovh' or item.duration<=15]
-        # Secondary credentials must represent independently permitted quotas.
-        if os.getenv('ALLOW_SECONDARY_QUOTAS')!='true':
-            order=[k for k in order if MODELS[k][1]==1]
+        # Secondary credentials must represent independently permitted quotas; only use after primary HTTP 429.
         deadline=time.time()+86400
         notified=False
         while time.time()<deadline:
             for k in order:
                 if blocked(k)>time.time(): continue
+                if MODELS[k][1]==2:
+                    primary={'groq2':'groq1','groq2t':'groq1t','cf2':'cf1'}[k]
+                    if blocked('quota:'+primary)<=time.time(): continue
                 try:
                     result=await transcribe(k,p)
                 except RateLimited as e:
                     block(k,e.seconds)
+                    block('quota:'+k,e.seconds)
                     continue
                 except Exception as e:
                     logging.warning('Provider %s failed: %s',k,type(e).__name__)
@@ -156,7 +158,7 @@ async def process_voice(m,status):
                 await status.edit_text('⏳ API тимчасово недоступні. Очікую поновлення лімітів.')
                 notified=True
             # Avoid repeated edits of identical Telegram messages.
-            delay=max(1,min(300,min(blocked(k) for k in order)-time.time()))
+            delay=max(1,min(300,min((blocked(k) for k in order if blocked(k)>time.time()),default=time.time()+60)-time.time()))
             await asyncio.sleep(delay)
         await status.edit_text('❌ Не вдалося транскрибувати протягом 24 годин.')
 async def worker():
