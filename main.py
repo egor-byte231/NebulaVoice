@@ -46,22 +46,24 @@ async def request(s,url,headers,**kw):
                         if value and ('TOKEN' in key or 'KEY' in key or 'SECRET' in key):
                             diagnostic=diagnostic.replace(value,'[REDACTED]')
                     diagnostic=re.sub(r'(?i)(?:AIza|gsk_|cfut_|AQ\\.)[A-Za-z0-9_.-]+','[REDACTED]',diagnostic)
-                    message+='\\n'+(diagnostic[:1800] or 'Google не повернув опис помилки')
+                    message+='\n'+(diagnostic[:1800] or 'Google не повернув опис помилки')
                 except Exception:
-                    message+='\\nGoogle не повернув доступний JSON-опис помилки'
+                    message+='\nGoogle не повернув доступний JSON-опис помилки'
             raise ValueError(message)
         return await r.json(content_type=None)
+ASR_PROMPT = "Дослівна розмовна транскрипція: українська, русский язык, суржик, сленг, матюки. Без перекладу, цензури, виправлення граматики чи вигаданих слів. Зберігати перемикання мов."
+GEMINI_PROMPT = "Transcribe verbatim in the original spoken languages. Preserve Ukrainian, Russian, Surzhyk, code-switching, slang, profanity and grammatical mistakes. Do not translate, censor, normalize or invent words. Return only the transcript."
 async def transcribe(k,path):
     provider,n,model=MODELS[k]
     data=path.read_bytes()
     async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=120)) as s:
         if provider=='groq':
-            f=aiohttp.FormData(); f.add_field('file',data,filename=path.name,content_type='audio/ogg' if path.suffix=='.ogg' else 'audio/wav'); f.add_field('model',model)
+            f=aiohttp.FormData(); f.add_field('file',data,filename=path.name,content_type='audio/ogg' if path.suffix=='.ogg' else 'audio/wav'); f.add_field('model',model); f.add_field('temperature','0'); f.add_field('prompt',ASR_PROMPT)
             j=await request(s,'https://api.groq.com/openai/v1/audio/transcriptions',{'Authorization':'Bearer '+need(f'GROQ_API_KEY_{n}')},data=f)
         elif provider=='cf':
-            j=await request(s,'https://api.cloudflare.com/client/v4/accounts/'+need(f'CF_ACCOUNT_ID_{n}')+'/ai/run/'+model,{'Authorization':'Bearer '+need(f'CF_API_TOKEN_{n}')},json={'audio':base64.b64encode(data).decode(),'task':'transcribe'}); j=j.get('result') or {}
+            j=await request(s,'https://api.cloudflare.com/client/v4/accounts/'+need(f'CF_ACCOUNT_ID_{n}')+'/ai/run/'+model,{'Authorization':'Bearer '+need(f'CF_API_TOKEN_{n}')},json={'audio':base64.b64encode(data).decode(),'task':'transcribe','initial_prompt':ASR_PROMPT,'condition_on_previous_text':False,'vad_filter':True}); j=j.get('result') or {}
         elif provider=='gemini':
-            j=await request(s,'https://generativelanguage.googleapis.com/v1beta/models/'+model+':generateContent',{'x-goog-api-key':need('GEMINI_API_KEY')},json={'contents':[{'parts':[{'text':'Transcribe this audio verbatim in its original language. Do not translate. Return only the transcript.'},{'inline_data':{'mime_type':'audio/ogg' if path.suffix=='.ogg' else 'audio/wav','data':base64.b64encode(data).decode()}}]}]}); j={'text':''.join(p.get('text','') for p in j['candidates'][0]['content']['parts'])}
+            j=await request(s,'https://generativelanguage.googleapis.com/v1beta/models/'+model+':generateContent',{'x-goog-api-key':need('GEMINI_API_KEY')},json={'generationConfig':{'temperature':0},'contents':[{'parts':[{'text':GEMINI_PROMPT},{'inline_data':{'mime_type':'audio/ogg' if path.suffix=='.ogg' else 'audio/wav','data':base64.b64encode(data).decode()}}]}]}); j={'text':''.join(p.get('text','') for p in j['candidates'][0]['content']['parts'])}
         text=j.get('text') if isinstance(j,dict) else None
         if not isinstance(text,str) or not text.strip(): raise ValueError('API не повернув текст')
         return text.strip()
