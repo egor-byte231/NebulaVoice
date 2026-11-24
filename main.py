@@ -956,7 +956,8 @@ async def cloud_text_probe():
     try:
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=8)) as session:
             async with session.get('https://nebulavoice-ai.maxvyn09.workers.dev/health',allow_redirects=False) as response:
-                return response.status==200 and bool((await response.json()).get('ready'))
+                data=await response.json()
+                return response.status==200 and data.get('version')==2 and bool(data.get('ready'))
     except Exception:
         return False
 
@@ -989,7 +990,7 @@ async def text_message(m:Message):
     if not (mentioned or replied or not group): return
     question=re.sub(r'(?<!\w)@Nebulavcbot(?!\w)','',raw,flags=re.I).strip()
     if not question: return
-    if os.getenv('CLOUD_TEXT_ENABLED')=='1':
+    if os.getenv('CLOUD_TEXT_ENABLED','auto')!='0' and await cloud_text_probe():
         overview_add(m,requests=1)
         return await submit_cloud_text(m,question,group,replied,reply)
     await text_slots.acquire()
@@ -1096,7 +1097,7 @@ async def main():
     tasks=[asyncio.create_task(worker()) for _ in range(4)]
     if cloud_ready: tasks.append(asyncio.create_task(d1_monitor(session)))
     tasks.append(asyncio.create_task(quota_reset_monitor()))
-    if os.getenv('CLOUD_TEXT_ENABLED')=='1':
+    if os.getenv('CLOUD_TEXT_ENABLED','auto')!='0':
         await cloud_restore_reservations()
         tasks.append(asyncio.create_task(cloud_reconcile()))
     try: await dp.start_polling(bot,handle_as_tasks=True)
