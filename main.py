@@ -392,7 +392,55 @@ async def deliver_transcript(m,status,result):
         if i==0: await status.edit_text(body,parse_mode='HTML')
         else: await m.reply(body,parse_mode='HTML')
     if chunks: overview_add(m,voices=int(bool(m.voice)),circles=int(bool(m.video_note)))
+audio_cloud_retry=0
+audio_local_active=0
+def audio_platform():
+    return 'Cloudflare' if os.getenv('WORKER_SECRET') and time.monotonic()>=audio_cloud_retry else 'FadeHost'
+def audio_slot_limit():
+    return audio_settings()[2 if audio_platform()=='Cloudflare' else 3]
+async def cloud_audio(k,path):
+    global audio_cloud_retry
+    if audio_platform()!='Cloudflare': return None
+    data=path.read_bytes()
+    if k=='ovh':
+        proc=await asyncio.create_subprocess_exec('ffmpeg','-nostdin','-loglevel','error','-i',str(path),'-ar','16000','-ac','1','-f','s16le','pipe:1',stdout=asyncio.subprocess.PIPE,stderr=asyncio.subprocess.DEVNULL)
+        try: data,_=await asyncio.wait_for(proc.communicate(),15)
+        finally:
+            if proc.returncode is None: proc.kill(); await proc.wait()
+        if proc.returncode or len(data)>480000: raise ValueError('OVH PCM')
+    payload={'route':k,'audio':base64.b64encode(data).decode(),'slots':audio_settings()[2]}
+    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=75)) as session:
+        while True:
+            try:
+                async with session.post('https://nebulavoice-ai.maxvyn09.workers.dev/audio/transcribe',json=payload,headers={'Authorization':'Bearer '+os.environ['WORKER_SECRET']},allow_redirects=False) as response:
+                    if response.status==429:
+                        await asyncio.sleep(0.5)
+                        continue
+                    if response.status in (401,404,502,503,504):
+                        audio_cloud_retry=time.monotonic()+30
+                        return None
+                    j=await response.json(content_type=None)
+                    if response.status==422:
+                        if j.get('providerStatus')==429:
+                            try: delay=max(1,int(j.get('retryAfter') or 60))
+                            except ValueError: delay=60
+                            raise RateLimited(delay)
+                        raise ValueError(j.get('error','ProviderFailure'))
+                    if response.status!=200 or not isinstance(j.get('result'),dict): raise ValueError('Cloudflare audio response')
+                    return j['result']
+            except (aiohttp.ClientConnectionError,aiohttp.ServerTimeoutError,asyncio.TimeoutError):
+                audio_cloud_retry=time.monotonic()+30
+                return None
 async def transcribe(k,path):
+    global audio_local_active
+    j=await cloud_audio(k,path)
+    if j is None:
+        while audio_local_active>=audio_settings()[3]: await asyncio.sleep(0.1)
+        audio_local_active+=1
+        try: return await transcribe_local(k,path)
+        finally: audio_local_active-=1
+    return validate_audio_result(j)
+async def transcribe_local(k,path):
     provider,n,model=MODELS[k]
     data=path.read_bytes()
     async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=120)) as s:
@@ -405,14 +453,16 @@ async def transcribe(k,path):
             j=await request(s,'https://api.cloudflare.com/client/v4/accounts/'+need(f'CF_ACCOUNT_ID_{n}')+'/ai/run/'+model,{'Authorization':'Bearer '+need(f'CF_API_TOKEN_{n}')},json={'audio':base64.b64encode(data).decode(),'task':'transcribe','condition_on_previous_text':False,'vad_filter':True}); j=j.get('result') or {}
         elif provider=='gemini':
             j=await request(s,'https://generativelanguage.googleapis.com/v1beta/models/'+model+':generateContent',{'x-goog-api-key':need('GEMINI_API_KEY')},json={'generationConfig':{'temperature':0},'contents':[{'parts':[{'text':GEMINI_PROMPT},{'inline_data':{'mime_type':'audio/ogg' if path.suffix=='.ogg' else 'audio/wav','data':base64.b64encode(data).decode()}}]}]}); j={'text':''.join(p.get('text','') for p in j['candidates'][0]['content']['parts'])}
-        text=j.get('text') if isinstance(j,dict) else None
-        if not isinstance(text,str) or not text.strip(): raise RejectedTranscript('Порожня транскрипція')
-        if prompt_echo(text): raise RejectedTranscript('Повторення старого промпту')
-        if re.search(r'\b(?:bláď|bljať|blyat|bljad|blatj)\b',text,re.I) and not re.search(r'[А-Яа-яІіЇїЄєҐґ]',text):
-            raise RejectedTranscript('Підозріла транслітерація мовлення')
-        if unsupported_language(j):
-            raise RejectedTranscript('Мова поза списком підтримуваних')
-        return text.strip(), confidence(j)
+        return validate_audio_result(j)
+def validate_audio_result(j):
+    text=j.get('text') if isinstance(j,dict) else None
+    if not isinstance(text,str) or not text.strip(): raise RejectedTranscript('Порожня транскрипція')
+    if prompt_echo(text): raise RejectedTranscript('Повторення старого промпту')
+    if re.search(r'\b(?:bláď|bljať|blyat|bljad|blatj)\b',text,re.I) and not re.search(r'[А-Яа-яІіЇїЄєҐґ]',text):
+        raise RejectedTranscript('Підозріла транслітерація мовлення')
+    if unsupported_language(j):
+        raise RejectedTranscript('Мова поза списком підтримуваних')
+    return text.strip(), confidence(j)
 @dp.message(F.voice | F.video_note)
 async def voice(m:Message):
     global audio_load_wait,load_task
@@ -547,7 +597,7 @@ async def run_audio_load_inner(m,config,progress):
     if (item.file_size or 0)>10*1024*1024: return await m.reply('Файл завеликий.')
     start=time.monotonic()
     deadline=start+180
-    slots=asyncio.Semaphore(audio_settings()[3])
+    slots=asyncio.Semaphore(audio_slot_limit())
     peak=active=0
     results=[]
     tasks=[]
@@ -574,7 +624,7 @@ async def run_audio_load_inner(m,config,progress):
                     order=routes if config['mode']=='auto' else [routes[i%len(routes)]]
                     for k in order:
                         if not testing_enabled() or time.monotonic()>=deadline: break
-                        if blocked(k)>time.time() or k in active_providers:
+                        if blocked(k)>time.time() or (audio_platform()=='FadeHost' and k in active_providers):
                             attempts.append(NAMES[k]+': зайнятий/ліміт')
                             continue
                         if config['mode']=='auto' and MODELS[k][1]==2:
@@ -583,7 +633,7 @@ async def run_audio_load_inner(m,config,progress):
                         active_providers.add(k)
                         try:
                             usage(k,seconds=(item.duration.total_seconds() if hasattr(item.duration,'total_seconds') else item.duration),attempt=1)
-                            await asyncio.wait_for(transcribe(k,p),min(30,max(0.1,deadline-time.monotonic())))
+                            await asyncio.wait_for(transcribe(k,p),min(80,max(0.1,deadline-time.monotonic())))
                             usage(k,success=1)
                             winner=NAMES[k]
                             overview_add(m,voices=int(bool(m.voice)),circles=int(bool(m.video_note)))
@@ -610,7 +660,7 @@ async def run_audio_load_inner(m,config,progress):
                 for t in done:
                     try: results.append(t.result())
                     except Exception as e: results.append(('',type(e).__name__))
-                try: await asyncio.wait_for(progress.edit_text(f'⏳ FadeHost: {len(results)}/{config["count"]}; активні: {active}; час: {time.monotonic()-start:.0f} с',reply_markup=progress.reply_markup),3)
+                try: await asyncio.wait_for(progress.edit_text(f'⏳ {audio_platform()}: {len(results)}/{config["count"]}; активні: {active}; час: {time.monotonic()-start:.0f} с',reply_markup=progress.reply_markup),3)
                 except Exception: pass
         except asyncio.CancelledError:
             cancelled=True
@@ -622,7 +672,7 @@ async def run_audio_load_inner(m,config,progress):
     try: await asyncio.wait_for(progress.edit_text('Тест скасовано.' if cancelled else ('Тест завершено з таймаутом.' if pending else 'Тест завершено.'),reply_markup=None),5)
     except Exception: pass
     ok=sum(bool(x[0]) for x in results)
-    chunk=f"FadeHost: {ok}/{len(results)} успішно; пік обробників {peak}; час {time.monotonic()-start:.2f} с\n"
+    chunk=f"{audio_platform()}: {ok}/{len(results)} успішно; пік обробників {peak}; час {time.monotonic()-start:.2f} с\n"
     for _,line in sorted(results,key=lambda x: int(re.match(r'#(\d+)',x[1]).group(1)) if re.match(r'#(\d+)',x[1]) else 0):
         if len(chunk)+len(line)>3500:
             await m.answer(chunk,parse_mode=None)
@@ -692,7 +742,7 @@ async def audio_settings_action(c):
         for start in range(1,maximum+1,5):
             rows.append([InlineKeyboardButton(text=('✓ ' if i==current else '')+str(i),callback_data='owner:audiohost:'+field+':'+str(i)) for i in range(start,min(start+5,maximum+1))])
     rows.append([InlineKeyboardButton(text='Назад',callback_data='owner:back')])
-    body=f'🎙 Аудіотранскрипція\nОсновний: Cloudflare — {cloud} слотів\nРезервний: FadeHost — {local} слотів\n\nCloudflare: інтеграція ще не активна. Зараз аудіо обробляє FadeHost.'
+    body=f'🎙 Аудіотранскрипція\nОсновний: Cloudflare — {cloud} слотів\nРезервний: FadeHost — {local} слотів\n\nПоточна платформа: {audio_platform()}'
     try: await c.message.edit_text(body,reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
     except Exception as e:
         if 'message is not modified' not in str(e).lower(): raise
@@ -849,13 +899,13 @@ async def process_voice(m,status):
         forced=test_route('audio',m)
         if forced:
             if forced=='ovh' and item.duration>15: return await status.edit_text('OVH: максимум 15 секунд')
-            if blocked(forced)>time.time() or forced in active_providers: return await status.edit_text('Тест: API зайнятий або ліміт вичерпано')
+            if blocked(forced)>time.time() or (audio_platform()=='FadeHost' and forced in active_providers): return await status.edit_text('Тест: API зайнятий або ліміт вичерпано')
             active_providers.add(forced)
             usage(forced,seconds=item.duration,attempt=1)
             try:
                 result,quality=await transcribe(forced,p)
                 usage(forced,success=1)
-                return await deliver_transcript(m,status,result+'\n\n🧪 FadeHost: '+NAMES[forced])
+                return await deliver_transcript(m,status,result+'\n\n🧪 '+audio_platform()+': '+NAMES[forced])
             except RateLimited as e:
                 block(forced,e.seconds)
                 block('quota:'+forced,e.seconds)
@@ -935,9 +985,9 @@ async def process_voice(m,status):
         await mark_disabled(status)
 async def worker(index=0):
     while True:
-        while index>=audio_settings()[3]: await asyncio.sleep(0.5)
+        while index>=audio_slot_limit(): await asyncio.sleep(0.5)
         m,status=await waiting.get()
-        while index>=audio_settings()[3] and enabled(): await asyncio.sleep(0.5)
+        while index>=audio_slot_limit() and enabled(): await asyncio.sleep(0.5)
         try:
             if not enabled():
                 await mark_disabled(status)
@@ -1495,7 +1545,7 @@ async def main():
     db.execute('CREATE TABLE IF NOT EXISTS cloud_pending (id TEXT PRIMARY KEY,chat INTEGER,day TEXT,budget INTEGER)')
     db.commit()
     logging.info('Cloud text Worker readiness: %s',await cloud_text_probe())
-    tasks=[asyncio.create_task(worker(i)) for i in range(4)]
+    tasks=[asyncio.create_task(worker(i)) for i in range(40)]
     if cloud_ready: tasks.append(asyncio.create_task(d1_monitor(session)))
     tasks.append(asyncio.create_task(quota_reset_monitor()))
     if os.getenv('CLOUD_TEXT_ENABLED','auto')!='0':
