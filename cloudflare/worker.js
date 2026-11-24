@@ -251,9 +251,9 @@ async function audioTranscribe(j,env){
  }else{
  r=await fetch("https://api.cloudflare.com/client/v4/accounts/"+env[model]+"/ai/run/@cf/openai/whisper-large-v3-turbo",{method:"POST",headers:{Authorization:"Bearer "+env[key],"Content-Type":"application/json"},body:JSON.stringify({audio:j.audio,task:"transcribe",initial_prompt:"Мут, мута, мути, муты, мутити, мутить, мутит, мутят, мутать, мутати, замутити, замутить, замутив, замутил, замутили, замутила, розмутити, размутить, розмутив, размутил, размутили, анмут, бан, бана, бани, баны, банити, банить, банит, банят, забанити, забанить, забанив, забанил, забанили, розбанити, разбанить, дал бан, мутит микрофон, замутили микрофон.",condition_on_previous_text:false,vad_filter:true,log_prob_threshold:-0.65,compression_ratio_threshold:2.0,no_speech_threshold:0.45}),signal:AbortSignal.timeout(30000)});
  }
- if(!r.ok)return Response.json({error:"ProviderHTTP",providerStatus:r.status,retryAfter:r.headers.get("Retry-After")},{status:422});
+ if(!r.ok){let detail="";try{const body=await r.json();detail=String(body?.error?.message||body?.errors?.[0]?.message||body?.message||"").slice(0,1000);}catch{}return Response.json({error:"ProviderHTTP",detail,providerStatus:r.status,retryAfter:r.headers.get("Retry-After")},{status:422});}
  const data=await r.json();return Response.json({result:j.route.startsWith("cf")?data.result:data});
- }catch(e){return Response.json({error:"ProviderFailure"},{status:422});}
+ }catch(e){return Response.json({error:"ProviderFailure",detail:String(e?.name||"Error")+": "+String(e?.message||"").slice(0,500)},{status:422});}
 }
 
 async function audioOvh(j,env){
@@ -262,7 +262,7 @@ async function audioOvh(j,env){
  const bytes=Uint8Array.from(atob(j.audio),c=>c.charCodeAt(0));
  if(bytes.length>480000||bytes.length%2)return Response.json({error:"Invalid PCM"},{status:400});
  const r=await fetch("https://oai.endpoints.kepler.ai.cloud.ovh.net/gladia/v2/live?region=eu-west",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({model:"solaria-3",encoding:"wav/pcm",sample_rate:16000,bit_depth:16,channels:1,messages_config:{receive_final_transcripts:true}}),signal:AbortSignal.timeout(15000)});
- if(!r.ok)return Response.json({error:"ProviderHTTP",providerStatus:r.status,retryAfter:r.headers.get("Retry-After")},{status:422});
+ if(!r.ok){let detail="";try{const body=await r.json();detail=String(body?.error?.message||body?.errors?.[0]?.message||body?.message||"").slice(0,1000);}catch{}return Response.json({error:"ProviderHTTP",detail,providerStatus:r.status,retryAfter:r.headers.get("Retry-After")},{status:422});}
  const {url}=await r.json();const u=new URL(url);if(u.protocol!=="wss:")throw Error("Invalid socket");
  const socket=await fetch(url.replace(/^wss:/,"https:"),{headers:{Upgrade:"websocket"}});
  const ws=socket.webSocket;if(!ws)throw Error("No socket");
