@@ -750,6 +750,21 @@ async def payment_support(m:Message):
 async def private_stats(m:Message):
     chat=m.chat.id
     await m.answer(f'Тариф: {"Premium" if premium_until(chat)>time.time() else "Free"}\nТокени: {group_used(chat)} / {private_limit(chat)} (UTC)\n/premium — придбати Premium.')
+@dp.message(Command('limit'))
+async def show_limit(m:Message):
+    if m.chat.type not in ('private','group','supergroup'): return
+    chat=m.chat.id
+    limit=private_limit(chat) if m.chat.type=='private' else group_limit(chat)
+    used=group_used(chat)
+    left=max(0,limit-used)
+    pct=100*used/limit
+    filled=min(10,max(0,int(pct/10)))
+    now=datetime.datetime.now(datetime.timezone.utc)
+    reset=(now+datetime.timedelta(days=1)).replace(hour=0,minute=0,second=0,microsecond=0)
+    minutes=int((reset-now).total_seconds()/60)
+    tariff='Premium' if premium_until(chat)>time.time() else 'Free'
+    await m.reply(f'📊 Ліміт ШІ — {tariff}\n\nВикористано: {used:,} / {limit:,}\nЗалишилося: {left:,} токенів\n'+ '█'*filled+'░'*(10-filled)+f' {pct:.1f}%\n\nСкидання через {minutes//60} г {minutes%60} хв (00:00 UTC)\nОблік сумарний для всіх API.'.replace(',', ' '),parse_mode=None)
+
 @dp.message(F.text,F.chat.type.in_({'group','supergroup','private'}))
 async def text_message(m:Message):
     if not m.from_user or m.from_user.is_bot: return
