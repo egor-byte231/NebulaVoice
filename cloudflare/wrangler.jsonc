@@ -30,6 +30,10 @@
       {
         "name": "DISPATCHER",
         "class_name": "Dispatcher"
+      },
+      {
+        "name": "EXECUTOR",
+        "class_name": "Executor"
       }
     ]
   },
@@ -38,6 +42,12 @@
       "tag": "v1",
       "new_sqlite_classes": [
         "Dispatcher"
+      ]
+    },
+    {
+      "tag": "v2",
+      "new_sqlite_classes": [
+        "Executor"
       ]
     }
   ]
