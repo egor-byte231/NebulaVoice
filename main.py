@@ -22,6 +22,50 @@ db.execute('CREATE TABLE IF NOT EXISTS quota_headers (provider TEXT PRIMARY KEY,
 db.execute('CREATE TABLE IF NOT EXISTS ovh_requests (at REAL)')
 db.execute('CREATE TABLE IF NOT EXISTS quota_alerts (period TEXT, provider TEXT, threshold INTEGER, PRIMARY KEY(period,provider,threshold))')
 db.commit()
+db.execute('CREATE TABLE IF NOT EXISTS overview_daily (day TEXT, scope TEXT, voices INTEGER NOT NULL DEFAULT 0, circles INTEGER NOT NULL DEFAULT 0, requests INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(day,scope))')
+db.execute('CREATE TABLE IF NOT EXISTS overview_start (id INTEGER PRIMARY KEY, day TEXT)')
+db.execute('INSERT OR IGNORE INTO overview_start VALUES (1,?)',(datetime.datetime.now(datetime.timezone.utc).date().isoformat(),))
+db.commit()
+
+def overview_add(m,voices=0,circles=0,requests=0):
+    scope='private' if m.chat.type=='private' else 'groups'
+    day=datetime.datetime.now(datetime.timezone.utc).date().isoformat()
+    db.execute('INSERT INTO overview_daily VALUES (?,?,?,?,?) ON CONFLICT(day,scope) DO UPDATE SET voices=voices+excluded.voices,circles=circles+excluded.circles,requests=requests+excluded.requests',(day,scope,voices,circles,requests))
+    db.commit()
+
+def overview_menu(scope=None):
+    rows=[]
+    if scope is None:
+        for key,label in [('groups','👥 Статистика в групах'),('private','👤 Статистика в ЛС'),('all','🌐 Загальна статистика')]:
+            rows.append([InlineKeyboardButton(text=label,callback_data='owner:overview:'+key)])
+        back='owner:back'
+    else:
+        rows.append([InlineKeyboardButton(text='🔄 Оновити',callback_data='owner:overview:'+scope)])
+        back='owner:overview'
+    rows.append([InlineKeyboardButton(text='⬅️ Назад',callback_data=back)])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+def overview_report(scope):
+    today=datetime.datetime.now(datetime.timezone.utc).date()
+    day=datetime.timedelta(days=1)
+    week=today-datetime.timedelta(days=today.weekday())
+    month=today.replace(day=1)
+    previous_month=month-day
+    periods=[('Сьогодні',today,today),('Вчора',today-day,today-day),('Минулий тиждень',week-7*day,week-day),('Минулий місяць',previous_month.replace(day=1),previous_month),('За весь час',datetime.date(1970,1,1),today)]
+    titles={'groups':'👥 Статистика в групах','private':'👤 Статистика в ЛС','all':'🌐 Загальна статистика'}
+    lines=['<b>'+titles[scope]+'</b>','Періоди за UTC']
+    for label,start,end in periods:
+        args=(start.isoformat(),end.isoformat())
+        sql='SELECT COALESCE(SUM(voices),0),COALESCE(SUM(circles),0),COALESCE(SUM(requests),0) FROM overview_daily WHERE day BETWEEN ? AND ?'
+        v,c,r=db.execute(sql+(' AND scope=?' if scope!='all' else ''),args+((scope,) if scope!='all' else ())).fetchone()
+        sql='SELECT COALESCE(SUM(tokens),0) FROM text_group_usage WHERE day BETWEEN ? AND ?'
+        t=db.execute(sql+({'groups':' AND chat<0','private':' AND chat>0','all':''}[scope]),args).fetchone()[0]
+        values=[('Голосові',v),('Кружечки',c),('Запити ШІ',r),('Токени',t)]
+        lines.extend(['','<b>'+label+'</b>','<pre>'+html.escape('\n'.join(f'{k:<12} {format(n,",").replace(","," "):>14}' for k,n in values))+'</pre>'])
+    started=db.execute('SELECT day FROM overview_start WHERE id=1').fetchone()[0]
+    lines.extend(['','Голосові, кружечки та запити рахуються з '+started+'. Токени — за наявними записами лімітів (можуть містити оцінки невдалих спроб).'])
+    return '\n'.join(lines)
+
 def development_enabled():
     return bool(db.execute('SELECT enabled FROM development_mode WHERE id=1').fetchone()[0])
 
@@ -307,6 +351,7 @@ async def deliver_transcript(m,status,result):
         if i==len(chunks)-1 and development_enabled(): body+='\n\n<blockquote>'+html.escape(DISCLAIMER)+'</blockquote>'
         if i==0: await status.edit_text(body,parse_mode='HTML')
         else: await m.reply(body,parse_mode='HTML')
+    if chunks: overview_add(m,voices=int(bool(m.voice)),circles=int(bool(m.video_note)))
 async def transcribe(k,path):
     provider,n,model=MODELS[k]
     data=path.read_bytes()
@@ -345,7 +390,7 @@ active_providers=set()
 active_jobs={}
 DISABLED='⚠️ Транскрипцію тимчасово вимкнено.'
 def owner_menu():
-    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='⏸ Вимкнути' if enabled() else '▶️ Увімкнути',callback_data='owner:toggle')],[InlineKeyboardButton(text='📊 Статистика',callback_data='owner:stats')],[InlineKeyboardButton(text='🤖 Статистика ШІ',callback_data='owner:ai')],[InlineKeyboardButton(text='🟢 Режим розробки: ON' if development_enabled() else '🔴 Режим розробки: OFF',callback_data='owner:development')]])
+    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='⏸ Вимкнути' if enabled() else '▶️ Увімкнути',callback_data='owner:toggle')],[InlineKeyboardButton(text='📊 Статистика',callback_data='owner:stats')],[InlineKeyboardButton(text='🤖 Статистика ШІ',callback_data='owner:ai')],[InlineKeyboardButton(text='📈 Загальна статистика',callback_data='owner:overview')],[InlineKeyboardButton(text='🟢 Режим розробки: ON' if development_enabled() else '🔴 Режим розробки: OFF',callback_data='owner:development')]])
 error_alert_times={}
 async def notify_error(where,error):
     raw=str(error)
@@ -393,6 +438,15 @@ async def owner_action(c:CallbackQuery):
     if c.from_user.id!=OWNER or not isinstance(c.message,Message) or c.message.chat.type!='private':
         return await c.answer('Тільки власник',show_alert=True)
     await c.answer()
+    if c.data=='owner:overview':
+        return await c.message.edit_text('📈 Загальна статистика — обери розділ',reply_markup=overview_menu())
+    if c.data.startswith('owner:overview:'):
+        scope=c.data.rsplit(':',1)[-1]
+        if scope not in ('groups','private','all'): return
+        try: await c.message.edit_text(overview_report(scope),parse_mode='HTML',reply_markup=overview_menu(scope))
+        except Exception as e:
+            if 'message is not modified' not in str(e).lower(): raise
+        return
     if c.data=='owner:ai':
         try: await c.message.edit_text(text_report(),parse_mode='HTML',reply_markup=text_stats_menu())
         except Exception as e:
@@ -844,6 +898,7 @@ async def text_message(m:Message):
     if chat in group_busy or len(group_busy)>=4: return await m.reply('⏳ ШІ зайнятий. Спробуй трохи пізніше.')
     group_busy.add(chat)
     try:
+        overview_add(m,requests=1)
         context=''
         history=list(group_history.get(chat,[]))
         if history and history[-1].endswith(': '+raw): history=history[:-1]
