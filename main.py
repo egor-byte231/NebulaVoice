@@ -925,6 +925,7 @@ async def cloud_restore_reservations():
     rows=await d1_query(history_session,'SELECT id,chat,day,budget FROM cloud_reservations WHERE day=?',(text_day(),))
     for row in rows:
         with db:
+            if db.execute('SELECT 1 FROM cloud_completed WHERE id=?',(row['id'],)).fetchone(): continue
             inserted=db.execute('INSERT OR IGNORE INTO cloud_pending VALUES (?,?,?,?)',(row['id'],row['chat'],row['day'],row['budget']))
             if inserted.rowcount:
                 db.execute('INSERT INTO text_group_usage VALUES (?,?,?) ON CONFLICT(day,chat) DO UPDATE SET tokens=tokens+excluded.tokens',(row['day'],row['chat'],row['budget']))
@@ -941,6 +942,7 @@ async def cloud_reconcile():
                     db.execute('UPDATE text_group_usage SET tokens=tokens+? WHERE day=? AND chat=?',(actual-budget,day,chat))
                     for name,usage in json.loads(rows[0]['routes']).items():
                         db.execute('INSERT INTO text_usage VALUES (?,?,?,?) ON CONFLICT(day,route) DO UPDATE SET tokens=tokens+excluded.tokens,attempts=attempts+excluded.attempts',(day,name,usage['tokens'],usage['attempts']))
+                    db.execute('INSERT OR IGNORE INTO cloud_completed VALUES (?)',(job_id,))
                     db.execute('DELETE FROM cloud_pending WHERE id=?',(job_id,))
                 await d1_snapshot(history_session)
                 await d1_query(history_session,'DELETE FROM cloud_reservations WHERE id=?',(job_id,))
@@ -1087,6 +1089,7 @@ async def main():
         await session.close()
         raise
     history_session=session
+    db.execute('CREATE TABLE IF NOT EXISTS cloud_completed (id TEXT PRIMARY KEY)')
     db.execute('CREATE TABLE IF NOT EXISTS cloud_pending (id TEXT PRIMARY KEY,chat INTEGER,day TEXT,budget INTEGER)')
     db.commit()
     logging.info('Cloud text Worker readiness: %s',await cloud_text_probe())
