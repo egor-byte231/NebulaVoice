@@ -386,8 +386,39 @@ async def worker():
             await notify_error('Обробка аудіо',e)
             await mark_disabled(status)
         finally: waiting.task_done()
+async def quota_reset_monitor():
+    while True:
+        try:
+            day=datetime.datetime.now(datetime.timezone.utc).date().isoformat()
+            for k in ORDER:
+                if k=='ovh':
+                    row=db.execute("SELECT period FROM quota_alerts WHERE provider=? AND threshold=0 AND period LIKE 'ovh:%' ORDER BY period DESC LIMIT 1",(k,)).fetchone()
+                    if not row: continue
+                    period=row[0]
+                    recent=db.execute('SELECT COUNT(*) FROM ovh_requests WHERE at>?',(time.time()-60,)).fetchone()[0]
+                    if recent>=2 or blocked('quota:'+k)>time.time(): continue
+                    details=f'Доступно: ≈ {max(0,2-recent)} / 2 запити за 60 с'
+                else:
+                    row=db.execute('SELECT day FROM usage_daily WHERE provider=? AND day<? AND seconds>0 ORDER BY day DESC LIMIT 1',(k,day)).fetchone()
+                    if not row: continue
+                    period='reset:'+day
+                    if blocked('quota:'+k)>time.time(): continue
+                    current=db.execute('SELECT seconds FROM usage_daily WHERE provider=? AND day=?',(k,day)).fetchone()
+                    seconds=current[0] if current else 0
+                    if k.startswith('groq'):
+                        details=f'Добова квота: ≈ 8 год аудіо\nЗалишилось: ≈ {max(0,28800-seconds)} с аудіо'
+                    else:
+                        details=f'Добова квота: ≈ 10000 neurons\nЗалишилось: ≈ {max(0,10000-seconds*46.63/60):.1f} neurons'
+                if db.execute('SELECT 1 FROM quota_alerts WHERE period=? AND provider=? AND threshold=101',(period,k)).fetchone(): continue
+                await bot.send_message(OWNER,f'🟢 Ліміт поновлено (локальна оцінка)\n\n{NAMES[k]}\n\n{details}\n\nФактичне поновлення залежить від API. Транскрипція автоматично не вмикається.')
+                db.execute('INSERT OR IGNORE INTO quota_alerts VALUES (?,?,101)',(period,k))
+                db.commit()
+        except Exception as e:
+            logging.warning('Quota reset monitor failed: %s',type(e).__name__)
+        await asyncio.sleep(15)
 async def main():
     tasks=[asyncio.create_task(worker()) for _ in range(4)]
+    tasks.append(asyncio.create_task(quota_reset_monitor()))
     try: await dp.start_polling(bot,handle_as_tasks=True)
     finally:
         for task in tasks: task.cancel()
