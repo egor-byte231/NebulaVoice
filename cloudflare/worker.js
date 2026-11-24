@@ -167,9 +167,11 @@ async function generate(j,env){
  return rows.results.reverse().map(r=>r.line).join("\n");
  }
  let context="";
+ const historyPromise=j.load?null:loadHistory().then(value=>({value}),error=>({error}));
  for(let pass=0;pass<2;pass++){
   let need=false;
   const ordered=j.forcedRoute?ROUTES.filter(r=>r[0]===j.forcedRoute):ROUTES.slice().sort((a,b)=>Number(a[0].startsWith("Airforce"))-Number(b[0].startsWith("Airforce")));
+  if(!j.forcedRoute&&!j.load){const preferred=pass===0?["Groq 1 20B","Groq 2 20B"]:["Groq 1","Groq 2"];const rank=r=>preferred.includes(r[0])?preferred.indexOf(r[0]):2;ordered.sort((a,b)=>rank(a)-rank(b));}
   for(const name of ["Requesty","Airforce"]){
    const i=ordered.findIndex(r=>r[0]===name), k=ordered.findIndex(r=>r[0]===name+" 2");
    if(i>=0 && k>=0 && env[ordered[k][1]] && env[ordered[i][1]] && Math.random()<0.5) [ordered[i],ordered[k]]=[ordered[k],ordered[i]];
@@ -191,7 +193,7 @@ async function generate(j,env){
     if(spent+reserve>j.budget)return finish("🔋 Добовий ліміт ШІ вичерпано або недостатній для цього запиту.");
     const usage=routes[name]??={tokens:0,attempts:0,unknown:0,estimated:0,actual_tokens:0,estimated_tokens:0};
     usage.attempts++;
-    const r=await fetch(url,{method:"POST",headers:{"Authorization":"Bearer "+env[key],"Content-Type":"application/json"},body:JSON.stringify({model,max_tokens:500,messages}),signal:AbortSignal.timeout(name.startsWith('Airforce')?8000:20000)});
+    const r=await fetch(url,{method:"POST",headers:{"Authorization":"Bearer "+env[key],"Content-Type":"application/json"},body:JSON.stringify({model,max_tokens:500,messages}),signal:AbortSignal.timeout(!j.load&&!j.forcedRoute&&pass===0?5000:name.startsWith('Airforce')?8000:20000)});
     usage.status=r.status;
     if(!r.ok){
       if(r.status===429){
@@ -217,7 +219,7 @@ async function generate(j,env){
    finally{if(leaseToken)await gate.fetch("https://dispatcher/requesty/release",{method:"POST",body:JSON.stringify({token:leaseToken})}).catch(()=>{});}
   }
   if(!need)break;
-  if(history===undefined)history=await loadHistory();
+  if(history===undefined){const loaded=historyPromise?await historyPromise:{value:await loadHistory()};if(loaded.error)return finish("Не вдалося завантажити історію чату. Спробуй ще раз.");history=loaded.value;}
   context=history||"";
   if(j.replyText)context+="\nПовідомлення, на яке відповідають:\n"+String(j.replyText).slice(0,1500);
   if(!context.trim())return finish("Поки немає збережених повідомлень для аналізу.");
