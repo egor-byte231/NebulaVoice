@@ -67,16 +67,41 @@ async def transcribe(k,path):
         text=j.get('text') if isinstance(j,dict) else None
         if not isinstance(text,str) or not text.strip(): raise ValueError('API не повернув текст')
         return text.strip()
+@dp.message(Command('transcribe'))
+async def manual(m:Message):
+    if not m.from_user or m.from_user.id!=OWNER: return
+    target=m.reply_to_message
+    if not target or not (target.voice or target.video_note):
+        return await m.reply('Відповідай командою /transcribe на голосове або кружечок.')
+    if get(m.chat.id) not in NAMES:
+        return await m.reply('Спочатку вибери модель через /test.')
+    await target.reply('Готовий до транскрипції.',reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='🎙 Транскрибувати',callback_data='transcribe')]]))
+
+@dp.callback_query(F.data=='transcribe')
+async def manual_click(c:CallbackQuery):
+    if c.from_user.id!=OWNER: return await c.answer('Тільки власник',show_alert=True)
+    if not isinstance(c.message,Message): return await c.answer('Повідомлення недоступне',show_alert=True)
+    target=c.message.reply_to_message
+    if not target or not (target.voice or target.video_note): return await c.answer('Оригінал недоступний',show_alert=True)
+    if lock.locked(): return await c.answer('Попередній тест ще триває',show_alert=True)
+    if get(c.message.chat.id) not in NAMES: return await c.answer('Вибери модель через /test',show_alert=True)
+    await c.answer()
+    await process_voice(target,c.message)
+
 @dp.message(F.voice | F.video_note)
 async def voice(m:Message):
     if not m.from_user or m.from_user.id!=OWNER: return
+    if get(m.chat.id) not in NAMES: return
+    await m.reply('Готовий до транскрипції.',reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='🎙 Транскрибувати',callback_data='transcribe')]]))
+
+async def process_voice(m:Message,status:Message):
     k=get(m.chat.id)
     if k not in NAMES: return
     item=m.voice or m.video_note
     if (item.file_size or 0)>10*1024*1024: return await m.reply('Файл завеликий для тестової версії (10 МБ).')
     if lock.locked(): return await m.reply('Попередній тест ще триває. Повтори пізніше.')
     async with lock:
-        status=await m.reply('⏳ '+NAMES[k]); t=time.monotonic()
+        await status.edit_text('⏳ Транскрибую...',reply_markup=None); t=time.monotonic()
         try:
             with tempfile.TemporaryDirectory() as d:
                 p=Path(d)/('voice.ogg' if m.voice else 'circle.mp4'); await bot.download(item,destination=p)
@@ -85,8 +110,8 @@ async def voice(m:Message):
                     if await proc.wait()!=0: raise ValueError('Не вдалося витягти аудіо')
                     p=out
                 text=await transcribe(k,p)
-            await status.edit_text(f'✅ {NAMES[k]} | {time.monotonic()-t:.1f} с | аудіо {item.duration} с')
-            for i in range(0,len(text),3900): await m.reply(text[i:i+3900])
+            await status.edit_text('📝 '+text[:3900],reply_markup=None)
+            for i in range(3900,len(text),3900): await m.reply(text[i:i+3900])
         except ValueError as e: await status.edit_text('❌ '+NAMES[k]+': '+str(e))
         except Exception as e: await status.edit_text('❌ '+NAMES[k]+': '+type(e).__name__+' (перевір налаштування або мережу)')
 async def main():
