@@ -425,7 +425,7 @@ async def cloud_audio(k,path):
                             try: delay=max(1,int(j.get('retryAfter') or 60))
                             except ValueError: delay=60
                             raise RateLimited(delay)
-                        raise ValueError(j.get('error','ProviderFailure'))
+                        raise ValueError(f"Provider HTTP {j.get('providerStatus','unknown')}: {j.get('detail') or j.get('error','ProviderFailure')}")
                     if response.status!=200 or not isinstance(j.get('result'),dict): raise ValueError('Cloudflare audio response')
                     return j['result']
             except (aiohttp.ClientConnectionError,aiohttp.ServerTimeoutError,asyncio.TimeoutError):
@@ -747,7 +747,7 @@ async def audio_settings_action(c):
 def owner_menu():
     return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='⏸ Вимкнути' if enabled() else '▶️ Увімкнути',callback_data='owner:toggle')],[InlineKeyboardButton(text='📊 Статистика',callback_data='owner:stats')],[InlineKeyboardButton(text='🤖 Статистика ШІ',callback_data='owner:ai')],[InlineKeyboardButton(text='⚙️ Кількість слотів ШІ',callback_data='owner:slots')],[InlineKeyboardButton(text='🎙 Платформи аудіо',callback_data='owner:audiohost')],[InlineKeyboardButton(text='📈 Загальна статистика',callback_data='owner:overview')],[InlineKeyboardButton(text='🟢 Режим розробки: ON' if development_enabled() else '🔴 Режим розробки: OFF',callback_data='owner:development')],[InlineKeyboardButton(text='🧪 Режим тестування: ON' if testing_enabled() else '🧪 Режим тестування: OFF',callback_data='owner:testing')],[InlineKeyboardButton(text='🔄 Обнулити мій ліміт',callback_data='owner:reset_limit')]]+([[InlineKeyboardButton(text='🎙 Тест аудіо',callback_data='owner:testmenu:audio')],[InlineKeyboardButton(text='💬 Тест тексту',callback_data='owner:testmenu:text')],[InlineKeyboardButton(text='⚡ Тест навантаження',callback_data='owner:load')]] if testing_enabled() else []))
 error_alert_times={}
-async def notify_error(where,error):
+async def notify_error(where,error,source=None,replacement=None):
     raw=str(error)
     # Only locally defined diagnostics and HTTP status codes are exposed.
     allowed=('Не вдалося конвертувати аудіо для OVH','OVH: максимум 15 секунд','OVH: некоректна адреса сесії','OVH: помилка live-сесії','OVH: помилка WebSocket','Не вдалося витягти аудіо','API не повернув текст','Порожня транскрипція','Повторення старого промпту','FFmpeg')
@@ -761,12 +761,17 @@ async def notify_error(where,error):
     elif isinstance(error,KeyError): detail='У відповіді API відсутнє необхідне поле'
     elif isinstance(error,FileNotFoundError): detail='Не знайдено необхідний файл або програму'
     else: detail='Невідома причина; тип помилки: '+type(error).__name__
-    key=(where,detail)
+    if source:
+        detail=re.sub(r'(?i)(bearer\s+|(?:api[_-]?key|token|secret)\s*[:=]\s*)\S+',r'\1[REDACTED]',raw)
+        for name,value in os.environ.items():
+            if value and len(value)>=8 and any(x in name.upper() for x in ('KEY','TOKEN','SECRET','PASSWORD')): detail=detail.replace(value,'[REDACTED]')
+        detail=detail[:1200] or type(error).__name__
+    key=(where,detail,source)
     now=time.monotonic()
     if now-error_alert_times.get(key,float('-inf'))<300: return
     error_alert_times[key]=now
     try:
-        await bot.send_message(OWNER,f'⚠️ Помилка NebulaVoice\n\nЕтап: {where}\nТип: {type(error).__name__}\nПричина: {detail}')
+        await bot.send_message(OWNER,f'⚠️ Помилка NebulaVoice\n\nЕтап: {where}\nТип: {type(error).__name__}\nПричина: {detail}'+(f'\nШІ, що замінив: {replacement}\n\nАудіо: {source}' if source else ''),parse_mode=None)
     except Exception as e:
         error_alert_times.pop(key,None)
         logging.warning('Owner error notification failed: %s',type(e).__name__)
@@ -881,6 +886,19 @@ async def owner_action(c:CallbackQuery):
     await c.message.edit_reply_markup(reply_markup=owner_menu())
 
 async def process_voice(m,status):
+    failures=[]
+    selected=[]
+    try:
+        return await process_voice_inner(m,status,failures,selected)
+    finally:
+        if failures:
+            chat=m.chat
+            link=(f'https://t.me/{chat.username}/{m.message_id}' if chat.username else f'https://t.me/c/{str(chat.id)[4:]}/{m.message_id}' if str(chat.id).startswith('-100') else None)
+            source=link or f'Чат {chat.id}, повідомлення {m.message_id} (пряме посилання недоступне)'
+            for where,error in failures:
+                await notify_error(where,error,source=source,replacement=selected[-1] if selected else 'Не визначено / транскрипцію не завершено')
+
+async def process_voice_inner(m,status,failures,selected):
     global ovh_cooldown_until
     item=m.voice or m.video_note
     await status.edit_text('⏳ Транскрибую...')
@@ -897,7 +915,7 @@ async def process_voice(m,status):
             finally:
                 if proc.returncode is None: proc.kill(); await proc.wait()
             if code!=0:
-                await notify_error('Нормалізація аудіо',ValueError('FFmpeg'))
+                failures.append(('Нормалізація аудіо',ValueError('FFmpeg')))
                 if m.video_note: raise ValueError('Не вдалося витягти аудіо')
             else:
                 p=out
@@ -921,6 +939,7 @@ async def process_voice(m,status):
                 usage(forced,limited=1)
                 return await status.edit_text('Тест: '+NAMES[forced]+' — HTTP 429')
             except Exception as e:
+                failures.append((NAMES[forced],e))
                 return await status.edit_text('Тест: '+NAMES[forced]+' — '+type(e).__name__)
             finally:
                 audio_profile_active[forced]-=1
@@ -950,7 +969,7 @@ async def process_voice(m,status):
                     result,quality=await transcribe(k,p)
                 except RejectedTranscript as e:
                     rejected.add(k)
-                    await notify_error(NAMES[k]+' — '+str(e),e)
+                    failures.append((NAMES[k],e))
                     continue
                 except RateLimited as e:
                     block(k,e.seconds)
@@ -959,11 +978,12 @@ async def process_voice(m,status):
                     db.execute('INSERT OR REPLACE INTO quota_headers VALUES (?,?)',(k,e.info or 'API не повідомив залишок'))
                     db.commit()
                     await quota_alert(k,rate_error=True)
+                    failures.append((NAMES[k],ValueError('HTTP 429: ліміт API')))
                     continue
                 except Exception as e:
                     logging.warning('Provider %s failed: %s',k,type(e).__name__)
                     block(k,60)
-                    await notify_error(NAMES[k],e)
+                    failures.append((NAMES[k],e))
                     continue
                 finally:
                     audio_profile_active[k]-=1
@@ -973,15 +993,19 @@ async def process_voice(m,status):
                 if not enabled(): return await mark_disabled(status)
                 tried_models.add(MODELS[k][2])
                 if candidate:
-                    old_text,old_quality=candidate
+                    old_text,old_quality,old_k=candidate
                     if (quality[2] and not old_quality[2]) or (quality[2]==old_quality[2] and (quality[1] is None or (quality[0] and old_quality[1] is not None and quality[1]<=old_quality[1]))):
                         result=old_text
+                        k=old_k
+                    selected.append(NAMES[k])
                     return await deliver_transcript(m,status,result)
                 if quality[0]:
-                    candidate=(result,quality)
+                    candidate=(result,quality,k)
                     continue
+                selected.append(NAMES[k])
                 return await deliver_transcript(m,status,result)
             if candidate:
+                selected.append(NAMES[candidate[2]])
                 return await deliver_transcript(m,status,candidate[0])
             if rejected:
                 await notify_error('Жодна доступна модель не повернула прийнятну транскрипцію',RejectedTranscript())
