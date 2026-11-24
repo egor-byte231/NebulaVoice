@@ -542,7 +542,7 @@ async def safe_audio_load(m,config):
 async def run_audio_load_inner(m,config,progress):
     item=m.voice or m.video_note
     routes=config['routes'] if config['mode']=='selected' else list(ORDER)
-    if item.duration>15: routes=[k for k in routes if k!='ovh']
+    if (item.duration.total_seconds() if hasattr(item.duration,'total_seconds') else item.duration)>15: routes=[k for k in routes if k!='ovh']
     if not routes: return await progress.edit_text('Немає сумісних моделей.',reply_markup=None)
     if (item.file_size or 0)>10*1024*1024: return await m.reply('Файл завеликий.')
     start=time.monotonic()
@@ -551,7 +551,7 @@ async def run_audio_load_inner(m,config,progress):
     peak=active=0
     results=[]
     tasks=[]
-    async with tempfile.TemporaryDirectory() as d:
+    with tempfile.TemporaryDirectory() as d:
         src=Path(d)/'source'
         p=Path(d)/'normalized.ogg'
         await asyncio.wait_for(bot.download(item,destination=src),30)
@@ -582,7 +582,7 @@ async def run_audio_load_inner(m,config,progress):
                             if blocked('quota:'+primary)<=time.time(): continue
                         active_providers.add(k)
                         try:
-                            usage(k,seconds=item.duration,attempt=1)
+                            usage(k,seconds=(item.duration.total_seconds() if hasattr(item.duration,'total_seconds') else item.duration),attempt=1)
                             await asyncio.wait_for(transcribe(k,p),min(30,max(0.1,deadline-time.monotonic())))
                             usage(k,success=1)
                             winner=NAMES[k]
