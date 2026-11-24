@@ -306,7 +306,7 @@ active_providers=set()
 active_jobs={}
 DISABLED='⚠️ Транскрипцію тимчасово вимкнено.'
 def owner_menu():
-    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='⏸ Вимкнути' if enabled() else '▶️ Увімкнути',callback_data='owner:toggle')],[InlineKeyboardButton(text='📊 Статистика',callback_data='owner:stats')],[InlineKeyboardButton(text='🤖 Тест ШІ',callback_data='owner:ai')]])
+    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='⏸ Вимкнути' if enabled() else '▶️ Увімкнути',callback_data='owner:toggle')],[InlineKeyboardButton(text='📊 Статистика',callback_data='owner:stats')],[InlineKeyboardButton(text='🤖 Статистика ШІ',callback_data='owner:ai')]])
 error_alert_times={}
 async def notify_error(where,error):
     raw=str(error)
@@ -355,7 +355,10 @@ async def owner_action(c:CallbackQuery):
         return await c.answer('Тільки власник',show_alert=True)
     await c.answer()
     if c.data=='owner:ai':
-        return await c.message.edit_text('🤖 Текстовий ШІ: автоматичний режим.\n Напиши повідомлення для приватного тесту. /ai_status — статистика.',reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='⬅️ Назад',callback_data='owner:back')]]))
+        try: await c.message.edit_text(text_report(),parse_mode='HTML',reply_markup=text_stats_menu())
+        except Exception as e:
+            if 'message is not modified' not in str(e).lower(): raise
+        return
     if c.data=='owner:stats':
         try: await c.message.edit_text(report(),parse_mode='HTML',reply_markup=stats_menu())
         except Exception as e:
@@ -554,16 +557,29 @@ async def text_diagnose(m:Message):
             lines.append(route[0]+': '+type(e).__name__)
     await m.answer('\n'.join(lines)[:3900],parse_mode=None)
 
+def text_stats_menu():
+    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='🔄 Оновити',callback_data='owner:ai')],[InlineKeyboardButton(text='⬅️ Назад',callback_data='owner:back')]])
+def text_report():
+    day=text_day()
+    rows={r[0]:r[1:] for r in db.execute('SELECT route,tokens,attempts FROM text_usage WHERE day=?',(day,))}
+    def panel(items):
+        return '<pre>'+html.escape('\n'.join(f'{label:<17} {str(value):>10}' for label,value in items))+'</pre>'
+    groups=db.execute('SELECT COUNT(*) FROM text_groups').fetchone()[0]
+    group_tokens=db.execute('SELECT COALESCE(SUM(tokens),0) FROM text_group_usage WHERE day=?',(day,)).fetchone()[0]
+    lines=['🤖 <b>Статистика текстового ШІ</b>',f'📅 {day} (UTC)','Автоматичний режим','', '<b>Загальна статистика</b>',panel([('Токени (оцінка)',sum(r[0] for r in rows.values())),('Спроби',sum(r[1] for r in rows.values())),('Токени груп',group_tokens),('Активні групи',groups),('Обробка',f'{len(group_busy)} / 4'),('Ліміт на групу',30000)])]
+    for route in TEXT_ROUTES:
+        name=route[0]
+        tokens,attempts=rows.get(name,(0,0))
+        remaining=max(0,int(blocked('text:'+name)-time.time()))
+        state='⚪ Не налаштовано' if not all(text_config(route)) else '🟡 Пауза' if remaining else '🟢 Налаштовано'
+        items=[('Токени (оцінка)',tokens),('Спроби',attempts),('Доступ', 'Групи + тест' if name in ('Groq 1','Groq 1 20B','OpenRouter') else 'Приватний тест'),('Квота API','невідома')]
+        if remaining: items.append(('Пауза, с',remaining))
+        lines.extend(['',f'<b>{html.escape(name)}</b> · {state}',panel(items)])
+    lines.extend(['','<i>Локальний облік включає резерв невдалих спроб. Реальні залишки квот API не підтверджені.</i>'])
+    return '\n'.join(lines)
 @dp.message(Command('ai_status'),F.chat.type=='private',F.from_user.id==OWNER)
 async def text_status(m:Message):
-    lines=['🤖 Закритий тест текстового ШІ',f'Локальний облік: {text_used()} / 30000 токенів (UTC)']
-    lines.append('Режим: автоматичний')
-    for route in TEXT_ROUTES:
-        key,url,model=text_config(route)
-        row=db.execute('SELECT tokens, attempts FROM text_usage WHERE day=? AND route=?',(text_day(),route[0])).fetchone() or (0,0)
-        state='очікує налаштування' if not (key and url and model) else ('пауза' if blocked('text:'+route[0])>time.time() else 'налаштовано')
-        lines.append(f'{route[0]}: {state} | {row[0]} ток. | {row[1]} спроб')
-    await m.answer('\n'.join(lines))
+    await m.answer(text_report(),parse_mode='HTML',reply_markup=text_stats_menu())
 # Group AI is opt-in; history stays in RAM and is isolated by chat.
 db.execute('CREATE TABLE IF NOT EXISTS text_groups (chat INTEGER PRIMARY KEY)')
 db.execute('CREATE TABLE IF NOT EXISTS text_group_usage (day TEXT, chat INTEGER, tokens INTEGER, PRIMARY KEY(day,chat))')
