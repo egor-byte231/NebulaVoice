@@ -136,6 +136,7 @@ async def voice(m:Message):
     except asyncio.QueueFull: await status.edit_text('Черга заповнена. Повтори пізніше.')
 
 waiting=asyncio.Queue(maxsize=50)
+active_providers=set()
 async def process_voice(m,status):
     item=m.voice or m.video_note
     await status.edit_text('⏳ Транскрибую...')
@@ -153,10 +154,11 @@ async def process_voice(m,status):
         notified=False
         while time.time()<deadline:
             for k in order:
-                if blocked(k)>time.time(): continue
+                if blocked(k)>time.time() or k in active_providers: continue
                 if MODELS[k][1]==2:
                     primary={'groq2':'groq1','groq2t':'groq1t','cf2':'cf1'}[k]
                     if blocked('quota:'+primary)<=time.time(): continue
+                active_providers.add(k)
                 try:
                     result=await transcribe(k,p)
                 except RateLimited as e:
@@ -167,6 +169,8 @@ async def process_voice(m,status):
                     logging.warning('Provider %s failed: %s',k,type(e).__name__)
                     block(k,60)
                     continue
+                finally:
+                    active_providers.discard(k)
                 await status.edit_text('<blockquote expandable>'+html.escape(result[:3900])+'</blockquote>',parse_mode='HTML')
                 for i in range(3900,len(result),3900): await m.reply('<blockquote expandable>'+html.escape(result[i:i+3900])+'</blockquote>',parse_mode='HTML')
                 return
@@ -175,7 +179,7 @@ async def process_voice(m,status):
                 notified=True
             # Avoid repeated edits of identical Telegram messages.
             delay=max(1,min(300,min((blocked(k) for k in order if blocked(k)>time.time()),default=time.time()+60)-time.time()))
-            await asyncio.sleep(delay)
+            await asyncio.sleep(min(delay,1) if active_providers else delay)
         await status.edit_text('❌ Не вдалося транскрибувати протягом 24 годин.')
 async def worker():
     while True:
@@ -188,9 +192,9 @@ async def worker():
             except Exception: pass
         finally: waiting.task_done()
 async def main():
-    task=asyncio.create_task(worker())
+    tasks=[asyncio.create_task(worker()) for _ in range(4)]
     try: await dp.start_polling(bot,handle_as_tasks=True)
     finally:
-        task.cancel()
-        await asyncio.gather(task,return_exceptions=True)
+        for task in tasks: task.cancel()
+        await asyncio.gather(*tasks,return_exceptions=True)
 if __name__=='__main__': asyncio.run(main())
