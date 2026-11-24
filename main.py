@@ -994,13 +994,18 @@ async def cloud_reconcile():
 
 async def cloud_text_probe():
     secret=os.getenv('WORKER_SECRET','').strip()
-    if not secret: return False
+    if not secret:
+        logging.warning('Cloud routing unavailable: WORKER_SECRET missing')
+        return False
     try:
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=8)) as session:
             async with session.get('https://nebulavoice-ai.maxvyn09.workers.dev/health',allow_redirects=False) as response:
                 data=await response.json()
-                return response.status==200 and data.get('version')==2 and bool(data.get('ready'))
-    except Exception:
+                ready=response.status==200 and data.get('version')==2 and bool(data.get('ready'))
+                logging.info('Cloud probe: HTTP %s, version=%s, ready=%s',response.status,data.get('version'),ready)
+                return ready
+    except Exception as e:
+        logging.warning('Cloud probe failed: %s',type(e).__name__)
         return False
 
 @dp.message(F.text,F.chat.type.in_({'group','supergroup','private'}))
