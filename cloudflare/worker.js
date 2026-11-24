@@ -219,6 +219,7 @@ async function generate(j,env){
 }
 
 async function audioTranscribe(j,env){
+ if(j.route==="ovh")return audioOvh(j,env);
  const routes={groq1:["GROQ_API_KEY_1","whisper-large-v3"],groq1t:["GROQ_API_KEY_1","whisper-large-v3-turbo"],groq2:["GROQ_API_KEY_2","whisper-large-v3"],groq2t:["GROQ_API_KEY_2","whisper-large-v3-turbo"],cf1:["CF_API_TOKEN_1","CF_ACCOUNT_ID_1"],cf2:["CF_API_TOKEN_2","CF_ACCOUNT_ID_2"]};
  if(typeof j.audio!=="string"||j.audio.length>15000000||!Object.hasOwn(routes,j.route))return Response.json({error:"Invalid audio route or payload"},{status:400});
  const [key,model]=routes[j.route];
@@ -235,4 +236,28 @@ async function audioTranscribe(j,env){
  if(!r.ok)return Response.json({error:"ProviderHTTP",providerStatus:r.status,retryAfter:r.headers.get("Retry-After")},{status:422});
  const data=await r.json();return Response.json({result:j.route.startsWith("cf")?data.result:data});
  }catch(e){return Response.json({error:"ProviderFailure"},{status:422});}
+}
+
+async function audioOvh(j,env){
+ if(typeof j.audio!=="string"||j.audio.length>650000)return Response.json({error:"Invalid PCM"},{status:400});
+ try{
+ const bytes=Uint8Array.from(atob(j.audio),c=>c.charCodeAt(0));
+ if(bytes.length>480000||bytes.length%2)return Response.json({error:"Invalid PCM"},{status:400});
+ const r=await fetch("https://oai.endpoints.kepler.ai.cloud.ovh.net/gladia/v2/live?region=eu-west",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({model:"solaria-3",encoding:"wav/pcm",sample_rate:16000,bit_depth:16,channels:1,messages_config:{receive_final_transcripts:true}}),signal:AbortSignal.timeout(15000)});
+ if(!r.ok)return Response.json({error:"ProviderHTTP",providerStatus:r.status,retryAfter:r.headers.get("Retry-After")},{status:422});
+ const {url}=await r.json();const u=new URL(url);if(u.protocol!=="wss:")throw Error("Invalid socket");
+ const socket=await fetch(url.replace(/^wss:/,"https:"),{headers:{Upgrade:"websocket"}});
+ const ws=socket.webSocket;if(!ws)throw Error("No socket");
+ ws.accept();
+ const finals=[];
+ const result=new Promise((resolve,reject)=>{
+ const timer=setTimeout(()=>{ws.close();reject(Error("Timeout"));},45000);
+ ws.addEventListener("message",event=>{try{const m=JSON.parse(event.data);if(m.type==="transcript"&&m.data?.is_final)finals.push(m.data.utterance?.text||"");if(m.type==="error"){clearTimeout(timer);reject(Error("Provider error"));ws.close();}}catch{}});
+ ws.addEventListener("close",()=>{clearTimeout(timer);resolve(finals.join(" "));});
+ ws.addEventListener("error",()=>{clearTimeout(timer);reject(Error("Socket error"));});
+ });
+ for(let i=0;i<bytes.length;i+=3200){ws.send(bytes.slice(i,i+3200));await new Promise(resolve=>setTimeout(resolve,100));}
+ ws.send(JSON.stringify({type:"stop_recording"}));
+ return Response.json({result:{text:await result}});
+ }catch{return Response.json({error:"ProviderFailure"},{status:422});}
 }
