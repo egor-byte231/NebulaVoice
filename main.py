@@ -891,7 +891,7 @@ async def process_voice(m,status):
         audio_seconds=item.duration
         if m.video_note or m.voice:
             out=Path(d)/'normalized.ogg'
-            proc=await asyncio.create_subprocess_exec('ffmpeg','-nostdin','-loglevel','error','-i',str(p),'-vn','-af','atempo=0.85','-ac','1','-ar','48000','-c:a','libopus','-b:a','96k',str(out),stderr=asyncio.subprocess.DEVNULL)
+            proc=await asyncio.create_subprocess_exec('ffmpeg','-nostdin','-loglevel','error','-i',str(p),'-vn','-af','atempo=0.80','-ac','1','-ar','48000','-c:a','libopus','-b:a','96k',str(out),stderr=asyncio.subprocess.DEVNULL)
             try:
                 code=await asyncio.wait_for(proc.wait(),30)
             finally:
@@ -901,7 +901,7 @@ async def process_voice(m,status):
                 if m.video_note: raise ValueError('Не вдалося витягти аудіо')
             else:
                 p=out
-                audio_seconds=item.duration/0.85
+                audio_seconds=item.duration/0.80
         forced=test_route('audio',m)
         if forced:
             if forced=='ovh' and (time.monotonic()<ovh_cooldown_until or audio_profile_active.get('ovh',0)): return await status.edit_text('OVH: очікування 30 секунд або активний запит')
