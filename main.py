@@ -705,6 +705,7 @@ db.commit()
 from collections import deque, OrderedDict
 group_history=OrderedDict()
 group_busy=set()
+text_slots=asyncio.Semaphore(4)
 def group_enabled(chat):
     return not bool(db.execute('SELECT 1 FROM text_disabled WHERE chat=?',(chat,)).fetchone())
 def premium_until(chat):
@@ -910,9 +911,9 @@ async def text_message(m:Message):
     if not (mentioned or replied or not group): return
     question=re.sub(r'(?<!\w)@Nebulavcbot(?!\w)','',raw,flags=re.I).strip()
     if not question: return
-    while chat in group_busy or len(group_busy)>=4:
-        await asyncio.sleep(0.25)
-    group_busy.add(chat)
+    await text_slots.acquire()
+    job=asyncio.current_task()
+    group_busy.add(job)
     try:
         overview_add(m,requests=1)
         context=''
@@ -923,7 +924,8 @@ async def text_message(m:Message):
             history_context+='\nПовідомлення, на яке відповідають:\n'+reply.text[:1500]
         await generate_text(m,question,'',group,history_context)
     finally:
-        group_busy.discard(chat)
+        group_busy.discard(job)
+        text_slots.release()
 
 async def d1_query(session,sql,params=()):
     account=os.getenv('CF_D1_ACCOUNT_ID') or os.getenv('CF_ACCOUNT_ID_1')
