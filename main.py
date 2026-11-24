@@ -3,7 +3,7 @@ from pathlib import Path
 import aiohttp
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
-from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import ChatMemberUpdated, Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from dotenv import load_dotenv
 load_dotenv()
 logging.basicConfig(level=logging.INFO)
@@ -23,9 +23,28 @@ def block(k,seconds):
 class RateLimited(Exception):
     def __init__(self,seconds):
         self.seconds=seconds
+WELCOME = """🇺🇦 Привіт! Я NebulaVoice — український бот для автоматичної транскрипції!
+
+🎙 Готовий перетворювати ваші голосові повідомлення та кружечки на текст.
+
+<b>Мої можливості:</b>
+• Автоматичне розпізнавання мовлення.
+• Підтримка різних мов, суржику та сленгу.
+• Транскрипція без цензури.
+• Автоматичний вибір доступного ШІ.
+
+Просто надсилайте голосові або кружечки, а решту я зроблю сам!
+
+Для розпізнавання аудіо передається зовнішнім ШІ-сервісам.
+
+💜 Створено в Україні."""
 @dp.message(Command('start'))
 async def start(m:Message):
-    await m.answer('NebulaVoice • Автоматична транскрипція голосових та кружечків.')
+    await m.answer(WELCOME,parse_mode='HTML')
+@dp.my_chat_member()
+async def joined(event:ChatMemberUpdated):
+    if event.chat.type in ('group','supergroup') and event.old_chat_member.status in ('left','kicked') and event.new_chat_member.status in ('member','administrator'):
+        await bot.send_message(event.chat.id,WELCOME,parse_mode='HTML')
 def need(k):
     v=os.getenv(k)
     if not v: raise ValueError('Не налаштовано '+k)
@@ -110,7 +129,6 @@ async def transcribe(k,path):
 @dp.message(F.voice | F.video_note)
 async def voice(m:Message):
     # Only the owner can enable automatic processing in a group by adding the bot.
-    if m.chat.type=='private' and (not m.from_user or m.from_user.id!=OWNER): return
     if m.from_user and m.from_user.is_bot: return
     item=m.voice or m.video_note
     if (item.file_size or 0)>10*1024*1024: return await m.reply('Файл завеликий (10 МБ).')
