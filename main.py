@@ -894,6 +894,48 @@ async def show_limit(m:Message):
     tariff='Premium' if premium_until(chat)>time.time() else 'Free'
     await m.reply(f'📊 Ліміт ШІ — {tariff}\n\nВикористано: {used:,} / {limit:,}\nЗалишилося: {left:,} токенів\n'+ '█'*filled+'░'*(10-filled)+f' {pct:.1f}%\n\nСкидання через {minutes//60} г {minutes%60} хв (00:00 UTC)\nОблік сумарний для всіх API.'.replace(',', ' '),parse_mode=None)
 
+async def submit_cloud_text(m,question,group,replied,reply):
+    chat=m.chat.id
+    day=text_day()
+    budget=(group_limit(chat) if group else private_limit(chat))-group_used(chat,day)
+    if budget<=0:
+        await m.reply('🔋 Добовий ліміт ШІ вичерпано.')
+        return
+    status=await m.reply('✍️ Друкую…')
+    job_id=str(chat)+':'+str(status.message_id)
+    # Reserve the remaining allowance until the asynchronous job is reconciled.
+    group_charge(chat,day,budget)
+    db.execute('INSERT INTO cloud_pending VALUES (?,?,?,?)',(job_id,chat,day,budget))
+    db.commit()
+    try:
+        await d1_snapshot(history_session)
+        payload={'chat':chat,'message':status.message_id,'source':m.message_id,'question':question[:4000],
+                 'budget':budget,'development':development_enabled(),
+                 'contextNeeded':bool(replied or needs_history(question)),
+                 'replyText':(reply.text or '')[:1500] if replied else ''}
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15)) as session:
+            async with session.post('https://nebulavoice-ai.maxvyn09.workers.dev/',json=payload,headers={'Authorization':'Bearer '+os.environ['WORKER_SECRET']},allow_redirects=False) as response:
+                if response.status!=202:
+                    raise RuntimeError('Worker submission failed')
+    except Exception:
+        logging.warning('Cloud submission uncertain; reservation retained for reconciliation')
+        await status.edit_text('Не вдалося підтвердити прийняття запиту. Спробуй пізніше.')
+
+async def cloud_reconcile():
+    while True:
+        try:
+            pending=db.execute('SELECT id,chat,day,budget FROM cloud_pending').fetchall()
+            for job_id,chat,day,budget in pending:
+                rows=await d1_query(history_session,'SELECT tokens FROM worker_results WHERE id=?',(job_id,))
+                if not rows: continue
+                actual=max(0,int(rows[0]['tokens']))
+                with db:
+                    db.execute('UPDATE text_group_usage SET tokens=tokens+? WHERE day=? AND chat=?',(actual-budget,day,chat))
+                    db.execute('DELETE FROM cloud_pending WHERE id=?',(job_id,))
+        except Exception as e:
+            logging.warning('Cloud reconciliation: %s',type(e).__name__)
+        await asyncio.sleep(15)
+
 async def cloud_text_probe():
     secret=os.getenv('WORKER_SECRET','').strip()
     if not secret: return False
@@ -933,6 +975,9 @@ async def text_message(m:Message):
     if not (mentioned or replied or not group): return
     question=re.sub(r'(?<!\w)@Nebulavcbot(?!\w)','',raw,flags=re.I).strip()
     if not question: return
+    if os.getenv('CLOUD_TEXT_ENABLED')=='1':
+        overview_add(m,requests=1)
+        return await submit_cloud_text(m,question,group,replied,reply)
     await text_slots.acquire()
     job=asyncio.current_task()
     group_busy.add(job)
@@ -1029,10 +1074,13 @@ async def main():
         await session.close()
         raise
     history_session=session
+    db.execute('CREATE TABLE IF NOT EXISTS cloud_pending (id TEXT PRIMARY KEY,chat INTEGER,day TEXT,budget INTEGER)')
+    db.commit()
     logging.info('Cloud text Worker readiness: %s',await cloud_text_probe())
     tasks=[asyncio.create_task(worker()) for _ in range(4)]
     if cloud_ready: tasks.append(asyncio.create_task(d1_monitor(session)))
     tasks.append(asyncio.create_task(quota_reset_monitor()))
+    if os.getenv('CLOUD_TEXT_ENABLED')=='1': tasks.append(asyncio.create_task(cloud_reconcile()))
     try: await dp.start_polling(bot,handle_as_tasks=True)
     finally:
         for task in tasks: task.cancel()
