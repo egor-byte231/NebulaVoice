@@ -44,10 +44,10 @@ async function generate(j,env){
  if(j.replyText)context+="\nПовідомлення, на яке відповідають:\n"+String(j.replyText).slice(0,1500);
  for(let pass=0;pass<2;pass++){
   let need=false;
-  const ordered=ROUTES.slice();
+  const ordered=j.forcedRoute?ROUTES.filter(r=>r[0]===j.forcedRoute):ROUTES.slice();
   for(const name of ["Requesty","Airforce"]){
    const i=ordered.findIndex(r=>r[0]===name), k=ordered.findIndex(r=>r[0]===name+" 2");
-   if(env[ordered[k][1]] && env[ordered[i][1]] && Math.random()<0.5) [ordered[i],ordered[k]]=[ordered[k],ordered[i]];
+   if(i>=0 && k>=0 && env[ordered[k][1]] && env[ordered[i][1]] && Math.random()<0.5) [ordered[i],ordered[k]]=[ordered[k],ordered[i]];
   }
   for(const [name,key,url,model] of ordered){
    if(!env[key]) continue;
