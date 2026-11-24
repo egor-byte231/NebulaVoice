@@ -1,4 +1,4 @@
-import wave, re, os, asyncio, time, tempfile, logging, base64, json, sqlite3
+import html, wave, re, os, asyncio, time, tempfile, logging, base64, json, sqlite3
 from pathlib import Path
 import aiohttp
 from aiogram import Bot, Dispatcher, F
@@ -151,8 +151,8 @@ async def process_voice(m,status):
                     logging.warning('Provider %s failed: %s',k,type(e).__name__)
                     block(k,60)
                     continue
-                await status.edit_text('📝 '+result[:3900])
-                for i in range(3900,len(result),3900): await m.reply(result[i:i+3900])
+                await status.edit_text('<blockquote expandable>'+html.escape(result[:3900])+'</blockquote>',parse_mode='HTML')
+                for i in range(3900,len(result),3900): await m.reply('<blockquote expandable>'+html.escape(result[i:i+3900])+'</blockquote>',parse_mode='HTML')
                 return
             if not notified:
                 await status.edit_text('⏳ API тимчасово недоступні. Очікую поновлення лімітів.')
