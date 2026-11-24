@@ -528,7 +528,7 @@ async def safe_audio_load(m,config):
 
 async def run_audio_load(m,config):
     try:
-        await asyncio.wait_for(run_audio_load_inner(m,config),260)
+        await asyncio.wait_for(run_audio_load_inner(m,config),210)
     except asyncio.TimeoutError:
         await m.reply('⚠️ Тест аудіо: перевищено загальний час очікування.')
     except asyncio.CancelledError:
@@ -546,6 +546,7 @@ async def run_audio_load_inner(m,config):
     if not routes: return await m.reply('Немає сумісних моделей.')
     if (item.file_size or 0)>10*1024*1024: return await m.reply('Файл завеликий.')
     start=time.monotonic()
+    deadline=start+180
     slots=asyncio.Semaphore(audio_settings()[3])
     peak=active=0
     results=[]
@@ -582,7 +583,7 @@ async def run_audio_load_inner(m,config):
                         active_providers.add(k)
                         try:
                             usage(k,seconds=item.duration,attempt=1)
-                            await asyncio.wait_for(transcribe(k,p),30)
+                            await asyncio.wait_for(transcribe(k,p),min(30,max(0.1,deadline-time.monotonic())))
                             usage(k,success=1)
                             winner=NAMES[k]
                             overview_add(m,voices=int(bool(m.voice)),circles=int(bool(m.video_note)))
@@ -605,12 +606,12 @@ async def run_audio_load_inner(m,config):
         pending=set(tasks)
         cancelled=False
         try:
-            while pending and time.monotonic()-start<180:
-                done,pending=await asyncio.wait(pending,timeout=min(5,max(0,180-(time.monotonic()-start))))
+            while pending and time.monotonic()<deadline:
+                done,pending=await asyncio.wait(pending,timeout=min(5,max(0,deadline-time.monotonic())))
                 for t in done:
                     try: results.append(t.result())
                     except Exception as e: results.append(('',type(e).__name__))
-                try: await progress.edit_text(f'⏳ FadeHost: {len(results)}/{config["count"]}; активні: {active}; час: {time.monotonic()-start:.0f} с',reply_markup=progress.reply_markup)
+                try: await asyncio.wait_for(progress.edit_text(f'⏳ FadeHost: {len(results)}/{config["count"]}; активні: {active}; час: {time.monotonic()-start:.0f} с',reply_markup=progress.reply_markup),3)
                 except Exception: pass
         except asyncio.CancelledError:
             cancelled=True
@@ -619,7 +620,7 @@ async def run_audio_load_inner(m,config):
             await asyncio.gather(*pending,return_exceptions=True)
         for t in pending:
             results.append(('',f'#{tasks.index(t)+1}: '+('Скасовано' if cancelled else 'Загальний таймаут')))
-    try: await progress.edit_text('Тест скасовано.' if cancelled else 'Тест завершено.')
+    try: await asyncio.wait_for(progress.edit_text('Тест скасовано.' if cancelled else ('Тест завершено з таймаутом.' if pending else 'Тест завершено.'),reply_markup=None),5)
     except Exception: pass
     ok=sum(bool(x[0]) for x in results)
     chunk=f"FadeHost: {ok}/{len(results)} успішно; пік обробників {peak}; час {time.monotonic()-start:.2f} с\n"
@@ -629,7 +630,7 @@ async def run_audio_load_inner(m,config):
             chunk=''
         chunk+=line+'\n'
     if chunk: await m.answer(chunk,parse_mode=None)
-    try: await asyncio.wait_for(d1_snapshot(history_session),30)
+    try: await asyncio.wait_for(d1_snapshot(history_session),10)
     except Exception as e: logging.warning('Audio test snapshot: %s',type(e).__name__)
 
 async def load_action(c):
