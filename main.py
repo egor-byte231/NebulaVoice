@@ -898,7 +898,7 @@ async def submit_cloud_text(m,question,group,replied,reply):
     chat=m.chat.id
     day=text_day()
     status=await m.reply('✍️ Друкую…')
-    budget=min(12000,(group_limit(chat) if group else private_limit(chat))-group_used(chat,day))
+    budget=min(6000,(group_limit(chat) if group else private_limit(chat))-group_used(chat,day))
     if budget<=0:
         await status.edit_text('🔋 Добовий ліміт ШІ вичерпано.')
         return
@@ -908,7 +908,7 @@ async def submit_cloud_text(m,question,group,replied,reply):
     db.execute('INSERT INTO cloud_pending VALUES (?,?,?,?)',(job_id,chat,day,budget))
     db.commit()
     try:
-        await d1_snapshot(history_session)
+        await d1_query(history_session,'INSERT INTO cloud_reservations VALUES (?,?,?,?)',(job_id,chat,day,budget))
         payload={'chat':chat,'message':status.message_id,'source':m.message_id,'question':question[:4000],
                  'budget':budget,'development':development_enabled(),
                  'contextNeeded':bool(replied or needs_history(question)),
@@ -1030,6 +1030,7 @@ async def d1_snapshot(session):
     await d1_query(session,'DELETE FROM nebula_snapshot_chunks WHERE generation<>?',(generation,))
 
 async def d1_initialize(session):
+    await d1_query(session,'CREATE TABLE IF NOT EXISTS cloud_reservations (id TEXT PRIMARY KEY,chat INTEGER,day TEXT,budget INTEGER)')
     await d1_query(session,'CREATE TABLE IF NOT EXISTS chat_history (chat INTEGER, message_id INTEGER, sent_at REAL, line TEXT, PRIMARY KEY(chat,message_id))')
     await d1_query(session,'CREATE TABLE IF NOT EXISTS nebula_snapshot_chunks (generation TEXT, part INTEGER, data TEXT, PRIMARY KEY(generation,part))')
     await d1_query(session,'CREATE TABLE IF NOT EXISTS nebula_snapshot_head (id INTEGER PRIMARY KEY, generation TEXT, chunks INTEGER)')
