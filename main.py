@@ -388,6 +388,13 @@ async def transcribe(k,path):
         return text.strip(), confidence(j)
 @dp.message(F.voice | F.video_note)
 async def voice(m:Message):
+    global audio_load_wait,load_task
+    if testing_enabled() and m.from_user and m.from_user.id==OWNER and m.chat.type=='private' and audio_load_wait:
+        if load_task and not load_task.done(): return await m.reply('Тест уже триває.')
+        config=audio_load_wait
+        audio_load_wait=None
+        load_task=asyncio.create_task(run_audio_load(m,config))
+        return await m.reply('Тест аудіо запущено.')
     if m.from_user and m.from_user.is_bot: return
     if not enabled(): return await m.reply(DISABLED)
     item=m.voice or m.video_note
@@ -435,12 +442,14 @@ def test_menu(kind):
     names=list(dict.fromkeys(names))
     return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=('✓ ' if test_selection[kind]==name else '')+(NAMES.get(name,name) if kind=='audio' else name),callback_data='owner:testpick:'+kind+':'+name)] for name in names]+[[InlineKeyboardButton(text='Автоматично',callback_data='owner:testpick:'+kind+':')],[InlineKeyboardButton(text='Назад',callback_data='owner:back')]])
 
-load_config={'count':20,'mode':'auto','routes':set()}
+load_config={'count':20,'mode':'auto','routes':set(),'kind':'text'}
 load_task=None
 def load_names():
+    if load_config['kind']=='audio': return list(ORDER)
     return list(dict.fromkeys([r[0] for r in TEXT_ROUTES]+['Requesty 2','Airforce 2']))
 def load_menu():
     rows=[[InlineKeyboardButton(text=('✓ ' if load_config['count']==n else '')+str(n),callback_data='owner:load:n:'+str(n)) for n in (5,10,20,30,50,100)]]
+    rows.append([InlineKeyboardButton(text='Тип: '+load_config['kind'],callback_data='owner:load:kind'),InlineKeyboardButton(text='Своя кількість',callback_data='owner:load:custom')])
     for mode,label in [('auto','Автоматично'),('selected','Вибрані API'),('all','Усі API')]:
         rows.append([InlineKeyboardButton(text=('✓ ' if load_config['mode']==mode else '')+label,callback_data='owner:load:m:'+mode)])
     if load_config['mode']=='selected':
@@ -481,11 +490,84 @@ async def run_load_test(message,config):
         if chunk: await message.answer(chunk,parse_mode=None)
     except Exception as e:
         await message.answer('Тест не завершено: '+type(e).__name__+'. Частина запитів могла бути прийнята.')
+
+audio_load_wait=None
+load_count_wait=False
+async def run_audio_load(m,config):
+    item=m.voice or m.video_note
+    routes=config['routes'] if config['mode']=='selected' else list(ORDER)
+    if item.duration>15: routes=[k for k in routes if k!='ovh']
+    if not routes: return await m.reply('Немає сумісних моделей.')
+    if (item.file_size or 0)>10*1024*1024: return await m.reply('Файл завеликий.')
+    start=time.monotonic()
+    slots=asyncio.Semaphore(4)
+    peak=active=0
+    async with tempfile.TemporaryDirectory() as d:
+        src=Path(d)/'source'
+        p=Path(d)/'normalized.ogg'
+        await bot.download(item,destination=src)
+        proc=await asyncio.create_subprocess_exec('ffmpeg','-nostdin','-loglevel','error','-i',str(src),'-vn','-ac','1','-ar','16000','-af','dynaudnorm=f=250:g=15','-c:a','libopus','-b:a','32k',str(p),stderr=asyncio.subprocess.DEVNULL)
+        if await proc.wait()!=0: return await m.reply('FFmpeg: помилка нормалізації.')
+        async def job(i):
+            nonlocal peak,active
+            async with slots:
+                began=time.monotonic()
+                active+=1
+                peak=max(peak,active)
+                attempts=[]
+                winner=''
+                try:
+                    order=routes if config['mode']=='auto' else [routes[i%len(routes)]]
+                    for k in order:
+                        if not testing_enabled(): break
+                        if blocked(k)>time.time() or k in active_providers:
+                            attempts.append(NAMES[k]+': зайнятий/ліміт')
+                            continue
+                        if config['mode']=='auto' and MODELS[k][1]==2:
+                            primary={'groq2':'groq1','groq2t':'groq1t','cf2':'cf1'}[k]
+                            if blocked('quota:'+primary)<=time.time(): continue
+                        active_providers.add(k)
+                        try:
+                            usage(k,seconds=item.duration,attempt=1)
+                            await transcribe(k,p)
+                            usage(k,success=1)
+                            winner=NAMES[k]
+                            attempts.append(winner+': OK')
+                            break
+                        except RateLimited as e:
+                            block(k,e.seconds)
+                            block('quota:'+k,e.seconds)
+                            usage(k,limited=1)
+                            attempts.append(NAMES[k]+': HTTP 429')
+                        except Exception as e:
+                            attempts.append(NAMES[k]+': '+type(e).__name__)
+                        finally:
+                            active_providers.discard(k)
+                    return winner, f"#{i+1} {winner or 'Без відповіді'} | черга {began-start:.2f} с | обробка {time.monotonic()-began:.2f} с | "+', '.join(attempts)
+                finally:
+                    active-=1
+        start=time.monotonic()
+        results=await asyncio.gather(*(job(i) for i in range(config['count'])))
+    ok=sum(bool(x[0]) for x in results)
+    chunk=f"FadeHost: {ok}/{len(results)} успішно; пік обробників {peak}; час {time.monotonic()-start:.2f} с\n"
+    for _,line in results:
+        if len(chunk)+len(line)>3500:
+            await m.answer(chunk,parse_mode=None)
+            chunk=''
+        chunk+=line+'\n'
+    if chunk: await m.answer(chunk,parse_mode=None)
+
 async def load_action(c):
-    global load_task
+    global load_task,audio_load_wait,load_count_wait
     if not testing_enabled(): return
     parts=c.data.split(':')
     action=parts[2] if len(parts)>2 else ''
+    if action=='kind':
+        load_config['kind']='audio' if load_config['kind']=='text' else 'text'
+        load_config['routes'].clear()
+    if action=='custom':
+        load_count_wait=True
+        return await c.message.answer('Введи кількість від 1 до 100.')
     if action=='n' and parts[3] in ('5','10','20','30','50','100'): load_config['count']=int(parts[3])
     if action=='m' and parts[3] in ('auto','selected','all'): load_config['mode']=parts[3]
     if action=='r' and parts[3].isdigit() and int(parts[3])<len(load_names()):
@@ -495,6 +577,9 @@ async def load_action(c):
         if load_task and not load_task.done(): return await c.message.answer('Тест уже триває.')
         if load_config['mode']=='selected' and not load_config['routes']: return await c.message.answer('Вибери API.')
         config={**load_config,'routes':sorted(load_config['routes'])}
+        if config['kind']=='audio':
+            audio_load_wait=config
+            return await c.message.answer('Надішли голосове або кружечок для тесту.')
         load_task=asyncio.create_task(run_load_test(c.message,config))
         return await c.message.answer('Тест запущено. Реальні квоти API витрачаються.')
     try: await c.message.edit_text('⚡ Тест навантаження (текст). Реальні API-запити.',reply_markup=load_menu())
@@ -593,6 +678,9 @@ async def owner_action(c:CallbackQuery):
         await d1_snapshot(history_session)
         return await c.message.edit_text('✅ Особистий добовий ліміт скинуто. Незавершені запити залишаються врахованими.',reply_markup=owner_menu())
     if c.data=='owner:testing':
+        global audio_load_wait,load_count_wait
+        audio_load_wait=None
+        load_count_wait=False
         testing_enabled()
         db.execute('UPDATE testing_mode SET enabled=1-enabled WHERE id=1')
         db.commit()
@@ -1116,6 +1204,12 @@ async def cloud_text_probe():
 
 @dp.message(F.text,F.chat.type.in_({'group','supergroup','private'}))
 async def text_message(m:Message):
+    global load_count_wait
+    if testing_enabled() and m.from_user and m.from_user.id==OWNER and m.chat.type=='private' and load_count_wait:
+        if not (m.text or '').isdigit() or not 1<=int(m.text)<=100: return await m.reply('Введи число від 1 до 100.')
+        load_count_wait=False
+        load_config['count']=int(m.text)
+        return await m.reply('Кількість: '+str(load_config['count']),reply_markup=load_menu())
     if not m.from_user or m.from_user.is_bot: return
     group=m.chat.type!='private'
     chat=m.chat.id
