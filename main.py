@@ -926,7 +926,9 @@ async def text_message(m:Message):
 
 async def d1_query(session,sql,params=()):
     account=os.getenv('CF_D1_ACCOUNT_ID') or os.getenv('CF_ACCOUNT_ID_1')
-    token=os.environ['CF_D1_API_TOKEN']
+    token=next((os.getenv(k,'').strip() for k in ('CF_D1_API_TOKEN','CF_D1_TOKEN','D1_API_TOKEN','CLOUDFLARE_D1_API_TOKEN') if os.getenv(k,'').strip()),'')
+    if not token: raise RuntimeError('Missing D1 API token environment variable')
+    if not account: raise RuntimeError('Missing Cloudflare account ID')
     database=os.getenv('CF_D1_DATABASE_ID','1b287158-f5ab-4261-a4f3-539e015f434b')
     url=f'https://api.cloudflare.com/client/v4/accounts/{account}/d1/database/{database}/query'
     async with session.post(url,headers={'Authorization':'Bearer '+token},json={'sql':sql,'params':list(params)},allow_redirects=False) as response:
@@ -984,16 +986,21 @@ async def d1_monitor(session):
 
 async def main():
     session=aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30))
+    logging.info('D1 environment: %s', {k: bool(os.getenv(k,'').strip()) for k in ('CF_D1_API_TOKEN','CF_D1_TOKEN','D1_API_TOKEN','CLOUDFLARE_D1_API_TOKEN','CF_D1_ACCOUNT_ID','CF_ACCOUNT_ID_1','CF_D1_DATABASE_ID')})
+    cloud_ready=False
     try:
         await d1_initialize(session)
-    except Exception:
-        await session.close()
-        raise
+        cloud_ready=True
+    except Exception as e:
+        logging.error('D1 unavailable; local SQLite only until restart: %s',str(e) if isinstance(e,RuntimeError) else type(e).__name__)
     tasks=[asyncio.create_task(worker()) for _ in range(4)]
-    tasks.append(asyncio.create_task(d1_monitor(session)))
+    if cloud_ready: tasks.append(asyncio.create_task(d1_monitor(session)))
     tasks.append(asyncio.create_task(quota_reset_monitor()))
     try: await dp.start_polling(bot,handle_as_tasks=True)
     finally:
         for task in tasks: task.cancel()
         await asyncio.gather(*tasks,return_exceptions=True)
+        try:
+            if cloud_ready: await d1_snapshot(session)
+        finally: await session.close()
 if __name__=='__main__': asyncio.run(main())
