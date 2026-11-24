@@ -535,6 +535,13 @@ async def safe_audio_load(m,config):
 
 async def run_audio_load(m,config):
     try: await run_audio_load_inner(m,config)
+    except asyncio.CancelledError: await m.reply('Тест скасовано під час підготовки.')
+    except Exception as e:
+        logging.exception('Audio load failed')
+        await m.reply('Помилка тесту аудіо: '+type(e).__name__)
+
+async def run_audio_load_inner(m,config):
+    try: await run_audio_load_inner(m,config)
     except asyncio.CancelledError: await m.reply('Тест аудіо скасовано.')
     except Exception as e:
         logging.exception('Audio load test failed')
@@ -552,6 +559,7 @@ async def run_audio_load_inner(m,config):
         await progress.edit_text('Тест перервано: '+type(e).__name__,reply_markup=None)
 
 async def run_audio_load_inner(m,config,progress):
+    progress=await m.reply('⏳ FadeHost: підготовка аудіо...',reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='Скасувати тест',callback_data='owner:load:cancel')]]))
     item=m.voice or m.video_note
     routes=config['routes'] if config['mode']=='selected' else list(ORDER)
     if item.duration>15: routes=[k for k in routes if k!='ovh']
@@ -641,6 +649,8 @@ async def run_audio_load_inner(m,config,progress):
             chunk=''
         chunk+=line+'\n'
     if chunk: await m.answer(chunk,parse_mode=None)
+    try: await asyncio.wait_for(d1_snapshot(history_session),timeout=30)
+    except Exception as e: logging.warning('Audio test snapshot: %s',type(e).__name__)
     try: await d1_snapshot(history_session)
     except Exception as e: logging.warning('Audio test snapshot: %s',type(e).__name__)
     try: await progress.edit_text(f'Тест {"скасовано" if cancelled else "завершено з таймаутом" if pending else "завершено"}: {ok}/{len(results)} успішно.',reply_markup=None)
