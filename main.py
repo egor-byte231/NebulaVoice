@@ -402,8 +402,32 @@ waiting=asyncio.Queue(maxsize=50)
 active_providers=set()
 active_jobs={}
 DISABLED='⚠️ Транскрипцію тимчасово вимкнено.'
+def testing_enabled():
+    db.execute('CREATE TABLE IF NOT EXISTS testing_mode (id INTEGER PRIMARY KEY, enabled INTEGER)')
+    db.execute('INSERT OR IGNORE INTO testing_mode VALUES (1,0)')
+    db.commit()
+    return bool(db.execute('SELECT enabled FROM testing_mode WHERE id=1').fetchone()[0])
+
+async def testing_gate(handler,event,data):
+    if testing_enabled():
+        user=data.get('event_from_user')
+        if user is None or user.id!=OWNER:
+            # Always acknowledge callbacks and reject new payments explicitly.
+            if isinstance(event,CallbackQuery): await event.answer()
+            elif isinstance(event,PreCheckoutQuery): await event.answer(ok=False,error_message='Бот тимчасово в режимі тестування.')
+            elif isinstance(event,Message) and event.successful_payment:
+                return await handler(event,data)
+            return
+    return await handler(event,data)
+
+dp.message.outer_middleware(testing_gate)
+dp.callback_query.outer_middleware(testing_gate)
+dp.pre_checkout_query.outer_middleware(testing_gate)
+dp.my_chat_member.outer_middleware(testing_gate)
+dp.chat_member.outer_middleware(testing_gate)
+
 def owner_menu():
-    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='⏸ Вимкнути' if enabled() else '▶️ Увімкнути',callback_data='owner:toggle')],[InlineKeyboardButton(text='📊 Статистика',callback_data='owner:stats')],[InlineKeyboardButton(text='🤖 Статистика ШІ',callback_data='owner:ai')],[InlineKeyboardButton(text='📈 Загальна статистика',callback_data='owner:overview')],[InlineKeyboardButton(text='🟢 Режим розробки: ON' if development_enabled() else '🔴 Режим розробки: OFF',callback_data='owner:development')]])
+    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='⏸ Вимкнути' if enabled() else '▶️ Увімкнути',callback_data='owner:toggle')],[InlineKeyboardButton(text='📊 Статистика',callback_data='owner:stats')],[InlineKeyboardButton(text='🤖 Статистика ШІ',callback_data='owner:ai')],[InlineKeyboardButton(text='📈 Загальна статистика',callback_data='owner:overview')],[InlineKeyboardButton(text='🟢 Режим розробки: ON' if development_enabled() else '🔴 Режим розробки: OFF',callback_data='owner:development')],[InlineKeyboardButton(text='🧪 Режим тестування: ON' if testing_enabled() else '🧪 Режим тестування: OFF',callback_data='owner:testing')]])
 error_alert_times={}
 async def notify_error(where,error):
     raw=str(error)
@@ -472,6 +496,12 @@ async def owner_action(c:CallbackQuery):
         return
     if c.data=='owner:back':
         return await c.message.edit_text('Панель власника',reply_markup=owner_menu())
+    if c.data=='owner:testing':
+        testing_enabled()
+        db.execute('UPDATE testing_mode SET enabled=1-enabled WHERE id=1')
+        db.commit()
+        await d1_snapshot(history_session)
+        return await c.message.edit_reply_markup(reply_markup=owner_menu())
     if c.data=='owner:development':
         db.execute('UPDATE development_mode SET enabled=1-enabled WHERE id=1')
         db.commit()
