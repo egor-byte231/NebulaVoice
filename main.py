@@ -479,6 +479,8 @@ async def voice(m:Message):
 
 waiting=asyncio.Queue(maxsize=50)
 active_providers=set()
+audio_profile_active={}
+ovh_cooldown_until=0
 active_jobs={}
 DISABLED='⚠️ Транскрипцію тимчасово вимкнено.'
 def testing_enabled():
@@ -879,6 +881,7 @@ async def owner_action(c:CallbackQuery):
     await c.message.edit_reply_markup(reply_markup=owner_menu())
 
 async def process_voice(m,status):
+    global ovh_cooldown_until
     item=m.voice or m.video_note
     await status.edit_text('⏳ Транскрибую...')
     with tempfile.TemporaryDirectory() as d:
@@ -893,8 +896,11 @@ async def process_voice(m,status):
             else: p=out
         forced=test_route('audio',m)
         if forced:
+            if forced=='ovh' and (time.monotonic()<ovh_cooldown_until or audio_profile_active.get('ovh',0)): return await status.edit_text('OVH: очікування 30 секунд або активний запит')
             if forced=='ovh' and item.duration>15: return await status.edit_text('OVH: максимум 15 секунд')
             if blocked(forced)>time.time() or (audio_platform()=='FadeHost' and forced in active_providers): return await status.edit_text('Тест: API зайнятий або ліміт вичерпано')
+            if audio_profile_active.get(forced,0)>=(1 if forced=='ovh' else 4): return await status.edit_text('Тест: усі слоти моделі зайняті')
+            audio_profile_active[forced]=audio_profile_active.get(forced,0)+1
             active_providers.add(forced)
             usage(forced,seconds=item.duration,attempt=1)
             try:
@@ -909,8 +915,10 @@ async def process_voice(m,status):
             except Exception as e:
                 return await status.edit_text('Тест: '+NAMES[forced]+' — '+type(e).__name__)
             finally:
-                active_providers.discard(forced)
-        order=[k for k in ORDER if k!='ovh' or item.duration<=15]
+                audio_profile_active[forced]-=1
+                if forced=='ovh': ovh_cooldown_until=time.monotonic()+30
+                if not audio_profile_active[forced]: active_providers.discard(forced)
+        order=[k for k in ORDER if k!='ovh']
         # Secondary credentials must represent independently permitted quotas; only use after primary HTTP 429.
         deadline=time.time()+86400
         notified=False
@@ -918,13 +926,15 @@ async def process_voice(m,status):
         tried_models=set()
         rejected=set()
         while time.time()<deadline and enabled():
-            for k in order:
-                if blocked(k)>time.time() or k in active_providers: continue
+            primary=next((k for k in order if blocked(k)<=time.time() and k not in rejected),None)
+            overflow=primary is not None and audio_profile_active.get(primary,0)>=4
+            cycle=(['ovh'] if overflow and item.duration<=15 and time.monotonic()>=ovh_cooldown_until and not audio_profile_active.get('ovh',0) else [])+order
+            for k in cycle:
+                if blocked(k)>time.time() or audio_profile_active.get(k,0)>=(1 if k=='ovh' else 4): continue
+                if k=='ovh' and time.monotonic()<ovh_cooldown_until: continue
                 if k in rejected or (candidate and MODELS[k][2] in tried_models): continue
-                if MODELS[k][1]==2:
-                    primary={'groq2':'groq1','groq2t':'groq1t','cf2':'cf1'}[k]
-                    if blocked('quota:'+primary)<=time.time(): continue
                 if not enabled(): return await mark_disabled(status)
+                audio_profile_active[k]=audio_profile_active.get(k,0)+1
                 active_providers.add(k)
                 usage(k,seconds=item.duration,attempt=1)
                 try:
@@ -948,7 +958,9 @@ async def process_voice(m,status):
                     await notify_error(NAMES[k],e)
                     continue
                 finally:
-                    active_providers.discard(k)
+                    audio_profile_active[k]-=1
+                    if k=='ovh': ovh_cooldown_until=time.monotonic()+30
+                    if not audio_profile_active[k]: active_providers.discard(k)
                 usage(k,success=1)
                 if not enabled(): return await mark_disabled(status)
                 tried_models.add(MODELS[k][2])
