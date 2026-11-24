@@ -497,6 +497,10 @@ async def run_load_test(message,config):
             peak=max(peak,active)
         ok=sum(r['ok'] for r in rows)
         lines=[f"Тест: {len(rows)}/{config['count']} завершено",f"Успішно: {ok}; помилки: {len(rows)-ok}; без результату: {config['count']-len(rows)}",f"Пік обробників: {peak}",f"Токени (фактичні + оцінені): {sum(r['tokens'] for r in rows)}",f"Спроби з невідомими витратами: {sum(v.get('unknown',0) for r in rows for v in json.loads(r['attempts']).values())}"]
+        usages=[v for r in rows for v in json.loads(r['attempts']).values()]
+        lines.append(f"Підтверджені токени: {sum(v.get('actual_tokens',0) for v in usages)}")
+        lines.append(f"Оцінені токени: {sum(v.get('estimated_tokens',0) for v in usages)}")
+        lines.append(f"Токени без розподілу (старий формат): {sum(v.get('tokens',0) for v in usages if 'actual_tokens' not in v)}")
         if rows:
             lines.append(f"Макс. очікування: {max(r['started']-r['queued'] for r in rows)/1000:.2f} с")
         for r in rows:
