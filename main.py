@@ -27,7 +27,18 @@ db.execute('CREATE TABLE IF NOT EXISTS overview_start (id INTEGER PRIMARY KEY, d
 db.execute('INSERT OR IGNORE INTO overview_start VALUES (1,?)',(datetime.datetime.now(datetime.timezone.utc).date().isoformat(),))
 db.commit()
 
+db.execute('CREATE TABLE IF NOT EXISTS overview_users (day TEXT, scope TEXT, user_id INTEGER, PRIMARY KEY(day,scope,user_id))')
+db.commit()
+
+def overview_user(m):
+    if not m.from_user or m.from_user.is_bot: return
+    scope='private' if m.chat.type=='private' else 'groups'
+    day=datetime.datetime.now(datetime.timezone.utc).date().isoformat()
+    db.execute('INSERT OR IGNORE INTO overview_users VALUES (?,?,?)',(day,scope,m.from_user.id))
+    db.commit()
+
 def overview_add(m,voices=0,circles=0,requests=0):
+    overview_user(m)
     scope='private' if m.chat.type=='private' else 'groups'
     day=datetime.datetime.now(datetime.timezone.utc).date().isoformat()
     db.execute('INSERT INTO overview_daily VALUES (?,?,?,?,?) ON CONFLICT(day,scope) DO UPDATE SET voices=voices+excluded.voices,circles=circles+excluded.circles,requests=requests+excluded.requests',(day,scope,voices,circles,requests))
@@ -60,7 +71,8 @@ def overview_report(scope):
         v,c,r=db.execute(sql+(' AND scope=?' if scope!='all' else ''),args+((scope,) if scope!='all' else ())).fetchone()
         sql='SELECT COALESCE(SUM(tokens),0) FROM text_group_usage WHERE day BETWEEN ? AND ?'
         t=db.execute(sql+({'groups':' AND chat<0','private':' AND chat>0','all':''}[scope]),args).fetchone()[0]
-        values=[('Голосові',v),('Кружечки',c),('Запити ШІ',r),('Токени',t)]
+        u=db.execute('SELECT COUNT(DISTINCT user_id) FROM overview_users WHERE day BETWEEN ? AND ?'+(' AND scope=?' if scope!='all' else ''),args+((scope,) if scope!='all' else ())).fetchone()[0]
+        values=[('Користувачі',u),('Голосові',v),('Кружечки',c),('Запити ШІ',r),('Токени',t)]
         lines.extend(['','<b>'+label+'</b>','<pre>'+html.escape('\n'.join(f'{k:<12} {format(n,",").replace(","," "):>14}' for k,n in values))+'</pre>'])
     started=db.execute('SELECT day FROM overview_start WHERE id=1').fetchone()[0]
     lines.extend(['','Голосові, кружечки та запити рахуються з '+started+'. Токени — за наявними записами лімітів (можуть містити оцінки невдалих спроб).'])
@@ -203,6 +215,7 @@ async def help_command(m:Message):
 
 @dp.message(Command('start'))
 async def start(m:Message):
+    overview_user(m)
     await m.answer(WELCOME,parse_mode='HTML')
     if m.chat.type=='private' and m.from_user and m.from_user.id==OWNER: await m.answer('Панель власника',reply_markup=owner_menu())
 @dp.my_chat_member()
@@ -277,6 +290,8 @@ async def ovh_transcribe(s,path):
             finally:
                 for task in tasks: task.cancel()
                 await asyncio.gather(*tasks,return_exceptions=True)
+        try: await d1_snapshot(session)
+        finally: await session.close()
         return {'text':' '.join(finals)}
 class RejectedTranscript(ValueError):
     pass
@@ -909,8 +924,73 @@ async def text_message(m:Message):
     finally:
         group_busy.discard(chat)
 
+async def d1_query(session,sql,params=()):
+    account=os.getenv('CF_D1_ACCOUNT_ID') or os.getenv('CF_ACCOUNT_ID_1')
+    token=os.environ['CF_D1_API_TOKEN']
+    database=os.getenv('CF_D1_DATABASE_ID','1b287158-f5ab-4261-a4f3-539e015f434b')
+    url=f'https://api.cloudflare.com/client/v4/accounts/{account}/d1/database/{database}/query'
+    async with session.post(url,headers={'Authorization':'Bearer '+token},json={'sql':sql,'params':list(params)},allow_redirects=False) as response:
+        data=await response.json()
+        if response.status!=200 or not data.get('success') or not all(r.get('success') for r in data.get('result',[])):
+            raise RuntimeError('D1 query failed: HTTP '+str(response.status))
+        return data['result'][0].get('results',[])
+
+async def d1_snapshot(session):
+    import secrets
+    generation=secrets.token_hex(16)
+    with tempfile.TemporaryDirectory() as folder:
+        path=Path(folder)/'snapshot.db'
+        target=sqlite3.connect(path)
+        try: db.backup(target)
+        finally: target.close()
+        with path.open('rb') as stream:
+            i=0
+            while True:
+                chunk=stream.read(60000)
+                if not chunk: break
+                await d1_query(session,'INSERT INTO nebula_snapshot_chunks VALUES (?,?,?)',(generation,i,base64.b64encode(chunk).decode('ascii')))
+                i+=1
+    await d1_query(session,'INSERT INTO nebula_snapshot_head VALUES (1,?,?) ON CONFLICT(id) DO UPDATE SET generation=excluded.generation, chunks=excluded.chunks',(generation,i))
+    await d1_query(session,'DELETE FROM nebula_snapshot_chunks WHERE generation<>?',(generation,))
+
+async def d1_initialize(session):
+    await d1_query(session,'CREATE TABLE IF NOT EXISTS nebula_snapshot_chunks (generation TEXT, part INTEGER, data TEXT, PRIMARY KEY(generation,part))')
+    await d1_query(session,'CREATE TABLE IF NOT EXISTS nebula_snapshot_head (id INTEGER PRIMARY KEY, generation TEXT, chunks INTEGER)')
+    rows=await d1_query(session,'SELECT generation,chunks FROM nebula_snapshot_head WHERE id=1')
+    if rows:
+        head=rows[0]
+        with tempfile.TemporaryDirectory() as folder:
+            path=Path(folder)/'restore.db'
+            with path.open('wb') as stream:
+                for i in range(head['chunks']):
+                    parts=await d1_query(session,'SELECT data FROM nebula_snapshot_chunks WHERE generation=? AND part=?',(head['generation'],i))
+                    if len(parts)!=1: raise RuntimeError('D1 snapshot incomplete')
+                    stream.write(base64.b64decode(parts[0]['data'],validate=True))
+            source=sqlite3.connect(path)
+            try:
+                if source.execute('PRAGMA integrity_check').fetchone()[0]!='ok': raise RuntimeError('D1 snapshot corrupt')
+                source.backup(db)
+            finally: source.close()
+        db.execute('CREATE TABLE IF NOT EXISTS overview_users (day TEXT, scope TEXT, user_id INTEGER, PRIMARY KEY(day,scope,user_id))')
+        db.commit()
+    await d1_snapshot(session)
+    logging.info('Cloudflare D1 snapshot initialized')
+
+async def d1_monitor(session):
+    while True:
+        await asyncio.sleep(60)
+        try: await d1_snapshot(session)
+        except Exception as e: logging.error('D1 snapshot failed: %s',type(e).__name__)
+
 async def main():
+    session=aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30))
+    try:
+        await d1_initialize(session)
+    except Exception:
+        await session.close()
+        raise
     tasks=[asyncio.create_task(worker()) for _ in range(4)]
+    tasks.append(asyncio.create_task(d1_monitor(session)))
     tasks.append(asyncio.create_task(quota_reset_monitor()))
     try: await dp.start_polling(bot,handle_as_tasks=True)
     finally:
