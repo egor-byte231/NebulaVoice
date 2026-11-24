@@ -1,4 +1,4 @@
-import html, wave, re, os, asyncio, time, tempfile, logging, base64, json, sqlite3
+import datetime, html, wave, re, os, asyncio, time, tempfile, logging, base64, json, sqlite3
 from pathlib import Path
 import aiohttp
 from aiogram import Bot, Dispatcher, F
@@ -13,7 +13,27 @@ OWNER=int(os.environ['OWNER_ID']); bot=Bot(os.environ['BOT_TOKEN']); dp=Dispatch
 ORDER=['ovh','groq1','groq1t','cf1','groq2','groq2t','cf2']
 db=sqlite3.connect('state.db')
 db.execute('CREATE TABLE IF NOT EXISTS cooldowns (provider TEXT PRIMARY KEY, until REAL)')
+db.execute('CREATE TABLE IF NOT EXISTS control (id INTEGER PRIMARY KEY, enabled INTEGER)')
+db.execute('INSERT OR IGNORE INTO control VALUES (1,1)')
+db.execute('CREATE TABLE IF NOT EXISTS usage_daily (day TEXT, provider TEXT, attempts INTEGER, seconds INTEGER, successes INTEGER, limited INTEGER, PRIMARY KEY(day,provider))')
+db.execute('CREATE TABLE IF NOT EXISTS quota_headers (provider TEXT PRIMARY KEY, info TEXT)')
 db.commit()
+def enabled():
+    return bool(db.execute('SELECT enabled FROM control WHERE id=1').fetchone()[0])
+def usage(k,seconds=0,attempt=0,success=0,limited=0):
+    day=datetime.datetime.now(datetime.timezone.utc).date().isoformat()
+    db.execute('INSERT INTO usage_daily VALUES (?,?,?,?,?,?) ON CONFLICT(day,provider) DO UPDATE SET attempts=attempts+excluded.attempts, seconds=seconds+excluded.seconds, successes=successes+excluded.successes, limited=limited+excluded.limited',(day,k,attempt,seconds,success,limited))
+    db.commit()
+def report():
+    day=datetime.datetime.now(datetime.timezone.utc).date().isoformat()
+    rows={r[0]:r[1:] for r in db.execute('SELECT provider,attempts,seconds,successes,limited FROM usage_daily WHERE day=?',(day,))}
+    lines=['Статистика NebulaVoice • '+day+' UTC','Локальні спроби та тривалість аудіо у спробах (не офіційний баланс):']
+    for k in ORDER:
+        a,b,c,d=rows.get(k,(0,0,0,0))
+        h=db.execute('SELECT info FROM quota_headers WHERE provider=?',(k,)).fetchone()
+        remaining=max(0,int(blocked('quota:'+k)-time.time()))
+        lines.append(f'{NAMES[k]}: спроб {a}, аудіо {b} с, успішних {c}, HTTP 429: {d}; пауза квоти {remaining} с. '+(h[0] if h else 'Залишок API невідомий'))
+    return '\n'.join(lines)
 def blocked(k):
     row=db.execute('SELECT until FROM cooldowns WHERE provider=?',(k,)).fetchone()
     return row[0] if row else 0
@@ -21,8 +41,9 @@ def block(k,seconds):
     db.execute('INSERT OR REPLACE INTO cooldowns VALUES (?,?)',(k,time.time()+seconds))
     db.commit()
 class RateLimited(Exception):
-    def __init__(self,seconds):
+    def __init__(self,seconds,info=''):
         self.seconds=seconds
+        self.info=info
 WELCOME = """🇺🇦 Привіт! Я NebulaVoice — український бот для автоматичної транскрипції!
 
 🎙 Готовий перетворювати ваші голосові повідомлення та кружечки на текст.
@@ -39,6 +60,7 @@ WELCOME = """🇺🇦 Привіт! Я NebulaVoice — український б
 @dp.message(Command('start'))
 async def start(m:Message):
     await m.answer(WELCOME,parse_mode='HTML')
+    if m.chat.type=='private' and m.from_user and m.from_user.id==OWNER: await m.answer('Панель власника',reply_markup=owner_menu())
 @dp.my_chat_member()
 async def joined(event:ChatMemberUpdated):
     if event.chat.type in ('group','supergroup') and event.old_chat_member.status in ('left','kicked') and event.new_chat_member.status in ('member','administrator'):
@@ -52,7 +74,7 @@ async def request(s,url,headers,**kw):
         if r.status==429:
             try: delay=max(60,float(r.headers.get('Retry-After','60')))
             except ValueError: delay=60
-            raise RateLimited(delay)
+            raise RateLimited(delay, '; '.join(f'{k}: {v}' for k,v in r.headers.items() if k.lower().startswith(('x-ratelimit-','ratelimit-')) or k.lower()=='retry-after')[:300])
         if r.status>=400:
             message=f'API HTTP {r.status}'+(' — ліміт або обмеження' if r.status==429 else '')
             if url.startswith('https://generativelanguage.googleapis.com/'):
@@ -126,17 +148,52 @@ async def transcribe(k,path):
         return text.strip()
 @dp.message(F.voice | F.video_note)
 async def voice(m:Message):
-    # Only the owner can enable automatic processing in a group by adding the bot.
     if m.from_user and m.from_user.is_bot: return
+    if not enabled(): return await m.reply(DISABLED)
     item=m.voice or m.video_note
     if (item.file_size or 0)>10*1024*1024: return await m.reply('Файл завеликий (10 МБ).')
     if waiting.qsize()>=50: return await m.reply('Черга заповнена. Повтори пізніше.')
     status=await m.reply('⏳ У черзі...')
+    if not enabled(): return await status.edit_text(DISABLED)
     try: waiting.put_nowait((m,status))
     except asyncio.QueueFull: await status.edit_text('Черга заповнена. Повтори пізніше.')
 
 waiting=asyncio.Queue(maxsize=50)
 active_providers=set()
+active_jobs={}
+DISABLED='⚠️ Транскрипцію тимчасово вимкнено.'
+def owner_menu():
+    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='⏸ Вимкнути' if enabled() else '▶️ Увімкнути',callback_data='owner:toggle')],[InlineKeyboardButton(text='📊 Статистика',callback_data='owner:stats')]])
+async def mark_disabled(status):
+    try: await status.edit_text(DISABLED)
+    except Exception: pass
+async def disable(reason):
+    if not enabled(): return
+    db.execute('UPDATE control SET enabled=0 WHERE id=1')
+    db.commit()
+    queued=[]
+    while not waiting.empty():
+        m,status=waiting.get_nowait()
+        queued.append(status)
+        waiting.task_done()
+    current=asyncio.current_task()
+    jobs=[(t,status) for t,status in active_jobs.items() if t is not current]
+    for t,status in jobs: t.cancel()
+    for status in queued: await mark_disabled(status)
+    try: await bot.send_message(OWNER,('Транскрипцію вимкнено. Причина: '+reason+f'\nВидалено з черги: {len(queued)}; скасовано активних: {len(jobs)}.\n'+report())[:4000],reply_markup=owner_menu())
+    except Exception as e: logging.warning('Owner notification failed: %s',type(e).__name__)
+@dp.callback_query(F.data.startswith('owner:'))
+async def owner_action(c:CallbackQuery):
+    if c.from_user.id!=OWNER or not isinstance(c.message,Message) or c.message.chat.type!='private':
+        return await c.answer('Тільки власник',show_alert=True)
+    await c.answer()
+    if c.data=='owner:stats': return await c.message.answer(report()[:4000])
+    if enabled(): await disable('Вимкнено власником')
+    else:
+        db.execute('UPDATE control SET enabled=1 WHERE id=1')
+        db.commit()
+    await c.message.edit_reply_markup(reply_markup=owner_menu())
+
 async def process_voice(m,status):
     item=m.voice or m.video_note
     await status.edit_text('⏳ Транскрибую...')
@@ -152,18 +209,23 @@ async def process_voice(m,status):
         # Secondary credentials must represent independently permitted quotas; only use after primary HTTP 429.
         deadline=time.time()+86400
         notified=False
-        while time.time()<deadline:
+        while time.time()<deadline and enabled():
             for k in order:
                 if blocked(k)>time.time() or k in active_providers: continue
                 if MODELS[k][1]==2:
                     primary={'groq2':'groq1','groq2t':'groq1t','cf2':'cf1'}[k]
                     if blocked('quota:'+primary)<=time.time(): continue
+                if not enabled(): return await mark_disabled(status)
                 active_providers.add(k)
+                usage(k,seconds=item.duration,attempt=1)
                 try:
                     result=await transcribe(k,p)
                 except RateLimited as e:
                     block(k,e.seconds)
                     block('quota:'+k,e.seconds)
+                    usage(k,limited=1)
+                    db.execute('INSERT OR REPLACE INTO quota_headers VALUES (?,?)',(k,e.info or 'API не повідомив залишок'))
+                    db.commit()
                     continue
                 except Exception as e:
                     logging.warning('Provider %s failed: %s',k,type(e).__name__)
@@ -171,21 +233,36 @@ async def process_voice(m,status):
                     continue
                 finally:
                     active_providers.discard(k)
+                usage(k,success=1)
+                if not enabled(): return await mark_disabled(status)
                 await status.edit_text('<blockquote expandable>'+html.escape(result[:3900])+'</blockquote>',parse_mode='HTML')
                 for i in range(3900,len(result),3900): await m.reply('<blockquote expandable>'+html.escape(result[i:i+3900])+'</blockquote>',parse_mode='HTML')
                 return
+            if not active_providers and all(blocked('quota:'+k)>time.time() for k in ORDER):
+                await disable('Усі сім API-профілів одночасно повернули HTTP 429; це може бути тимчасовий ліміт, не обов’язково добовий.')
+                return await mark_disabled(status)
             if not notified:
                 await status.edit_text('⏳ API тимчасово недоступні. Очікую поновлення лімітів.')
                 notified=True
             # Avoid repeated edits of identical Telegram messages.
             delay=max(1,min(300,min((blocked(k) for k in order if blocked(k)>time.time()),default=time.time()+60)-time.time()))
             await asyncio.sleep(min(delay,1) if active_providers else delay)
+        if not enabled(): return await mark_disabled(status)
         await status.edit_text('❌ Не вдалося транскрибувати протягом 24 годин.')
 async def worker():
     while True:
         m,status=await waiting.get()
         try:
-            await process_voice(m,status)
+            if not enabled():
+                await mark_disabled(status)
+                continue
+            job=asyncio.create_task(process_voice(m,status))
+            active_jobs[job]=status
+            try: await job
+            except asyncio.CancelledError:
+                if asyncio.current_task().cancelling(): raise
+                await mark_disabled(status)
+            finally: active_jobs.pop(job,None)
         except Exception as e:
             logging.warning('Job failed: %s',type(e).__name__)
             try: await status.edit_text('❌ Не вдалося обробити аудіо.')
