@@ -442,10 +442,10 @@ async def transcribe_local(k,path):
         if provider=='ovh':
             j=await ovh_transcribe(s,path)
         elif provider=='groq':
-            f=aiohttp.FormData(); f.add_field('file',data,filename=path.name,content_type='audio/ogg' if path.suffix=='.ogg' else 'audio/wav'); f.add_field('model',model); f.add_field('temperature','0'); f.add_field('response_format','verbose_json')
+            f=aiohttp.FormData(); f.add_field('file',data,filename=path.name,content_type='audio/ogg' if path.suffix=='.ogg' else 'audio/wav'); f.add_field('model',model); f.add_field('temperature','0'); f.add_field('prompt',"Розмовна українська, суржик, русский язык, język polski, English. Дослівне мовлення, включая сленг и ненормативную лексику."); f.add_field('response_format','verbose_json')
             j=await request(s,'https://api.groq.com/openai/v1/audio/transcriptions',{'Authorization':'Bearer '+need(f'GROQ_API_KEY_{n}')},data=f)
         elif provider=='cf':
-            j=await request(s,'https://api.cloudflare.com/client/v4/accounts/'+need(f'CF_ACCOUNT_ID_{n}')+'/ai/run/'+model,{'Authorization':'Bearer '+need(f'CF_API_TOKEN_{n}')},json={'audio':base64.b64encode(data).decode(),'task':'transcribe','condition_on_previous_text':False,'vad_filter':True,'log_prob_threshold':-0.65,'compression_ratio_threshold':2.0,'no_speech_threshold':0.45}); j=j.get('result') or {}
+            j=await request(s,'https://api.cloudflare.com/client/v4/accounts/'+need(f'CF_ACCOUNT_ID_{n}')+'/ai/run/'+model,{'Authorization':'Bearer '+need(f'CF_API_TOKEN_{n}')},json={'audio':base64.b64encode(data).decode(),'task':'transcribe','initial_prompt':"Розмовна українська, суржик, русский язык, język polski, English. Дослівне мовлення, включая сленг и ненормативную лексику.",'condition_on_previous_text':False,'vad_filter':True,'log_prob_threshold':-0.65,'compression_ratio_threshold':2.0,'no_speech_threshold':0.45}); j=j.get('result') or {}
         elif provider=='gemini':
             j=await request(s,'https://generativelanguage.googleapis.com/v1beta/models/'+model+':generateContent',{'x-goog-api-key':need('GEMINI_API_KEY')},json={'generationConfig':{'temperature':0},'contents':[{'parts':[{'text':GEMINI_PROMPT},{'inline_data':{'mime_type':'audio/ogg' if path.suffix=='.ogg' else 'audio/wav','data':base64.b64encode(data).decode()}}]}]}); j={'text':''.join(p.get('text','') for p in j['candidates'][0]['content']['parts'])}
         return validate_audio_result(j)
@@ -602,7 +602,7 @@ async def run_audio_load_inner(m,config,progress):
         src=Path(d)/'source'
         p=Path(d)/'normalized.ogg'
         await asyncio.wait_for(bot.download(item,destination=src),30)
-        proc=await asyncio.create_subprocess_exec('ffmpeg','-nostdin','-loglevel','error','-i',str(src),'-vn','-af','atempo=0.80,volume=3dB,alimiter=limit=0.95:level=0:latency=1','-ac','1','-ar','48000','-c:a','libopus','-b:a','96k',str(p),stderr=asyncio.subprocess.DEVNULL)
+        proc=await asyncio.create_subprocess_exec('ffmpeg','-nostdin','-loglevel','error','-i',str(src),'-vn','-af','atempo=0.80,volume=5dB,alimiter=limit=0.95:level=0:latency=1','-ac','1','-ar','48000','-c:a','libopus','-b:a','96k',str(p),stderr=asyncio.subprocess.DEVNULL)
         try:
             code=await asyncio.wait_for(proc.wait(),30)
         except (asyncio.TimeoutError,asyncio.CancelledError):
@@ -891,7 +891,7 @@ async def process_voice(m,status):
         audio_seconds=item.duration
         if m.video_note or m.voice:
             out=Path(d)/'normalized.ogg'
-            proc=await asyncio.create_subprocess_exec('ffmpeg','-nostdin','-loglevel','error','-i',str(p),'-vn','-af','atempo=0.80,volume=3dB,alimiter=limit=0.95:level=0:latency=1','-ac','1','-ar','48000','-c:a','libopus','-b:a','96k',str(out),stderr=asyncio.subprocess.DEVNULL)
+            proc=await asyncio.create_subprocess_exec('ffmpeg','-nostdin','-loglevel','error','-i',str(p),'-vn','-af','atempo=0.80,volume=5dB,alimiter=limit=0.95:level=0:latency=1','-ac','1','-ar','48000','-c:a','libopus','-b:a','96k',str(out),stderr=asyncio.subprocess.DEVNULL)
             try:
                 code=await asyncio.wait_for(proc.wait(),30)
             finally:
