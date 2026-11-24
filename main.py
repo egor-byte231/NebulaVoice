@@ -290,8 +290,6 @@ async def ovh_transcribe(s,path):
             finally:
                 for task in tasks: task.cancel()
                 await asyncio.gather(*tasks,return_exceptions=True)
-        try: await d1_snapshot(session)
-        finally: await session.close()
         return {'text':' '.join(finals)}
 class RejectedTranscript(ValueError):
     pass
