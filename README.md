@@ -1,0 +1,6 @@
+# NebulaVoice v0.1 — Test Edition
+Python 3.11+. Install `pip install -r requirements.txt`, copy `.env.example` to `.env` and configure secrets privately. Start `python main.py`. For video notes install system ffmpeg. On FadeHost use the Python runtime and the same startup command. Do not publish .env or state.db.
+
+OWNER_ID is your numeric Telegram user ID. BOT_TOKEN comes from BotFather. Use /test to select a provider per chat. Only owner messages are processed in this test edition. No automatic failover. In groups, BotFather privacy mode may need disabling and bot re-adding to receive ordinary voice messages. Inform participants before enabling transcription to external services.
+
+Groq, Cloudflare and Gemini adapters are implemented but not live tested. Set Gemini model to an audio-capable model available on your free plan. OVH and HF are configurable multipart adapters expecting JSON {"text":"..."}; they need a compatible endpoint, and free access is not verified. HF requires a deployed endpoint. Use only free-tier credentials; code cannot independently guarantee billing is disabled. No quota scheduler yet. The test edition limits concurrency to one and input files to 10 MB. SQLite stores selection per chat. Audio is removed after each attempt. No transcripts are stored locally.
