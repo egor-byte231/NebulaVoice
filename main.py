@@ -989,10 +989,16 @@ async def main():
     logging.info('D1 environment: %s', {k: bool(os.getenv(k,'').strip()) for k in ('CF_D1_API_TOKEN','CF_D1_TOKEN','D1_API_TOKEN','CLOUDFLARE_D1_API_TOKEN','CF_D1_ACCOUNT_ID','CF_ACCOUNT_ID_1','CF_D1_DATABASE_ID')})
     cloud_ready=False
     try:
-        await d1_initialize(session)
-        cloud_ready=True
-    except Exception as e:
-        logging.error('D1 unavailable; local SQLite only until restart: %s',str(e) if isinstance(e,RuntimeError) else type(e).__name__)
+        while not cloud_ready:
+            try:
+                await d1_initialize(session)
+                cloud_ready=True
+            except Exception as e:
+                logging.error('D1 required; retry in 30 seconds: %s',str(e) if isinstance(e,RuntimeError) else type(e).__name__)
+                await asyncio.sleep(30)
+    except BaseException:
+        await session.close()
+        raise
     tasks=[asyncio.create_task(worker()) for _ in range(4)]
     if cloud_ready: tasks.append(asyncio.create_task(d1_monitor(session)))
     tasks.append(asyncio.create_task(quota_reset_monitor()))
