@@ -40,6 +40,7 @@ async function generate(j,env){
  return rows.results.reverse().map(r=>r.line).join("\n");
  }
  let context=j.contextNeeded?(history=await loadHistory()):"";
+ if(j.replyText)context+="\nПовідомлення, на яке відповідають:\n"+String(j.replyText).slice(0,1500);
  for(let pass=0;pass<2;pass++){
   let need=false;
   const ordered=ROUTES.slice();
