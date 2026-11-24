@@ -1390,13 +1390,16 @@ async def submit_cloud_text(m,question,group,replied,reply):
                  'contextNeeded':False,
                  'replyText':(reply.text or '')[:1500] if replied else ''}
         if not payload['forcedRoute']:
-            payload.update(await classify_history(question,replied,budget))
+            try:
+                payload.update(await classify_history(question,replied,budget))
+            except Exception as e:
+                logging.warning('History classifier bypass: %s',type(e).__name__)
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15)) as session:
             async with session.post('https://nebulavoice-ai.maxvyn09.workers.dev/',json=payload,headers={'Authorization':'Bearer '+os.environ['WORKER_SECRET']},allow_redirects=False) as response:
                 if response.status!=202:
-                    raise RuntimeError('Worker submission failed')
-    except Exception:
-        logging.warning('Cloud submission uncertain; reservation retained for reconciliation')
+                    raise RuntimeError(f'Worker submission HTTP {response.status}')
+    except Exception as e:
+        logging.warning('Cloud submission uncertain: %s %s',type(e).__name__,str(e)[:200])
         await status.edit_text('Не вдалося підтвердити прийняття запиту. Спробуй пізніше.')
 
 async def cloud_restore_reservations():
