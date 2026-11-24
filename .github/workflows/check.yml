@@ -36,7 +36,7 @@ jobs:
               assert m.needs_history('А Максим?')
               assert not m.needs_history('Яка столиця Франції?')
               for i in range(105): m.remember_group(-123,str(i))
-              assert len(m.group_history[-123])==100
+              assert len(m.group_history[-123])==50
               assert 'Статистика' in m.report()
               assert 'Статистика' in m.text_report()
               assert len(m.text_report())<4096
