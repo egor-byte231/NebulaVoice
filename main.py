@@ -70,36 +70,44 @@ def report():
     day=datetime.datetime.now(datetime.timezone.utc).date().isoformat()
     rows={r[0]:r[1:] for r in db.execute('SELECT provider,attempts,seconds,successes,limited FROM usage_daily WHERE day=?',(day,))}
     def duration(n):
-        h,r=divmod(n,3600)
+        h,r=divmod(int(n),3600)
         m,sec=divmod(r,60)
-        return ' '.join(([f'{h} год'] if h else [])+([f'{m} хв'] if m else [])+([f'{sec} с'] if sec or not n else []))
+        return ' '.join(([f'{h}г'] if h else [])+([f'{m}хв'] if m else [])+([f'{sec}с'] if sec or not n else []))
+    def panel(items):
+        return '<pre>'+html.escape('\n'.join(f'{label:<14} {str(value):>12}' for label,value in items))+'</pre>'
     total=[sum(r[i] for r in rows.values()) for i in range(4)]
-    lines=['📊 <b>Статистика NebulaVoice</b>',f'📅 {day} (UTC)', '🟢 Транскрипція увімкнена' if enabled() else '🔴 Транскрипція вимкнена', '', '<b>Загальна статистика</b>',f'Успішних транскрипцій: {total[2]}',f'Спроб обробки: {total[0]}',f'Аудіо у спробах: {duration(total[1])}',f'У черзі: {waiting.qsize()} / 50',f'Активних завдань: {len(active_jobs)} / 4']
+    lines=['📊 <b>Статистика NebulaVoice</b>',f'📅 {day} (UTC)', '🟢 Транскрипція увімкнена' if enabled() else '🔴 Транскрипція вимкнена','', '<b>Загальна статистика</b>',panel([('Транскрипцій',total[2]),('Спроб',total[0]),('Аудіо у спробах',duration(total[1])),('У черзі',f'{waiting.qsize()} / 50'),('Активні',f'{len(active_jobs)} / 4')])]
     for k in ORDER:
         a,b,c,d=rows.get(k,(0,0,0,0))
         remaining=max(0,int(blocked('quota:'+k)-time.time()))
         primary={'groq2':'groq1','groq2t':'groq1t','cf2':'cf1'}.get(k)
-        state='🔴 Ліміт досягнуто' if remaining else '🟡 Обробляє аудіо' if k in active_providers else '⚪ Резерв' if primary and blocked('quota:'+primary)<=time.time() else '🟡 Тимчасова пауза' if blocked(k)>time.time() else '🟢 Готовий'
-        lines.extend(['',f'<b>{html.escape(NAMES[k])}</b>',state,f'Транскрипцій: {c} | Аудіо у спробах: {duration(b)}'])
+        state='🔴 Ліміт API' if remaining else '🟡 Обробка' if k in active_providers else '⚪ Резерв' if primary and blocked('quota:'+primary)<=time.time() else '🟡 Пауза' if blocked(k)>time.time() else '🟢 Готовий'
+        items=[('Транскрипцій',c),('Спроб',a),('Аудіо',duration(b))]
         if k.startswith('groq'):
-            estimated=28800
-            lines.append(f'Ліміт використано: ≈ {duration(b)} / {duration(estimated)}')
-            lines.append(f'Залишилось: ≈ {duration(max(0,estimated-b))} (локальна оцінка)')
+            limit=28800
+            used=b
+            left=max(0,limit-used)
+            items.extend([('Добовий ліміт','8г'),('Використано','≈ '+duration(used)),('Залишилось','≈ '+duration(left))])
         elif k.startswith('cf'):
-            used=min(10000,b*46.63/60)
-            left=10000-used
-            lines.append(f'Ліміт використано: ≈ {used:.1f} / 10000 neurons ({used/100:.1f}%)')
-            lines.append(f'Залишилось: ≈ {left:.1f} neurons / {duration(int(left*60/46.63))} аудіо')
+            limit=10000
+            used=b*46.63/60
+            left=max(0,limit-used)
+            items.extend([('Ліміт neurons','10000'),('Використано',f'≈ {used:.1f}'),('Залишилось',f'≈ {left:.1f}'),('Аудіо залишок',duration(left*60/46.63))])
         else:
-            recent=db.execute('SELECT COUNT(*) FROM ovh_requests WHERE at>?',(time.time()-60,)).fetchone()[0]
-            lines.append(f'Ліміт використано: ≈ {recent} / 2 запити за останні 60 с')
-            lines.append(f'Залишилось: ≈ {max(0,2-recent)} запити; добова квота не визначена')
-        if d: lines.append(f'Відмов через ліміт: {d}')
-        if remaining: lines.append(f'Повторна перевірка через: {duration(remaining)}')
-        h=db.execute('SELECT info FROM quota_headers WHERE provider=?',(k,)).fetchone()
-        if h and remaining: lines.append('<blockquote expandable>'+html.escape(h[0])+'</blockquote>')
-    lines.extend(['','<i>Статистика з моменту початку обліку. Тривалість включає повторні спроби. Точний залишок квот залежить від даних API.</i>'])
+            limit=2
+            used=db.execute('SELECT COUNT(*) FROM ovh_requests WHERE at>?',(time.time()-60,)).fetchone()[0]
+            left=max(0,limit-used)
+            items.extend([('Ліміт / 60с',limit),('Використано',used),('Залишилось',left)])
+        pct=100*left/limit
+        filled=int(pct/10)
+        items.append(('Доступно',f'{pct:.1f}%'))
+        if d: items.append(('Відмови API',d))
+        if remaining: items.append(('Пауза',duration(remaining)))
+        lines.extend(['',f'<b>{html.escape(NAMES[k])}</b> · {state}',panel(items),'<code>'+('█'*filled+'░'*(10-filled))+f' {pct:.1f}%</code>'])
+    lines.extend(['','<i>Квоти приблизні. Повторні та невдалі спроби враховано. OVH: хвилинний ліміт.</i>'])
     return '\n'.join(lines)
+def stats_menu():
+    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='🔄 Оновити',callback_data='owner:stats')],[InlineKeyboardButton(text='⬅️ Назад',callback_data='owner:back')]])
 def blocked(k):
     row=db.execute('SELECT until FROM cooldowns WHERE provider=?',(k,)).fetchone()
     return row[0] if row else 0
@@ -339,14 +347,21 @@ async def disable(reason):
     jobs=[(t,status) for t,status in active_jobs.items() if t is not current]
     for t,status in jobs: t.cancel()
     for status in queued: await mark_disabled(status)
-    try: await bot.send_message(OWNER,'🔴 <b>Транскрипцію вимкнено</b>\nПричина: '+html.escape(reason)+f'\nВидалено з черги: {len(queued)}; скасовано активних: {len(jobs)}.\n\n'+report(),parse_mode='HTML',reply_markup=owner_menu())
+    try: await bot.send_message(OWNER,'🔴 <b>Транскрипцію вимкнено</b>\nПричина: '+html.escape(reason)+f'\nВидалено з черги: {len(queued)}; скасовано активних: {len(jobs)}.\n\n'+report(),parse_mode='HTML',reply_markup=stats_menu())
     except Exception as e: logging.warning('Owner notification failed: %s',type(e).__name__)
 @dp.callback_query(F.data.startswith('owner:'))
 async def owner_action(c:CallbackQuery):
     if c.from_user.id!=OWNER or not isinstance(c.message,Message) or c.message.chat.type!='private':
         return await c.answer('Тільки власник',show_alert=True)
     await c.answer()
-    if c.data=='owner:stats': return await c.message.answer(report(),parse_mode='HTML')
+    if c.data=='owner:stats':
+        try: await c.message.edit_text(report(),parse_mode='HTML',reply_markup=stats_menu())
+        except Exception as e:
+            if 'message is not modified' not in str(e).lower(): raise
+        return
+    if c.data=='owner:back':
+        return await c.message.edit_text('Панель власника',reply_markup=owner_menu())
+    if c.data!='owner:toggle': return
     if enabled(): await disable('Вимкнено власником')
     else:
         db.execute('UPDATE control SET enabled=1 WHERE id=1')
