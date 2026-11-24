@@ -6,7 +6,7 @@ export default {
   if(req.method!=="POST"||!env.WORKER_SECRET||req.headers.get("Authorization")!=="Bearer "+env.WORKER_SECRET) return new Response("Unauthorized",{status:401});
   if(!env.BOT_TOKEN) return new Response("Not configured",{status:503});
   const j=await req.json();
-  if(new URL(req.url).pathname==="/audio/transcribe") return audioTranscribe(j,env);
+  if(new URL(req.url).pathname==="/audio/transcribe") return env.DISPATCHER.get(env.DISPATCHER.idFromName("audio")).fetch("https://dispatcher/audio",{method:"POST",body:JSON.stringify(j)});
 
   if(new URL(req.url).pathname==="/slots"){
    if(j.slots!==undefined&&(!Number.isInteger(j.slots)||j.slots<1||j.slots>50))return new Response("Invalid slots",{status:400});
@@ -68,6 +68,13 @@ export class Dispatcher {
  }
  async fetch(req){
   const path=new URL(req.url).pathname;
+  if(path==="/audio"){
+   const j=await req.json();
+   const slots=Math.max(1,Math.min(40,Number(j.slots)||20));
+   if(this.active.size>=slots)return Response.json({error:"Busy"},{status:429});
+   const id=crypto.randomUUID();this.active.add(id);
+   try{return await audioTranscribe(j,this.env);}finally{this.active.delete(id);}
+  }
   if(path==="/slots"){
    const j=await req.json();
    if(j.slots!==undefined){
