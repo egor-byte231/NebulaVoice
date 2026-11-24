@@ -1318,15 +1318,16 @@ async def show_limit(m:Message):
     if m.chat.type not in ('private','group','supergroup'): return
     chat=m.chat.id
     limit=private_limit(chat) if m.chat.type=='private' else group_limit(chat)
-    used=group_used(chat)
-    left=max(0,limit-used)
+    reserved=db.execute('SELECT COALESCE(SUM(budget),0) FROM cloud_pending WHERE chat=? AND day=?',(chat,text_day())).fetchone()[0]
+    used=max(0,group_used(chat)-reserved)
+    left=max(0,limit-used-reserved)
     pct=100*used/limit
     filled=min(10,max(0,int(pct/10)))
     now=datetime.datetime.now(datetime.timezone.utc)
     reset=(now+datetime.timedelta(days=1)).replace(hour=0,minute=0,second=0,microsecond=0)
     minutes=int((reset-now).total_seconds()/60)
     tariff='Premium' if premium_until(chat)>time.time() else 'Free'
-    await m.reply(f'📊 Ліміт ШІ — {tariff}\n\nВикористано: {used:,} / {limit:,}\nЗалишилося: {left:,} токенів\n'+ '█'*filled+'░'*(10-filled)+f' {pct:.1f}%\n\nСкидання через {minutes//60} г {minutes%60} хв (00:00 UTC)\nОблік сумарний для всіх API.'.replace(',', ' '),parse_mode=None)
+    await m.reply(f'📊 Ліміт ШІ — {tariff}\n\nВикористано: {used:,} / {limit:,}\nЗарезервовано: {reserved:,}\nЗалишилося: {left:,} токенів\n'+ '█'*filled+'░'*(10-filled)+f' {pct:.1f}%\n\nСкидання через {minutes//60} г {minutes%60} хв (00:00 UTC)\nОблік сумарний для всіх API.'.replace(',', ' '),parse_mode=None)
 
 db.execute('CREATE TABLE IF NOT EXISTS classifier_daily (day TEXT PRIMARY KEY, attempts INTEGER, ok INTEGER, needed INTEGER, tokens INTEGER, ms INTEGER, bypass INTEGER)')
 db.commit()
@@ -1374,7 +1375,8 @@ async def submit_cloud_text(m,question,group,replied,reply):
     chat=m.chat.id
     day=text_day()
     status=await m.reply('✍️ Друкую…')
-    budget=min(6000,(group_limit(chat) if group else private_limit(chat))-group_used(chat,day))
+    simple=not replied and bool(re.fullmatch(r'(?:привіт|привет|hello|hi|hej|cześć|добрий день|добрый день)[!?.\s]*',question.strip(),re.I))
+    budget=min(900 if simple else 6000,(group_limit(chat) if group else private_limit(chat))-group_used(chat,day))
     if budget<=0:
         await status.edit_text('🔋 Добовий ліміт ШІ вичерпано.')
         return
@@ -1389,13 +1391,23 @@ async def submit_cloud_text(m,question,group,replied,reply):
                  'budget':budget,'forcedRoute':test_route('text',m),'development':development_enabled(),'diagnostic':False,
                  'contextNeeded':False,
                  'replyText':(reply.text or '')[:1500] if replied else ''}
-        if not payload['forcedRoute']:
+        if simple and not payload['forcedRoute']:
+            payload['historyDecision']=False
+            payload['simple']=True
+        elif not payload['forcedRoute']:
             try:
                 payload.update(await classify_history(question,replied,budget))
             except Exception as e:
                 logging.warning('History classifier bypass: %s',type(e).__name__)
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15)) as session:
             async with session.post('https://nebulavoice-ai.maxvyn09.workers.dev/',json=payload,headers={'Authorization':'Bearer '+os.environ['WORKER_SECRET']},allow_redirects=False) as response:
+                if response.status in (400,401,403,404,405,413,422,503):
+                    await d1_query(history_session,'DELETE FROM cloud_reservations WHERE id=?',(job_id,))
+                    with db:
+                        if db.execute('DELETE FROM cloud_pending WHERE id=?',(job_id,)).rowcount:
+                            db.execute('UPDATE text_group_usage SET tokens=MAX(0,tokens-?) WHERE day=? AND chat=?',(budget,day,chat))
+                    await status.edit_text('Запит не прийнято. Резерв токенів повернено.')
+                    return
                 if response.status!=202:
                     raise RuntimeError(f'Worker submission HTTP {response.status}')
     except Exception as e:
