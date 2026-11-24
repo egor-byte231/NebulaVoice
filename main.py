@@ -3,7 +3,7 @@ from pathlib import Path
 import aiohttp
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
-from aiogram.types import ChatMemberUpdated, Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import ChatMemberUpdated, Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, LabeledPrice, PreCheckoutQuery
 from dotenv import load_dotenv
 load_dotenv()
 logging.basicConfig(level=logging.INFO)
@@ -566,7 +566,7 @@ def text_report():
         return '<pre>'+html.escape('\n'.join(f'{label:<17} {str(value):>10}' for label,value in items))+'</pre>'
     groups=db.execute('SELECT COUNT(*) FROM text_groups').fetchone()[0]
     group_tokens=db.execute('SELECT COALESCE(SUM(tokens),0) FROM text_group_usage WHERE day=?',(day,)).fetchone()[0]
-    lines=['🤖 <b>Статистика текстового ШІ</b>',f'📅 {day} (UTC)','Автоматичний режим','', '<b>Загальна статистика</b>',panel([('Токени (оцінка)',sum(r[0] for r in rows.values())),('Спроби',sum(r[1] for r in rows.values())),('Токени груп',group_tokens),('Активні групи',groups),('Обробка',f'{len(group_busy)} / 4'),('Ліміт на групу',30000)])]
+    lines=['🤖 <b>Статистика текстового ШІ</b>',f'📅 {day} (UTC)','Автоматичний режим','', '<b>Загальна статистика</b>',panel([('Токени (оцінка)',sum(r[0] for r in rows.values())),('Спроби',sum(r[1] for r in rows.values())),('Токени груп',group_tokens),('Активні групи',groups),('Обробка',f'{len(group_busy)} / 4'),('Free / Premium','40k / 100k')])]
     for route in TEXT_ROUTES:
         name=route[0]
         tokens,attempts=rows.get(name,(0,0))
@@ -582,6 +582,11 @@ async def text_status(m:Message):
     await m.answer(text_report(),parse_mode='HTML',reply_markup=text_stats_menu())
 # Group AI is opt-in; history stays in RAM and is isolated by chat.
 db.execute('CREATE TABLE IF NOT EXISTS text_groups (chat INTEGER PRIMARY KEY)')
+db.execute('CREATE TABLE IF NOT EXISTS text_disabled (chat INTEGER PRIMARY KEY)')
+db.execute('CREATE TABLE IF NOT EXISTS text_premium (chat INTEGER PRIMARY KEY, until REAL)')
+db.execute('CREATE TABLE IF NOT EXISTS text_payments (charge TEXT PRIMARY KEY, chat INTEGER, buyer INTEGER)')
+db.execute('CREATE TABLE IF NOT EXISTS text_orders (payload TEXT PRIMARY KEY, chat INTEGER, buyer INTEGER, created REAL)')
+db.execute('CREATE TABLE IF NOT EXISTS text_notices (chat INTEGER PRIMARY KEY)')
 db.execute('CREATE TABLE IF NOT EXISTS text_group_usage (day TEXT, chat INTEGER, tokens INTEGER, PRIMARY KEY(day,chat))')
 db.execute('CREATE TABLE IF NOT EXISTS text_group_alerts (day TEXT, chat INTEGER, PRIMARY KEY(day,chat))')
 db.commit()
@@ -589,7 +594,12 @@ from collections import deque, OrderedDict
 group_history=OrderedDict()
 group_busy=set()
 def group_enabled(chat):
-    return bool(db.execute('SELECT 1 FROM text_groups WHERE chat=?',(chat,)).fetchone())
+    return not bool(db.execute('SELECT 1 FROM text_disabled WHERE chat=?',(chat,)).fetchone())
+def premium_until(chat):
+    row=db.execute('SELECT until FROM text_premium WHERE chat=?',(chat,)).fetchone()
+    return row[0] if row else 0
+def group_limit(chat):
+    return 100000 if premium_until(chat)>time.time() else 40000
 def group_used(chat,day=None):
     row=db.execute('SELECT tokens FROM text_group_usage WHERE day=? AND chat=?',(day or text_day(),chat)).fetchone()
     return row[0] if row else 0
@@ -616,13 +626,16 @@ async def group_ai_control(m:Message):
     chat=m.chat.id
     if cmd=='/ai_on':
         await m.answer('🤖 Адміністратор увімкнув ШІ. Бот зберігає до 100 отриманих текстових повідомлень у пам’яті та може передавати їх зовнішнім AI API для контекстних запитів. Не публікуйте конфіденційні дані. Виклик: @Nebulavcbot або Reply. /ai_off вимикає ШІ та очищає історію.')
+        db.execute('DELETE FROM text_disabled WHERE chat=?',(chat,))
         db.execute('INSERT OR IGNORE INTO text_groups VALUES (?)',(chat,))
+        db.execute('INSERT OR IGNORE INTO text_notices VALUES (?)',(chat,))
     elif cmd=='/ai_off':
+        db.execute('INSERT OR IGNORE INTO text_disabled VALUES (?)',(chat,))
         db.execute('DELETE FROM text_groups WHERE chat=?',(chat,))
         group_history.pop(chat,None)
         await m.answer('ШІ вимкнено, локальну історію очищено.')
     else:
-        return await m.answer(f'ШІ: {"увімкнено" if group_enabled(chat) else "вимкнено"}\nДобовий облік: {group_used(chat)} / 30000 токенів (UTC)\nІсторія: {len(group_history.get(chat,[]))}/100')
+        return await m.answer(f'ШІ: {"увімкнено" if group_enabled(chat) else "вимкнено"}\nДобовий облік: {group_used(chat)} / {group_limit(chat)} токенів (UTC)\nІсторія: {len(group_history.get(chat,[]))}/100')
     db.commit()
 def needs_history(question):
     return bool(re.search(r'історі|истори|чат|розмов|переписк|повідомлен|сообщени|обговор|обсуж|що тут|что тут|хто тут|кто тут|що пис|что пис|підсум|итог|вище|выше|раніше|раньше|conversation|messages|summarize|history|previous',question,re.I))
@@ -639,7 +652,7 @@ async def generate_text(m,question,context='',group=False):
         if not key or not url or not model or not url.startswith('https://') or blocked('text:'+name)>time.time(): continue
         day=text_day()
         used=group_used(chat,day) if group else text_used()
-        if used+reserve>30000:
+        if used+reserve>(group_limit(chat) if group else 40000):
             if group:
                 db.execute('INSERT OR IGNORE INTO text_group_alerts VALUES (?,?)',(day,chat))
                 db.commit()
@@ -678,6 +691,45 @@ async def generate_text(m,question,context='',group=False):
             await m.answer(answer[:3700]+'\n\nМодель: '+name,parse_mode=None)
         return
     await m.reply('Текстовий ШІ тимчасово недоступний.')
+@dp.message(Command('premium'),F.chat.type.in_({'group','supergroup'}))
+async def premium_offer(m:Message):
+    if not await group_admin(m): return await m.reply('Придбати Premium для групи може адміністратор.')
+    import secrets
+    payload='nebula:'+secrets.token_hex(16)
+    db.execute('INSERT INTO text_orders VALUES (?,?,?,?)',(payload,m.chat.id,m.from_user.id,time.time()))
+    db.commit()
+    try:
+        await bot.send_invoice(chat_id=m.from_user.id,title='Nebula Premium',description='100 000 токенів на добу для групи на 30 днів. Без автоподовження. Доступність залежить від квот API. Підтримка: /paysupport.',payload=payload,currency='XTR',prices=[LabeledPrice(label='Premium 30 днів',amount=150)],provider_token='')
+        await m.reply('Рахунок надіслано в приватний чат.')
+    except Exception:
+        await m.reply('Спочатку відкрий приватний чат з ботом та натисни /start, потім повтори /premium.')
+@dp.pre_checkout_query()
+async def premium_checkout(q:PreCheckoutQuery):
+    row=db.execute('SELECT chat,buyer,created FROM text_orders WHERE payload=?',(q.invoice_payload,)).fetchone()
+    ok=bool(row and row[1]==q.from_user.id and time.time()-row[2]<86400 and q.currency=='XTR' and q.total_amount==150)
+    await q.answer(ok=ok,error_message=None if ok else 'Рахунок недійсний. Створи новий через /premium.')
+@dp.message(F.successful_payment)
+async def premium_paid(m:Message):
+    p=m.successful_payment
+    row=db.execute('SELECT chat,buyer FROM text_orders WHERE payload=?',(p.invoice_payload,)).fetchone()
+    if not row or not m.from_user or row[1]!=m.from_user.id or p.currency!='XTR' or p.total_amount!=150:
+        return await m.answer('Не вдалося зіставити платіж. Звернись через /paysupport.')
+    chat,buyer=row
+    with db:
+        cur=db.execute('INSERT OR IGNORE INTO text_payments VALUES (?,?,?)',(p.telegram_payment_charge_id,chat,buyer))
+        if not cur.rowcount: return
+        until=max(time.time(),premium_until(chat))+30*86400
+        db.execute('INSERT OR REPLACE INTO text_premium VALUES (?,?)',(chat,until))
+    await m.answer('⭐ Premium активовано на 30 днів для групи. Ліміт: 100 000 токенів/день.')
+@dp.message(Command('paysupport'),F.chat.type=='private')
+async def payment_support(m:Message):
+    if not m.from_user: return
+    try:
+        await bot.send_message(OWNER,f'Запит підтримки платежів від Telegram ID {m.from_user.id}.')
+        await m.answer('Запит передано власнику бота.')
+    except Exception:
+        await m.answer('Не вдалося передати запит. Спробуй пізніше.')
+
 @dp.message(F.text,F.chat.type.in_({'group','supergroup','private'}))
 async def text_message(m:Message):
     if not m.from_user or m.from_user.is_bot: return
@@ -690,7 +742,15 @@ async def text_message(m:Message):
     reply=m.reply_to_message
     replied=bool(reply and reply.from_user and reply.from_user.id==bot.id)
     mentioned=bool(re.search(r'(?<!\w)@Nebulavcbot(?!\w)',raw,re.I))
-    if group: remember_group(chat,(m.from_user.full_name or 'Учасник')+': '+raw)
+    if group:
+        db.execute('INSERT OR IGNORE INTO text_groups VALUES (?)',(chat,))
+        db.commit()
+        if db.execute('SELECT 1 FROM text_notices WHERE chat=?',(chat,)).fetchone():
+            remember_group(chat,(m.from_user.full_name or 'Учасник')+': '+raw)
+        elif mentioned or replied:
+            await m.reply('🤖 ШІ увімкнено автоматично. Після цього повідомлення бот зберігатиме до 100 текстових повідомлень для контексту та може передавати їх зовнішнім AI API. /ai_off — вимкнути (адмін). /premium — тариф.')
+            db.execute('INSERT OR IGNORE INTO text_notices VALUES (?)',(chat,))
+            db.commit()
     if not (mentioned or replied or not group): return
     question=re.sub(r'(?<!\w)@Nebulavcbot(?!\w)','',raw,flags=re.I).strip()
     if not question: return
