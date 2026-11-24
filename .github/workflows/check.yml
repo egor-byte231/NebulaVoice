@@ -35,8 +35,17 @@ jobs:
               assert m.needs_history('Юна чемно себе поводить?')
               assert m.needs_history('А Максим?')
               assert not m.needs_history('Яка столиця Франції?')
-              for i in range(105): m.remember_group(-123,str(i))
-              assert len(m.group_history[-123])==50
+              import asyncio
+              calls=[]
+              async def fake_query(session,sql,params=()):
+                  calls.append((sql,params))
+                  return [{'line':'new'},{'line':'old'}] if sql.startswith('SELECT') else []
+              m.d1_query=fake_query
+              async def check_history():
+                  await m.remember_group(-123,'test',1,0)
+                  assert 'LIMIT 50' in calls[-1][0]
+                  assert await m.read_history(-123,2)==['old','new']
+              asyncio.run(check_history())
               assert 'Статистика' in m.report()
               assert 'Статистика' in m.text_report()
               assert len(m.text_report())<4096
