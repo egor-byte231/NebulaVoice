@@ -395,12 +395,12 @@ async def deliver_transcript(m,status,result):
 audio_cloud_retry=0
 audio_local_active=0
 def audio_platform():
-    return 'Cloudflare' if os.getenv('WORKER_SECRET') and time.monotonic()>=audio_cloud_retry else 'FadeHost'
+    return 'Cloudflare'
 def audio_slot_limit():
     return audio_settings()[2 if audio_platform()=='Cloudflare' else 3]
 async def cloud_audio(k,path):
     global audio_cloud_retry
-    if audio_platform()!='Cloudflare': return None
+    if not os.getenv('WORKER_SECRET') or time.monotonic()<audio_cloud_retry: return None
     data=path.read_bytes()
     if k=='ovh':
         proc=await asyncio.create_subprocess_exec('ffmpeg','-nostdin','-loglevel','error','-i',str(path),'-ar','16000','-ac','1','-f','s16le','pipe:1',stdout=asyncio.subprocess.PIPE,stderr=asyncio.subprocess.DEVNULL)
@@ -432,13 +432,8 @@ async def cloud_audio(k,path):
                 audio_cloud_retry=time.monotonic()+30
                 return None
 async def transcribe(k,path):
-    global audio_local_active
     j=await cloud_audio(k,path)
-    if j is None:
-        while audio_local_active>=audio_settings()[3]: await asyncio.sleep(0.1)
-        audio_local_active+=1
-        try: return await transcribe_local(k,path)
-        finally: audio_local_active-=1
+    if j is None: raise RuntimeError('Cloudflare audio unavailable')
     return validate_audio_result(j)
 async def transcribe_local(k,path):
     provider,n,model=MODELS[k]
@@ -1325,6 +1320,34 @@ async def show_limit(m:Message):
     tariff='Premium' if premium_until(chat)>time.time() else 'Free'
     await m.reply(f'📊 Ліміт ШІ — {tariff}\n\nВикористано: {used:,} / {limit:,}\nЗалишилося: {left:,} токенів\n'+ '█'*filled+'░'*(10-filled)+f' {pct:.1f}%\n\nСкидання через {minutes//60} г {minutes%60} хв (00:00 UTC)\nОблік сумарний для всіх API.'.replace(',', ' '),parse_mode=None)
 
+history_classifier_slots=asyncio.Semaphore(5)
+history_classifier_admitted=0
+async def classify_history(question,replied,budget):
+    global history_classifier_admitted
+    if history_classifier_admitted>=7 or budget<1000: return {}
+    key=os.getenv('GROQ_API_KEY_1') or os.getenv('GROQ_API_KEY_2')
+    if not key: return {}
+    route='Groq 1 20B' if os.getenv('GROQ_API_KEY_1') else 'Groq 2 20B'
+    history_classifier_admitted+=1
+    try:
+        async with history_classifier_slots:
+            prompt='Визнач, чи для відповіді потрібні попередні повідомлення чату. Питання про учасників, їхню поведінку, попередні репліки або атмосферу потребують історії. Поверни виключно ІСТОРІЯ ПОТРІБНА або ІСТОРІЯ НЕПОТРІБНА. Не відповідай на саме питання.'
+            messages=[{'role':'system','content':prompt},{'role':'user','content':('Це відповідь на попереднє повідомлення.\n' if replied else '')+question[:4000]}]
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=3)) as session:
+                async with session.post('https://api.groq.com/openai/v1/chat/completions',headers={'Authorization':'Bearer '+key},json={'model':'openai/gpt-oss-20b','messages':messages,'max_tokens':128,'reasoning_effort':'low','temperature':0},allow_redirects=False) as response:
+                    if response.status!=200: return {}
+                    data=await response.json()
+            answer=data['choices'][0]['message']['content'].strip().upper()
+            tokens=data.get('usage',{}).get('total_tokens',0)
+            result={'classifierTokens':tokens,'classifierRoute':route} if isinstance(tokens,int) and tokens>=0 else {}
+            if answer in ('ІСТОРІЯ ПОТРІБНА','ІСТОРІЯ НЕПОТРІБНА'):
+                result['historyDecision']=answer=='ІСТОРІЯ ПОТРІБНА'
+            return result
+    except Exception:
+        return {}
+    finally:
+        history_classifier_admitted-=1
+
 async def submit_cloud_text(m,question,group,replied,reply):
     chat=m.chat.id
     day=text_day()
@@ -1344,6 +1367,8 @@ async def submit_cloud_text(m,question,group,replied,reply):
                  'budget':budget,'forcedRoute':test_route('text',m),'development':development_enabled(),'diagnostic':False,
                  'contextNeeded':False,
                  'replyText':(reply.text or '')[:1500] if replied else ''}
+        if not payload['forcedRoute']:
+            payload.update(await classify_history(question,replied,budget))
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15)) as session:
             async with session.post('https://nebulavoice-ai.maxvyn09.workers.dev/',json=payload,headers={'Authorization':'Bearer '+os.environ['WORKER_SECRET']},allow_redirects=False) as response:
                 if response.status!=202:
