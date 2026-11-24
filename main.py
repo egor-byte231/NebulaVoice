@@ -27,14 +27,14 @@ def usage(k,seconds=0,attempt=0,success=0,limited=0):
     db.execute('INSERT INTO usage_daily VALUES (?,?,?,?,?,?) ON CONFLICT(day,provider) DO UPDATE SET attempts=attempts+excluded.attempts, seconds=seconds+excluded.seconds, successes=successes+excluded.successes, limited=limited+excluded.limited',(day,k,attempt,seconds,success,limited))
     db.commit()
 async def quota_alert(k,rate_error=False):
+    if k=='ovh' and not rate_error: return
     day=datetime.datetime.now(datetime.timezone.utc).date().isoformat()
     row=db.execute('SELECT seconds FROM usage_daily WHERE day=? AND provider=?',(day,k)).fetchone()
     seconds=row[0] if row else 0
     period=day
     if k=='ovh':
         recent=db.execute('SELECT at FROM ovh_requests WHERE at>? ORDER BY at',(time.time()-60,)).fetchall()
-        if not recent: return
-        period='ovh:'+str(int(recent[0][0]))
+        period='ovh:'+str(int(recent[0][0])) if recent else day
         used=len(recent)
         limit=2
         unit='запитів за 60 с'
@@ -299,10 +299,29 @@ active_jobs={}
 DISABLED='⚠️ Транскрипцію тимчасово вимкнено.'
 def owner_menu():
     return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='⏸ Вимкнути' if enabled() else '▶️ Увімкнути',callback_data='owner:toggle')],[InlineKeyboardButton(text='📊 Статистика',callback_data='owner:stats')]])
+error_alert_times={}
 async def notify_error(where,error):
+    raw=str(error)
+    # Only locally defined diagnostics and HTTP status codes are exposed.
+    allowed=('Не вдалося конвертувати аудіо для OVH','OVH: максимум 15 секунд','OVH: некоректна адреса сесії','OVH: помилка live-сесії','OVH: помилка WebSocket','Не вдалося витягти аудіо','API не повернув текст','Порожня транскрипція','Повторення старого промпту','FFmpeg')
+    match=re.match(r'API HTTP [0-9]{3}',raw)
+    if match: detail=match.group(0)
+    elif raw in allowed: detail=raw
+    elif isinstance(error,asyncio.TimeoutError): detail='Перевищено час очікування'
+    elif isinstance(error,aiohttp.ClientResponseError): detail=f'HTTP {error.status}'
+    elif isinstance(error,aiohttp.ClientConnectionError): detail='Помилка з’єднання з API'
+    elif isinstance(error,json.JSONDecodeError): detail='API повернув некоректний JSON'
+    elif isinstance(error,KeyError): detail='У відповіді API відсутнє необхідне поле'
+    elif isinstance(error,FileNotFoundError): detail='Не знайдено необхідний файл або програму'
+    else: detail='Невідома причина; тип помилки: '+type(error).__name__
+    key=(where,detail)
+    now=time.monotonic()
+    if now-error_alert_times.get(key,float('-inf'))<300: return
+    error_alert_times[key]=now
     try:
-        await bot.send_message(OWNER,f'⚠️ Помилка NebulaVoice\n\nЕтап: {where}\nТип: {type(error).__name__}\n'+(str(error)[:120] if isinstance(error,ValueError) and str(error).startswith('API HTTP ') else 'Деталі безпечного журналу: '+type(error).__name__))
+        await bot.send_message(OWNER,f'⚠️ Помилка NebulaVoice\n\nЕтап: {where}\nТип: {type(error).__name__}\nПричина: {detail}')
     except Exception as e:
+        error_alert_times.pop(key,None)
         logging.warning('Owner error notification failed: %s',type(e).__name__)
 async def mark_disabled(status):
     try: await status.edit_text(DISABLED)
@@ -440,7 +459,7 @@ async def quota_reset_monitor():
             day=datetime.datetime.now(datetime.timezone.utc).date().isoformat()
             for k in ORDER:
                 if k=='ovh':
-                    row=db.execute("SELECT period FROM quota_alerts WHERE provider=? AND threshold=0 AND period LIKE 'ovh:%' ORDER BY period DESC LIMIT 1",(k,)).fetchone()
+                    row=db.execute("SELECT period FROM quota_alerts WHERE provider=? AND threshold=-1 AND period LIKE '%:429' ORDER BY period DESC LIMIT 1",(k,)).fetchone()
                     if not row: continue
                     period=row[0]
                     recent=db.execute('SELECT COUNT(*) FROM ovh_requests WHERE at>?',(time.time()-60,)).fetchone()[0]
