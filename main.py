@@ -1,4 +1,4 @@
-import datetime, html, wave, re, os, asyncio, time, tempfile, logging, base64, json, sqlite3
+import difflib, datetime, html, wave, re, os, asyncio, time, tempfile, logging, base64, json, sqlite3
 from pathlib import Path
 import aiohttp
 from aiogram import Bot, Dispatcher, F
@@ -200,6 +200,28 @@ async def ovh_transcribe(s,path):
                 for task in tasks: task.cancel()
                 await asyncio.gather(*tasks,return_exceptions=True)
         return {'text':' '.join(finals)}
+class RejectedTranscript(ValueError):
+    pass
+LEGACY_PROMPTS = (
+    ASR_PROMPT,
+    "Дослівний запис розмови українською, російською або змішаною мовою. Зберігай оригінальні слова, сленг і перемикання мов без перекладу та цензури.",
+    "Дослівна розмовна транскрипція: українська, русский язык, суржик, сленг, матюки. Без перекладу, цензури, виправлення граматики чи вигаданих слів. Зберігати перемикання мов.",
+    "Зберігай оригінальні слова, сленг і перемикання мов без перекладу та цензури.",
+    "Зберігай слова, суржик, сленг і природне перемикання мов без перекладу та цензури.",
+)
+def prompt_echo(text):
+    def norm(value):
+        return ' '.join(re.findall(r'\w+',value.casefold()))
+    words=norm(text).split()
+    for prompt in LEGACY_PROMPTS:
+        target=norm(prompt).split()
+        if len(words)<5: continue
+        for n in range(max(5,len(target)-3),len(target)+4):
+            for i in range(max(0,len(words)-n+1)):
+                fragment=' '.join(words[i:i+n])
+                if difflib.SequenceMatcher(None,fragment,' '.join(target)).ratio()>=0.85:
+                    return True
+    return False
 def language_check(j):
     # API language is an estimate of audio language; script checks are only a heuristic.
     lang=str(j.get('language') or j.get('detected_language') or '').lower().strip()
@@ -249,14 +271,15 @@ async def transcribe(k,path):
         if provider=='ovh':
             j=await ovh_transcribe(s,path)
         elif provider=='groq':
-            f=aiohttp.FormData(); f.add_field('file',data,filename=path.name,content_type='audio/ogg' if path.suffix=='.ogg' else 'audio/wav'); f.add_field('model',model); f.add_field('temperature','0'); f.add_field('prompt',ASR_PROMPT); f.add_field('response_format','verbose_json')
+            f=aiohttp.FormData(); f.add_field('file',data,filename=path.name,content_type='audio/ogg' if path.suffix=='.ogg' else 'audio/wav'); f.add_field('model',model); f.add_field('temperature','0'); f.add_field('response_format','verbose_json')
             j=await request(s,'https://api.groq.com/openai/v1/audio/transcriptions',{'Authorization':'Bearer '+need(f'GROQ_API_KEY_{n}')},data=f)
         elif provider=='cf':
-            j=await request(s,'https://api.cloudflare.com/client/v4/accounts/'+need(f'CF_ACCOUNT_ID_{n}')+'/ai/run/'+model,{'Authorization':'Bearer '+need(f'CF_API_TOKEN_{n}')},json={'audio':base64.b64encode(data).decode(),'task':'transcribe','initial_prompt':ASR_PROMPT,'condition_on_previous_text':False,'vad_filter':True}); j=j.get('result') or {}
+            j=await request(s,'https://api.cloudflare.com/client/v4/accounts/'+need(f'CF_ACCOUNT_ID_{n}')+'/ai/run/'+model,{'Authorization':'Bearer '+need(f'CF_API_TOKEN_{n}')},json={'audio':base64.b64encode(data).decode(),'task':'transcribe','condition_on_previous_text':False,'vad_filter':True}); j=j.get('result') or {}
         elif provider=='gemini':
             j=await request(s,'https://generativelanguage.googleapis.com/v1beta/models/'+model+':generateContent',{'x-goog-api-key':need('GEMINI_API_KEY')},json={'generationConfig':{'temperature':0},'contents':[{'parts':[{'text':GEMINI_PROMPT},{'inline_data':{'mime_type':'audio/ogg' if path.suffix=='.ogg' else 'audio/wav','data':base64.b64encode(data).decode()}}]}]}); j={'text':''.join(p.get('text','') for p in j['candidates'][0]['content']['parts'])}
         text=j.get('text') if isinstance(j,dict) else None
-        if not isinstance(text,str) or not text.strip(): raise ValueError('API не повернув текст')
+        if not isinstance(text,str) or not text.strip(): raise RejectedTranscript('Порожня транскрипція')
+        if prompt_echo(text): raise RejectedTranscript('Повторення старого промпту')
         return text.strip(), confidence(j)
 @dp.message(F.voice | F.video_note)
 async def voice(m:Message):
@@ -330,10 +353,11 @@ async def process_voice(m,status):
         notified=False
         candidate=None
         tried_models=set()
+        rejected=set()
         while time.time()<deadline and enabled():
             for k in order:
                 if blocked(k)>time.time() or k in active_providers: continue
-                if candidate and MODELS[k][2] in tried_models: continue
+                if k in rejected or (candidate and MODELS[k][2] in tried_models): continue
                 if MODELS[k][1]==2:
                     primary={'groq2':'groq1','groq2t':'groq1t','cf2':'cf1'}[k]
                     if blocked('quota:'+primary)<=time.time(): continue
@@ -343,6 +367,10 @@ async def process_voice(m,status):
                 try:
                     if k!='ovh': await quota_alert(k)
                     result,quality=await transcribe(k,p)
+                except RejectedTranscript as e:
+                    rejected.add(k)
+                    await notify_error(NAMES[k]+' — '+str(e),e)
+                    continue
                 except RateLimited as e:
                     block(k,e.seconds)
                     block('quota:'+k,e.seconds)
@@ -372,6 +400,9 @@ async def process_voice(m,status):
                 return await deliver_transcript(m,status,result)
             if candidate:
                 return await deliver_transcript(m,status,candidate[0])
+            if rejected:
+                await notify_error('Жодна доступна модель не повернула прийнятну транскрипцію',RejectedTranscript())
+                return await mark_disabled(status)
             if not active_providers and all(blocked('quota:'+k)>time.time() for k in ORDER):
                 await disable('Усі сім API-профілів одночасно повернули HTTP 429; це може бути тимчасовий ліміт, не обов’язково добовий.')
                 return await mark_disabled(status)
