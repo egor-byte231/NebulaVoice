@@ -383,12 +383,44 @@ def confidence(j):
     suspicious=language_check(j) or bool(re.search(r'\b(?:bláď|bljať|blyat|bljad|blatj|suka|nahuj|nachuj)\b',text,re.I) and not re.search(r'[А-Яа-яІіЇїЄєҐґ]',text))
     return (bad or suspicious, sum(scores)/len(scores) if scores else None, suspicious)
 DISCLAIMER='Бот перебуває на стадії розробки. Можливі помилки, перепрошуємо.'
+import contextvars
+audio_diag=contextvars.ContextVar('audio_diag',default=None)
+def diag_table():
+    db.execute('CREATE TABLE IF NOT EXISTS audio_diagnostics (id INTEGER PRIMARY KEY AUTOINCREMENT, data TEXT NOT NULL)')
+def diag_save(d):
+    diag_table()
+    db.execute('UPDATE audio_diagnostics SET data=? WHERE id=?',(json.dumps(d,ensure_ascii=False),d['id']))
+    db.commit()
+def diag_safe(error):
+    value=str(error)
+    for name,secret in os.environ.items():
+        if secret and len(secret)>=8 and any(x in name.upper() for x in ('KEY','TOKEN','SECRET','PASSWORD')): value=value.replace(secret,'[REDACTED]')
+    return re.sub(r'(?i)(bearer\s+|(?:api[_-]?key|token|secret)\s*[:=]\s*)\S+',r'\1[REDACTED]',value)[:800]
+@dp.message(Command('diag'),F.chat.type=='private',F.from_user.id==OWNER)
+async def audio_diag_command(m:Message):
+    arg=m.text.split(maxsplit=1)
+    if len(arg)!=2 or not arg[1].lstrip('#').isdigit() or len(arg[1])>18: return await m.answer('Використання: /diag 1')
+    diag_table()
+    row=db.execute('SELECT data FROM audio_diagnostics WHERE id=?',(int(arg[1].lstrip('#')),)).fetchone()
+    if not row: return await m.answer('Транскрипцію не знайдено.')
+    d=json.loads(row[0])
+    lines=[f"🔎 Транскрипція #{d['id']}",f"Стан: {d.get('state','очікування')}",f"Місце в черзі FadeHost: {d.get('queue','—')}",f"Очікування: {d.get('wait','—')} с",f"Обраний ШІ: {d.get('selected') or '—'}",f"Джерело: {d.get('source','—')}"]
+    for i,a in enumerate(d.get('attempts',[]),1):
+        lines.append(f"\n{i}. {a['model']} | слот Cloudflare: {a.get('slot','—')}/{a.get('slots','—')} | {a.get('ms','—')} мс | очікування слота: {a.get('busy',0)*0.5:.1f} с (мін.)")
+        if a.get('error'): lines.append('Помилка: '+a['error'])
+    for e in d.get('errors',[]): lines.append('Помилка: '+e)
+    if d.get('errors') or any(a.get('error') for a in d.get('attempts',[])): lines.append('Заміна: '+(d.get('selected') or 'не визначено'))
+    body='\n'.join(lines)
+    for i in range(0,len(body),3500): await m.answer(body[i:i+3500],parse_mode=None)
 async def deliver_transcript(m,status,result):
     if not enabled(): return await mark_disabled(status)
     chunks=[result[i:i+3700] for i in range(0,len(result),3700)]
     for i,chunk in enumerate(chunks):
         body='<blockquote expandable>'+html.escape(chunk)+'</blockquote>'
-        if i==len(chunks)-1 and development_enabled(): body+='\n\n<blockquote>'+html.escape(DISCLAIMER)+'</blockquote>'
+        if i==len(chunks)-1:
+            d=audio_diag.get(); suffix=f" #{d['id']}" if d else ''
+            if development_enabled(): body+='\n\n<blockquote>'+html.escape(DISCLAIMER+suffix)+'</blockquote>'
+            elif suffix: body+='\n\n'+suffix.strip()
         if i==0: await status.edit_text(body,parse_mode='HTML')
         else: await m.reply(body,parse_mode='HTML')
     if chunks: overview_add(m,voices=int(bool(m.voice)),circles=int(bool(m.video_note)))
@@ -414,12 +446,16 @@ async def cloud_audio(k,path):
             try:
                 async with session.post('https://nebulavoice-ai.maxvyn09.workers.dev/audio/transcribe',json=payload,headers={'Authorization':'Bearer '+os.environ['WORKER_SECRET']},allow_redirects=False) as response:
                     if response.status==429:
+                        d=audio_diag.get()
+                        if d and d['attempts']: d['attempts'][-1]['busy']+=1
                         await asyncio.sleep(0.5)
                         continue
                     if response.status in (401,404,502,503,504):
                         audio_cloud_retry=time.monotonic()+30
                         return None
                     j=await response.json(content_type=None)
+                    d=audio_diag.get()
+                    if d and d['attempts'] and isinstance(j.get('diagnostic'),dict): d['attempts'][-1].update(j['diagnostic'])
                     if response.status==422:
                         if j.get('providerStatus')==429:
                             try: delay=max(1,int(j.get('retryAfter') or 60))
@@ -432,9 +468,16 @@ async def cloud_audio(k,path):
                 audio_cloud_retry=time.monotonic()+30
                 return None
 async def transcribe(k,path):
-    j=await cloud_audio(k,path)
-    if j is None: raise RuntimeError('Cloudflare audio unavailable')
-    return validate_audio_result(j)
+    d=audio_diag.get(); a={'model':NAMES[k],'busy':0}
+    if d: d['attempts'].append(a)
+    try:
+        j=await cloud_audio(k,path)
+        if j is None: raise RuntimeError('Cloudflare audio unavailable')
+        return validate_audio_result(j)
+    except Exception as e:
+        a['error']=type(e).__name__+': '+diag_safe(e); raise
+    finally:
+        if d: diag_save(d)
 async def transcribe_local(k,path):
     provider,n,model=MODELS[k]
     data=path.read_bytes()
@@ -474,9 +517,18 @@ async def voice(m:Message):
     if waiting.qsize()>=50: return await m.reply('Черга заповнена. Повтори пізніше.')
     status=await m.reply('⏳ У черзі...')
     if not enabled(): return await status.edit_text(DISABLED)
+    diag_table()
+    chat=m.chat
+    source=f'https://t.me/{chat.username}/{m.message_id}' if chat.username else f'https://t.me/c/{str(chat.id)[4:]}/{m.message_id}' if str(chat.id).startswith('-100') else f'Чат {chat.id}, повідомлення {m.message_id}'
+    d={'queue':waiting.qsize()+1,'queued':time.time(),'source':source,'attempts':[],'state':'у черзі'}
+    cur=db.execute('INSERT INTO audio_diagnostics(data) VALUES (?)',('{}',)); d['id']=cur.lastrowid; diag_save(d)
+    audio_diag_pending[(m.chat.id,m.message_id)]=d
     try: waiting.put_nowait((m,status))
-    except asyncio.QueueFull: await status.edit_text('Черга заповнена. Повтори пізніше.')
+    except asyncio.QueueFull:
+        audio_diag_pending.pop((m.chat.id,m.message_id),None); d['state']='черга заповнена'; diag_save(d)
+        await status.edit_text('Черга заповнена. Повтори пізніше.')
 
+audio_diag_pending={}
 waiting=asyncio.Queue(maxsize=50)
 active_providers=set()
 audio_profile_active={}
@@ -888,9 +940,17 @@ async def owner_action(c:CallbackQuery):
 async def process_voice(m,status):
     failures=[]
     selected=[]
+    d=audio_diag_pending.pop((m.chat.id,m.message_id),None)
+    token=audio_diag.set(d)
+    if d: d['wait']=round(time.time()-d['queued'],3); d['state']='обробка'; diag_save(d)
     try:
         return await process_voice_inner(m,status,failures,selected)
     finally:
+        if d:
+            d['selected']=selected[-1] if selected else None
+            d['errors']=[where+': '+type(error).__name__+': '+diag_safe(error) for where,error in failures]
+            d['state']='результат обрано' if selected else 'не завершено'; diag_save(d)
+        audio_diag.reset(token)
         if failures:
             chat=m.chat
             link=(f'https://t.me/{chat.username}/{m.message_id}' if chat.username else f'https://t.me/c/{str(chat.id)[4:]}/{m.message_id}' if str(chat.id).startswith('-100') else None)
@@ -932,6 +992,7 @@ async def process_voice_inner(m,status,failures,selected):
             try:
                 result,quality=await transcribe(forced,p)
                 usage(forced,success=1)
+                selected.append(NAMES[forced])
                 return await deliver_transcript(m,status,result+'\n\n🧪 '+audio_platform()+': '+NAMES[forced])
             except RateLimited as e:
                 block(forced,e.seconds)
