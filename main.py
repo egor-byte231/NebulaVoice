@@ -435,8 +435,74 @@ def test_menu(kind):
     names=list(dict.fromkeys(names))
     return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=('✓ ' if test_selection[kind]==name else '')+(NAMES.get(name,name) if kind=='audio' else name),callback_data='owner:testpick:'+kind+':'+name)] for name in names]+[[InlineKeyboardButton(text='Автоматично',callback_data='owner:testpick:'+kind+':')],[InlineKeyboardButton(text='Назад',callback_data='owner:back')]])
 
+load_config={'count':20,'mode':'auto','routes':set()}
+load_task=None
+def load_names():
+    return list(dict.fromkeys([r[0] for r in TEXT_ROUTES]+['Requesty 2','Airforce 2']))
+def load_menu():
+    rows=[[InlineKeyboardButton(text=('✓ ' if load_config['count']==n else '')+str(n),callback_data='owner:load:n:'+str(n)) for n in (5,10,20,30,50,100)]]
+    for mode,label in [('auto','Автоматично'),('selected','Вибрані API'),('all','Усі API')]:
+        rows.append([InlineKeyboardButton(text=('✓ ' if load_config['mode']==mode else '')+label,callback_data='owner:load:m:'+mode)])
+    if load_config['mode']=='selected':
+        for i,name in enumerate(load_names()):
+            rows.append([InlineKeyboardButton(text=('✓ ' if name in load_config['routes'] else '')+name,callback_data='owner:load:r:'+str(i))])
+    rows.extend([[InlineKeyboardButton(text='⚡ Запустити реальні запити',callback_data='owner:load:run')],[InlineKeyboardButton(text='Назад',callback_data='owner:back')]])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+async def run_load_test(message,config):
+    import secrets
+    run=secrets.token_hex(16)
+    try:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as session:
+            async with session.post('https://nebulavoice-ai.maxvyn09.workers.dev/load-test',json={'run':run,**config},headers={'Authorization':'Bearer '+os.environ['WORKER_SECRET']},allow_redirects=False) as response:
+                if response.status!=202: raise RuntimeError('HTTP '+str(response.status))
+        for _ in range(120):
+            await asyncio.sleep(5)
+            rows=await d1_query(history_session,'SELECT * FROM load_results WHERE run=? ORDER BY idx',(run,))
+            if len(rows)>=config['count']: break
+        events=sorted([(r['started'],1) for r in rows]+[(r['ended'],-1) for r in rows],key=lambda x:(x[0],x[1]))
+        peak=active=0
+        for _,delta in events:
+            active+=delta
+            peak=max(peak,active)
+        ok=sum(r['ok'] for r in rows)
+        lines=[f"Тест: {len(rows)}/{config['count']} завершено",f"Успішно: {ok}; помилки: {len(rows)-ok}; без результату: {config['count']-len(rows)}",f"Пік обробників: {peak}",f"Токени (оцінка, якщо API не повернув usage): {sum(r['tokens'] for r in rows)}"]
+        if rows:
+            lines.append(f"Макс. очікування: {max(r['started']-r['queued'] for r in rows)/1000:.2f} с")
+        for r in rows:
+            attempts=json.loads(r['attempts'])
+            detail=', '.join(f"{name}: {v.get('status',v.get('error','?'))} ({v['attempts']} спр.)" for name,v in attempts.items())
+            lines.append(f"#{r['idx']+1} {r['route'] or 'Помилка'} | черга {(r['started']-r['queued'])/1000:.2f} с | обробка {(r['ended']-r['started'])/1000:.2f} с | {r['tokens']} ток. | {detail}")
+        chunk=''
+        for line in lines:
+            if len(chunk)+len(line)>3500:
+                await message.answer(chunk,parse_mode=None)
+                chunk=''
+            chunk+=line+'\n'
+        if chunk: await message.answer(chunk,parse_mode=None)
+    except Exception as e:
+        await message.answer('Тест не завершено: '+type(e).__name__+'. Частина запитів могла бути прийнята.')
+async def load_action(c):
+    global load_task
+    if not testing_enabled(): return
+    parts=c.data.split(':')
+    action=parts[2] if len(parts)>2 else ''
+    if action=='n' and parts[3] in ('5','10','20','30','50','100'): load_config['count']=int(parts[3])
+    if action=='m' and parts[3] in ('auto','selected','all'): load_config['mode']=parts[3]
+    if action=='r' and parts[3].isdigit() and int(parts[3])<len(load_names()):
+        name=load_names()[int(parts[3])]
+        load_config['routes'].symmetric_difference_update({name})
+    if action=='run':
+        if load_task and not load_task.done(): return await c.message.answer('Тест уже триває.')
+        if load_config['mode']=='selected' and not load_config['routes']: return await c.message.answer('Вибери API.')
+        config={**load_config,'routes':sorted(load_config['routes'])}
+        load_task=asyncio.create_task(run_load_test(c.message,config))
+        return await c.message.answer('Тест запущено. Реальні квоти API витрачаються.')
+    try: await c.message.edit_text('⚡ Тест навантаження (текст). Реальні API-запити.',reply_markup=load_menu())
+    except Exception as e:
+        if 'message is not modified' not in str(e).lower(): raise
+
 def owner_menu():
-    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='⏸ Вимкнути' if enabled() else '▶️ Увімкнути',callback_data='owner:toggle')],[InlineKeyboardButton(text='📊 Статистика',callback_data='owner:stats')],[InlineKeyboardButton(text='🤖 Статистика ШІ',callback_data='owner:ai')],[InlineKeyboardButton(text='📈 Загальна статистика',callback_data='owner:overview')],[InlineKeyboardButton(text='🟢 Режим розробки: ON' if development_enabled() else '🔴 Режим розробки: OFF',callback_data='owner:development')],[InlineKeyboardButton(text='🧪 Режим тестування: ON' if testing_enabled() else '🧪 Режим тестування: OFF',callback_data='owner:testing')],[InlineKeyboardButton(text='🔄 Обнулити мій ліміт',callback_data='owner:reset_limit')]]+([[InlineKeyboardButton(text='🎙 Тест аудіо',callback_data='owner:testmenu:audio')],[InlineKeyboardButton(text='💬 Тест тексту',callback_data='owner:testmenu:text')]] if testing_enabled() else []))
+    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='⏸ Вимкнути' if enabled() else '▶️ Увімкнути',callback_data='owner:toggle')],[InlineKeyboardButton(text='📊 Статистика',callback_data='owner:stats')],[InlineKeyboardButton(text='🤖 Статистика ШІ',callback_data='owner:ai')],[InlineKeyboardButton(text='📈 Загальна статистика',callback_data='owner:overview')],[InlineKeyboardButton(text='🟢 Режим розробки: ON' if development_enabled() else '🔴 Режим розробки: OFF',callback_data='owner:development')],[InlineKeyboardButton(text='🧪 Режим тестування: ON' if testing_enabled() else '🧪 Режим тестування: OFF',callback_data='owner:testing')],[InlineKeyboardButton(text='🔄 Обнулити мій ліміт',callback_data='owner:reset_limit')]]+([[InlineKeyboardButton(text='🎙 Тест аудіо',callback_data='owner:testmenu:audio')],[InlineKeyboardButton(text='💬 Тест тексту',callback_data='owner:testmenu:text')],[InlineKeyboardButton(text='⚡ Тест навантаження',callback_data='owner:load')]] if testing_enabled() else []))
 error_alert_times={}
 async def notify_error(where,error):
     raw=str(error)
@@ -505,6 +571,7 @@ async def owner_action(c:CallbackQuery):
         return
     if c.data=='owner:back':
         return await c.message.edit_text('Панель власника',reply_markup=owner_menu())
+    if c.data=='owner:load' or c.data.startswith('owner:load:'): return await load_action(c)
     if c.data.startswith('owner:testmenu:') or c.data.startswith('owner:testpick:'):
         if not testing_enabled(): return
         parts=c.data.split(':',3)
