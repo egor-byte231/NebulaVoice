@@ -527,29 +527,17 @@ async def safe_audio_load(m,config):
         await m.reply('Тест перервано: '+type(e).__name__)
 
 async def run_audio_load(m,config):
-    progress=await m.reply('FadeHost: підготовка аудіо...',reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='Скасувати тест',callback_data='owner:load:cancel')]]))
+    progress=await m.reply('⏳ FadeHost: підготовка аудіо...',reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='Скасувати тест',callback_data='owner:load:cancel')]]))
     try:
-        await asyncio.wait_for(audio_load_inner(m,config,progress),timeout=195)
+        await run_audio_load_inner(m,config,progress)
     except asyncio.CancelledError:
-        await progress.edit_text('Тест скасовано.')
-        raise
-    except Exception as e:
-        await progress.edit_text('Тест перервано: '+type(e).__name__)
-
-async def audio_load_inner(m,config,progress):
-    try:
-        await asyncio.wait_for(run_audio_load_inner(m,config),210)
-    except asyncio.TimeoutError:
-        await m.reply('⚠️ Тест аудіо: перевищено загальний час очікування.')
-    except asyncio.CancelledError:
-        await m.reply('Тест аудіо скасовано.')
+        await progress.edit_text('Тест скасовано.',reply_markup=None)
         raise
     except Exception as e:
         logging.exception('Audio load test failed')
-        await m.reply('⚠️ Тест аудіо перервано: '+type(e).__name__)
+        await progress.edit_text('Тест перервано: '+type(e).__name__,reply_markup=None)
 
-async def run_audio_load_inner(m,config):
-    progress=await m.reply('⏳ Підготовка аудіо...',reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='Скасувати тест',callback_data='owner:load:cancel')]]))
+async def run_audio_load_inner(m,config,progress):
     item=m.voice or m.video_note
     routes=config['routes'] if config['mode']=='selected' else list(ORDER)
     if item.duration>15: routes=[k for k in routes if k!='ovh']
@@ -583,7 +571,7 @@ async def run_audio_load_inner(m,config):
                 try:
                     order=routes if config['mode']=='auto' else [routes[i%len(routes)]]
                     for k in order:
-                        if not testing_enabled(): break
+                        if not testing_enabled() or time.monotonic()>=deadline: break
                         if blocked(k)>time.time() or k in active_providers:
                             attempts.append(NAMES[k]+': зайнятий/ліміт')
                             continue
@@ -611,13 +599,12 @@ async def run_audio_load_inner(m,config):
                     return winner, f"#{i+1} {winner or 'Без відповіді'} | черга {began-start:.2f} с | обробка {time.monotonic()-began:.2f} с | "+', '.join(attempts)
                 finally:
                     active-=1
-        start=time.monotonic()
         tasks=[asyncio.create_task(job(i)) for i in range(config['count'])]
         pending=set(tasks)
         cancelled=False
         try:
             while pending and time.monotonic()<deadline:
-                done,pending=await asyncio.wait(pending,timeout=min(5,max(0,deadline-time.monotonic())))
+                done,pending=await asyncio.wait(pending,timeout=min(5,max(0,deadline-time.monotonic())),return_when=asyncio.FIRST_COMPLETED)
                 for t in done:
                     try: results.append(t.result())
                     except Exception as e: results.append(('',type(e).__name__))
@@ -640,11 +627,10 @@ async def run_audio_load_inner(m,config):
             chunk=''
         chunk+=line+'\n'
     if chunk: await m.answer(chunk,parse_mode=None)
-    await progress.edit_text(f'Тест завершено: {ok}/{len(results)} успішно.')
+    try: await progress.edit_text(f'Тест {"скасовано" if cancelled else "завершено з таймаутом" if pending else "завершено"}: {ok}/{len(results)} успішно.',reply_markup=None)
+    except Exception: pass
     try: await asyncio.wait_for(d1_snapshot(history_session),10)
     except Exception: logging.warning('Audio test snapshot failed')
-    try: await asyncio.wait_for(d1_snapshot(history_session),10)
-    except Exception as e: logging.warning('Audio test snapshot: %s',type(e).__name__)
 
 async def load_action(c):
     global load_task,audio_load_wait,load_count_wait
@@ -654,9 +640,6 @@ async def load_action(c):
     if action=='cancel':
         if load_task and not load_task.done(): load_task.cancel()
         return await c.message.answer('Запит на скасування тесту надіслано.')
-    if action=='cancel':
-        if load_task and not load_task.done(): load_task.cancel()
-        return
     if action=='kind':
         load_config['kind']='audio' if load_config['kind']=='text' else 'text'
         load_config['routes'].clear()
