@@ -427,7 +427,7 @@ dp.my_chat_member.outer_middleware(testing_gate)
 dp.chat_member.outer_middleware(testing_gate)
 
 def owner_menu():
-    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='⏸ Вимкнути' if enabled() else '▶️ Увімкнути',callback_data='owner:toggle')],[InlineKeyboardButton(text='📊 Статистика',callback_data='owner:stats')],[InlineKeyboardButton(text='🤖 Статистика ШІ',callback_data='owner:ai')],[InlineKeyboardButton(text='📈 Загальна статистика',callback_data='owner:overview')],[InlineKeyboardButton(text='🟢 Режим розробки: ON' if development_enabled() else '🔴 Режим розробки: OFF',callback_data='owner:development')],[InlineKeyboardButton(text='🧪 Режим тестування: ON' if testing_enabled() else '🧪 Режим тестування: OFF',callback_data='owner:testing')]])
+    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='⏸ Вимкнути' if enabled() else '▶️ Увімкнути',callback_data='owner:toggle')],[InlineKeyboardButton(text='📊 Статистика',callback_data='owner:stats')],[InlineKeyboardButton(text='🤖 Статистика ШІ',callback_data='owner:ai')],[InlineKeyboardButton(text='📈 Загальна статистика',callback_data='owner:overview')],[InlineKeyboardButton(text='🟢 Режим розробки: ON' if development_enabled() else '🔴 Режим розробки: OFF',callback_data='owner:development')],[InlineKeyboardButton(text='🧪 Режим тестування: ON' if testing_enabled() else '🧪 Режим тестування: OFF',callback_data='owner:testing')],[InlineKeyboardButton(text='🔄 Обнулити мій ліміт',callback_data='owner:reset_limit')]])
 error_alert_times={}
 async def notify_error(where,error):
     raw=str(error)
@@ -496,6 +496,15 @@ async def owner_action(c:CallbackQuery):
         return
     if c.data=='owner:back':
         return await c.message.edit_text('Панель власника',reply_markup=owner_menu())
+    if c.data=='owner:reset_limit':
+        day=text_day()
+        # Preserve outstanding reservations so reconciliation cannot create negative usage.
+        pending=db.execute('SELECT COALESCE(SUM(budget),0) FROM cloud_pending WHERE chat=? AND day=?',(OWNER,day)).fetchone()[0]
+        with db:
+            db.execute('INSERT INTO text_group_usage VALUES (?,?,?) ON CONFLICT(day,chat) DO UPDATE SET tokens=excluded.tokens',(day,OWNER,pending))
+            db.execute('DELETE FROM text_group_alerts WHERE day=? AND chat=?',(day,OWNER))
+        await d1_snapshot(history_session)
+        return await c.message.edit_text('✅ Особистий добовий ліміт скинуто. Незавершені запити залишаються врахованими.',reply_markup=owner_menu())
     if c.data=='owner:testing':
         testing_enabled()
         db.execute('UPDATE testing_mode SET enabled=1-enabled WHERE id=1')
