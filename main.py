@@ -897,13 +897,13 @@ async def show_limit(m:Message):
 async def submit_cloud_text(m,question,group,replied,reply):
     chat=m.chat.id
     day=text_day()
-    budget=(group_limit(chat) if group else private_limit(chat))-group_used(chat,day)
-    if budget<=0:
-        await m.reply('🔋 Добовий ліміт ШІ вичерпано.')
-        return
     status=await m.reply('✍️ Друкую…')
+    budget=min(12000,(group_limit(chat) if group else private_limit(chat))-group_used(chat,day))
+    if budget<=0:
+        await status.edit_text('🔋 Добовий ліміт ШІ вичерпано.')
+        return
     job_id=str(chat)+':'+str(status.message_id)
-    # Reserve the remaining allowance until the asynchronous job is reconciled.
+    # Reserve a bounded allowance until the asynchronous job is reconciled.
     group_charge(chat,day,budget)
     db.execute('INSERT INTO cloud_pending VALUES (?,?,?,?)',(job_id,chat,day,budget))
     db.commit()
