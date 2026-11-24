@@ -970,12 +970,12 @@ async def process_voice(m,status):
                 return await deliver_transcript(m,status,candidate[0])
             if rejected:
                 await notify_error('Жодна доступна модель не повернула прийнятну транскрипцію',RejectedTranscript())
-                return await mark_disabled(status)
+                return await status.edit_text('Не вдалося розпізнати аудіо. Спробуй надіслати його ще раз.')
             if not active_providers and all(blocked('quota:'+k)>time.time() for k in ORDER):
-                await disable('Усі сім API-профілів одночасно повернули HTTP 429; це може бути тимчасовий ліміт, не обов’язково добовий.')
-                return await mark_disabled(status)
+                await status.edit_text('⏳ Усі моделі тимчасово досягли ліміту. Очікуємо відновлення...')
+                notified=True
             if not notified:
-                await mark_disabled(status)
+                await status.edit_text('⏳ Очікуємо доступну модель транскрипції...')
                 notified=True
             # Avoid repeated edits of identical Telegram messages.
             delay=max(1,min(300,min((blocked(k) for k in order if blocked(k)>time.time()),default=time.time()+60)-time.time()))
