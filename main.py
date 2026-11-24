@@ -526,7 +526,7 @@ async def run_audio_load(m,config):
     if not routes: return await m.reply('Немає сумісних моделей.')
     if (item.file_size or 0)>10*1024*1024: return await m.reply('Файл завеликий.')
     start=time.monotonic()
-    slots=asyncio.Semaphore(4)
+    slots=asyncio.Semaphore(audio_settings()[3])
     peak=active=0
     async with tempfile.TemporaryDirectory() as d:
         src=Path(d)/'source'
@@ -614,8 +614,39 @@ async def load_action(c):
     except Exception as e:
         if 'message is not modified' not in str(e).lower(): raise
 
+def audio_settings():
+    db.execute('CREATE TABLE IF NOT EXISTS audio_settings (id INTEGER PRIMARY KEY, primary_host TEXT, backup_host TEXT, cloud_slots INTEGER, local_slots INTEGER)')
+    db.execute("INSERT OR IGNORE INTO audio_settings VALUES (1,'cloudflare','fadehost',20,4)")
+    db.commit()
+    return db.execute('SELECT primary_host,backup_host,cloud_slots,local_slots FROM audio_settings WHERE id=1').fetchone()
+
+async def audio_settings_action(c):
+    primary,backup,cloud,local=audio_settings()
+    parts=c.data.split(':')
+    if len(parts)==4:
+        field,value=parts[2:]
+        if field=='cloud' and value.isdigit() and 1<=int(value)<=40:
+            db.execute('UPDATE audio_settings SET cloud_slots=? WHERE id=1',(int(value),))
+        elif field=='local' and value.isdigit() and 1<=int(value)<=4:
+            db.execute('UPDATE audio_settings SET local_slots=? WHERE id=1',(int(value),))
+        else: return
+        db.commit()
+        primary,backup,cloud,local=audio_settings()
+    rows=[[InlineKeyboardButton(text='Cloudflare: '+str(cloud),callback_data='owner:audiohost:cloud'),InlineKeyboardButton(text='FadeHost: '+str(local),callback_data='owner:audiohost:local')]]
+    if len(parts)>=3 and parts[2] in ('cloud','local'):
+        field=parts[2]
+        maximum=40 if field=='cloud' else 4
+        current=cloud if field=='cloud' else local
+        for start in range(1,maximum+1,5):
+            rows.append([InlineKeyboardButton(text=('✓ ' if i==current else '')+str(i),callback_data='owner:audiohost:'+field+':'+str(i)) for i in range(start,min(start+5,maximum+1))])
+    rows.append([InlineKeyboardButton(text='Назад',callback_data='owner:back')])
+    body=f'🎙 Аудіотранскрипція\nОсновний: Cloudflare — {cloud} слотів\nРезервний: FadeHost — {local} слотів\n\nCloudflare: інтеграція ще не активна. Зараз аудіо обробляє FadeHost.'
+    try: await c.message.edit_text(body,reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+    except Exception as e:
+        if 'message is not modified' not in str(e).lower(): raise
+
 def owner_menu():
-    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='⏸ Вимкнути' if enabled() else '▶️ Увімкнути',callback_data='owner:toggle')],[InlineKeyboardButton(text='📊 Статистика',callback_data='owner:stats')],[InlineKeyboardButton(text='🤖 Статистика ШІ',callback_data='owner:ai')],[InlineKeyboardButton(text='⚙️ Кількість слотів ШІ',callback_data='owner:slots')],[InlineKeyboardButton(text='📈 Загальна статистика',callback_data='owner:overview')],[InlineKeyboardButton(text='🟢 Режим розробки: ON' if development_enabled() else '🔴 Режим розробки: OFF',callback_data='owner:development')],[InlineKeyboardButton(text='🧪 Режим тестування: ON' if testing_enabled() else '🧪 Режим тестування: OFF',callback_data='owner:testing')],[InlineKeyboardButton(text='🔄 Обнулити мій ліміт',callback_data='owner:reset_limit')]]+([[InlineKeyboardButton(text='🎙 Тест аудіо',callback_data='owner:testmenu:audio')],[InlineKeyboardButton(text='💬 Тест тексту',callback_data='owner:testmenu:text')],[InlineKeyboardButton(text='⚡ Тест навантаження',callback_data='owner:load')]] if testing_enabled() else []))
+    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='⏸ Вимкнути' if enabled() else '▶️ Увімкнути',callback_data='owner:toggle')],[InlineKeyboardButton(text='📊 Статистика',callback_data='owner:stats')],[InlineKeyboardButton(text='🤖 Статистика ШІ',callback_data='owner:ai')],[InlineKeyboardButton(text='⚙️ Кількість слотів ШІ',callback_data='owner:slots')],[InlineKeyboardButton(text='🎙 Платформи аудіо',callback_data='owner:audiohost')],[InlineKeyboardButton(text='📈 Загальна статистика',callback_data='owner:overview')],[InlineKeyboardButton(text='🟢 Режим розробки: ON' if development_enabled() else '🔴 Режим розробки: OFF',callback_data='owner:development')],[InlineKeyboardButton(text='🧪 Режим тестування: ON' if testing_enabled() else '🧪 Режим тестування: OFF',callback_data='owner:testing')],[InlineKeyboardButton(text='🔄 Обнулити мій ліміт',callback_data='owner:reset_limit')]]+([[InlineKeyboardButton(text='🎙 Тест аудіо',callback_data='owner:testmenu:audio')],[InlineKeyboardButton(text='💬 Тест тексту',callback_data='owner:testmenu:text')],[InlineKeyboardButton(text='⚡ Тест навантаження',callback_data='owner:load')]] if testing_enabled() else []))
 error_alert_times={}
 async def notify_error(where,error):
     raw=str(error)
@@ -686,6 +717,7 @@ async def owner_action(c:CallbackQuery):
     if c.from_user.id!=OWNER or not isinstance(c.message,Message) or c.message.chat.type!='private':
         return await c.answer('Тільки власник',show_alert=True)
     await c.answer()
+    if c.data=='owner:audiohost' or c.data.startswith('owner:audiohost:'): return await audio_settings_action(c)
     if c.data=='owner:slots' or c.data.startswith('owner:slots:'): return await slots_action(c)
     if c.data=='owner:overview':
         return await c.message.edit_text('📈 Загальна статистика — обери розділ',reply_markup=overview_menu())
@@ -849,9 +881,11 @@ async def process_voice(m,status):
         if not enabled(): return await mark_disabled(status)
         await notify_error('Черга: 24 години очікування',TimeoutError())
         await mark_disabled(status)
-async def worker():
+async def worker(index=0):
     while True:
+        while index>=audio_settings()[3]: await asyncio.sleep(0.5)
         m,status=await waiting.get()
+        while index>=audio_settings()[3] and enabled(): await asyncio.sleep(0.5)
         try:
             if not enabled():
                 await mark_disabled(status)
@@ -1409,7 +1443,7 @@ async def main():
     db.execute('CREATE TABLE IF NOT EXISTS cloud_pending (id TEXT PRIMARY KEY,chat INTEGER,day TEXT,budget INTEGER)')
     db.commit()
     logging.info('Cloud text Worker readiness: %s',await cloud_text_probe())
-    tasks=[asyncio.create_task(worker()) for _ in range(4)]
+    tasks=[asyncio.create_task(worker(i)) for i in range(4)]
     if cloud_ready: tasks.append(asyncio.create_task(d1_monitor(session)))
     tasks.append(asyncio.create_task(quota_reset_monitor()))
     if os.getenv('CLOUD_TEXT_ENABLED','auto')!='0':
