@@ -72,8 +72,10 @@ export class Dispatcher {
    const j=await req.json();
    const slots=Math.max(1,Math.min(40,Number(j.slots)||20));
    if(this.active.size>=slots)return Response.json({error:"Busy"},{status:429});
-   const id=crypto.randomUUID();this.active.add(id);
-   try{return await audioTranscribe(j,this.env);}finally{this.active.delete(id);}
+   let slot=1;while(this.active.has(slot))slot++;
+   if(slot>slots)return Response.json({error:"Busy"},{status:429});
+   this.active.add(slot);const started=Date.now();
+   try{const response=await audioTranscribe(j,this.env);const body=await response.json();return Response.json({...body,diagnostic:{slot,slots,ms:Date.now()-started}},{status:response.status});}finally{this.active.delete(slot);}
   }
   if(path==="/slots"){
    const j=await req.json();
