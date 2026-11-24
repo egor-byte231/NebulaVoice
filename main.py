@@ -602,7 +602,7 @@ async def run_audio_load_inner(m,config,progress):
         src=Path(d)/'source'
         p=Path(d)/'normalized.ogg'
         await asyncio.wait_for(bot.download(item,destination=src),30)
-        proc=await asyncio.create_subprocess_exec('ffmpeg','-nostdin','-loglevel','error','-i',str(src),'-vn','-af','highpass=f=80,lowpass=f=8000,atempo=0.80,acompressor=threshold=0.125:ratio=2:attack=15:release=150,volume=5dB,alimiter=limit=0.95:level=0:latency=1','-ac','1','-ar','48000','-c:a','libopus','-b:a','96k',str(p),stderr=asyncio.subprocess.DEVNULL)
+        proc=await asyncio.create_subprocess_exec('ffmpeg','-nostdin','-loglevel','error','-i',str(src),'-vn','-af','atempo=0.80,acompressor=threshold=0.125:ratio=2:attack=15:release=150,volume=5dB,alimiter=limit=0.95:level=0:latency=1','-ac','1','-ar','48000','-c:a','libopus','-b:a','96k',str(p),stderr=asyncio.subprocess.DEVNULL)
         try:
             code=await asyncio.wait_for(proc.wait(),30)
         except (asyncio.TimeoutError,asyncio.CancelledError):
@@ -891,7 +891,7 @@ async def process_voice(m,status):
         audio_seconds=item.duration
         if m.video_note or m.voice:
             out=Path(d)/'normalized.ogg'
-            proc=await asyncio.create_subprocess_exec('ffmpeg','-nostdin','-loglevel','error','-i',str(p),'-vn','-af','highpass=f=80,lowpass=f=8000,atempo=0.80,acompressor=threshold=0.125:ratio=2:attack=15:release=150,volume=5dB,alimiter=limit=0.95:level=0:latency=1','-ac','1','-ar','48000','-c:a','libopus','-b:a','96k',str(out),stderr=asyncio.subprocess.DEVNULL)
+            proc=await asyncio.create_subprocess_exec('ffmpeg','-nostdin','-loglevel','error','-i',str(p),'-vn','-af','atempo=0.80,acompressor=threshold=0.125:ratio=2:attack=15:release=150,volume=5dB,alimiter=limit=0.95:level=0:latency=1','-ac','1','-ar','48000','-c:a','libopus','-b:a','96k',str(out),stderr=asyncio.subprocess.DEVNULL)
             try:
                 code=await asyncio.wait_for(proc.wait(),30)
             finally:
