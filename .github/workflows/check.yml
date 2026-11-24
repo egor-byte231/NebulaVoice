@@ -1,0 +1,45 @@
+name: Bot checks
+on: [push, pull_request, workflow_dispatch]
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: python -m py_compile main.py
+      - run: pip install -r requirements.txt
+      - name: Offline smoke tests
+        env:
+          BOT_TOKEN: '123456:TEST_TOKEN_NOT_REAL'
+          OWNER_ID: '123456'
+        run: |
+          python - <<'PY'
+          import os, tempfile, sys
+          sys.path.insert(0, os.getcwd())
+          with tempfile.TemporaryDirectory() as d:
+              os.chdir(d)
+              import main as m
+              assert m.private_limit(123) == 10000
+              assert m.group_limit(-123) == 40000
+              assert m.group_enabled(-123)
+              m.group_charge(123,m.text_day(),100)
+              m.group_charge(123,m.text_day(),200)
+              assert m.group_used(123)==300
+              assert m.group_used(-123)==0
+              m.db.execute('INSERT INTO text_premium VALUES (?,?)',(123,m.time.time()+3600))
+              assert m.private_limit(123)==40000
+              m.db.execute('INSERT INTO text_premium VALUES (?,?)',(-123,m.time.time()+3600))
+              assert m.group_limit(-123)==100000
+              assert m.needs_history('Юна чемно себе поводить?')
+              assert m.needs_history('А Максим?')
+              assert not m.needs_history('Яка столиця Франції?')
+              for i in range(105): m.remember_group(-123,str(i))
+              assert len(m.group_history[-123])==100
+              assert 'Статистика' in m.report()
+              assert 'Статистика' in m.text_report()
+              assert len(m.text_report())<4096
+              assert len(m.report())<4096
+              print('Offline smoke tests passed')
+          PY
