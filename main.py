@@ -887,17 +887,25 @@ async def process_voice(m,status):
     with tempfile.TemporaryDirectory() as d:
         p=Path(d)/('voice.ogg' if m.voice else 'circle.mp4')
         await bot.download(item,destination=p)
-        if m.video_note:
+        original=p
+        audio_seconds=item.duration
+        if m.video_note or m.voice:
             out=Path(d)/'normalized.ogg'
-            proc=await asyncio.create_subprocess_exec('ffmpeg','-nostdin','-loglevel','error','-i',str(p),'-vn','-ac','1','-ar','16000','-c:a','libopus','-b:a','64k',str(out),stderr=asyncio.subprocess.DEVNULL)
-            if await proc.wait()!=0:
+            proc=await asyncio.create_subprocess_exec('ffmpeg','-nostdin','-loglevel','error','-i',str(p),'-vn','-af','atempo=0.85','-ac','1','-ar','48000','-c:a','libopus','-b:a','96k',str(out),stderr=asyncio.subprocess.DEVNULL)
+            try:
+                code=await asyncio.wait_for(proc.wait(),30)
+            finally:
+                if proc.returncode is None: proc.kill(); await proc.wait()
+            if code!=0:
                 await notify_error('Нормалізація аудіо',ValueError('FFmpeg'))
                 if m.video_note: raise ValueError('Не вдалося витягти аудіо')
-            else: p=out
+            else:
+                p=out
+                audio_seconds=item.duration/0.85
         forced=test_route('audio',m)
         if forced:
             if forced=='ovh' and (time.monotonic()<ovh_cooldown_until or audio_profile_active.get('ovh',0)): return await status.edit_text('OVH: очікування 30 секунд або активний запит')
-            if forced=='ovh' and item.duration>15: return await status.edit_text('OVH: максимум 15 секунд')
+            if forced=='ovh' and audio_seconds>15: return await status.edit_text('OVH: максимум 15 секунд')
             if blocked(forced)>time.time() or (audio_platform()=='FadeHost' and forced in active_providers): return await status.edit_text('Тест: API зайнятий або ліміт вичерпано')
             if audio_profile_active.get(forced,0)>=(1 if forced=='ovh' else 4): return await status.edit_text('Тест: усі слоти моделі зайняті')
             audio_profile_active[forced]=audio_profile_active.get(forced,0)+1
@@ -928,7 +936,7 @@ async def process_voice(m,status):
         while time.time()<deadline and enabled():
             primary=next((k for k in order if blocked(k)<=time.time() and k not in rejected),None)
             overflow=primary is not None and audio_profile_active.get(primary,0)>=4
-            cycle=(['ovh'] if overflow and item.duration<=15 and time.monotonic()>=ovh_cooldown_until and not audio_profile_active.get('ovh',0) else [])+order
+            cycle=(['ovh'] if overflow and audio_seconds<=15 and time.monotonic()>=ovh_cooldown_until and not audio_profile_active.get('ovh',0) else [])+order
             for k in cycle:
                 if blocked(k)>time.time() or audio_profile_active.get(k,0)>=(1 if k=='ovh' else 4): continue
                 if k=='ovh' and time.monotonic()<ovh_cooldown_until: continue
