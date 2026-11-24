@@ -293,7 +293,7 @@ def confidence(j):
     # is a reason to seek a second model, not to reject genuine Czech.
     suspicious=language_check(j) or bool(re.search(r'\b(?:bláď|bljať|blyat|bljad|blatj|suka|nahuj|nachuj)\b',text,re.I) and not re.search(r'[А-Яа-яІіЇїЄєҐґ]',text))
     return (bad or suspicious, sum(scores)/len(scores) if scores else None, suspicious)
-DISCLAIMER='NebulaVoice може помилятися через сторонні шуми, нечітку вимову або низьку якість аудіо.'
+DISCLAIMER='Бот перебуває на стадії розробки. Можливі помилки, перепрошуємо.'
 async def deliver_transcript(m,status,result):
     if not enabled(): return await mark_disabled(status)
     chunks=[result[i:i+3700] for i in range(0,len(result),3700)]
@@ -738,11 +738,11 @@ async def generate_text(m,question,context='',group=False,history_context=''):
             answer='Недостатньо інформації в історії розмови.'
         if group:
             if not group_enabled(chat): return
-            await m.reply(answer[:3700],parse_mode=None)
+            await m.reply(answer[:3700]+'\n\n'+DISCLAIMER,parse_mode=None)
             remember_group(chat,'ШІ: '+answer[:1000])
         else:
             remember_group(chat,'ШІ: '+answer[:1000])
-            await m.reply(answer[:3700],parse_mode=None)
+            await m.reply(answer[:3700]+'\n\n'+DISCLAIMER,parse_mode=None)
         return
     await m.reply('Текстовий ШІ тимчасово недоступний.')
 @dp.message(Command('premium'),F.chat.type.in_({'group','supergroup','private'}))
