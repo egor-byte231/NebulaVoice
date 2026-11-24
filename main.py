@@ -442,10 +442,10 @@ async def transcribe_local(k,path):
         if provider=='ovh':
             j=await ovh_transcribe(s,path)
         elif provider=='groq':
-            f=aiohttp.FormData(); f.add_field('file',data,filename=path.name,content_type='audio/ogg' if path.suffix=='.ogg' else 'audio/wav'); f.add_field('model',model); f.add_field('temperature','0'); f.add_field('prompt',"Розмовна українська, суржик, русский язык, język polski, English. Дослівне мовлення, включая сленг и ненормативную лексику."); f.add_field('response_format','verbose_json')
+            f=aiohttp.FormData(); f.add_field('file',data,filename=path.name,content_type='audio/ogg' if path.suffix=='.ogg' else 'audio/wav'); f.add_field('model',model); f.add_field('temperature','0'); f.add_field('response_format','verbose_json')
             j=await request(s,'https://api.groq.com/openai/v1/audio/transcriptions',{'Authorization':'Bearer '+need(f'GROQ_API_KEY_{n}')},data=f)
         elif provider=='cf':
-            j=await request(s,'https://api.cloudflare.com/client/v4/accounts/'+need(f'CF_ACCOUNT_ID_{n}')+'/ai/run/'+model,{'Authorization':'Bearer '+need(f'CF_API_TOKEN_{n}')},json={'audio':base64.b64encode(data).decode(),'task':'transcribe','initial_prompt':"Розмовна українська, суржик, русский язык, język polski, English. Дослівне мовлення, включая сленг и ненормативную лексику.",'condition_on_previous_text':False,'vad_filter':True,'log_prob_threshold':-0.65,'compression_ratio_threshold':2.0,'no_speech_threshold':0.45}); j=j.get('result') or {}
+            j=await request(s,'https://api.cloudflare.com/client/v4/accounts/'+need(f'CF_ACCOUNT_ID_{n}')+'/ai/run/'+model,{'Authorization':'Bearer '+need(f'CF_API_TOKEN_{n}')},json={'audio':base64.b64encode(data).decode(),'task':'transcribe','condition_on_previous_text':False,'vad_filter':True,'log_prob_threshold':-0.65,'compression_ratio_threshold':2.0,'no_speech_threshold':0.45}); j=j.get('result') or {}
         elif provider=='gemini':
             j=await request(s,'https://generativelanguage.googleapis.com/v1beta/models/'+model+':generateContent',{'x-goog-api-key':need('GEMINI_API_KEY')},json={'generationConfig':{'temperature':0},'contents':[{'parts':[{'text':GEMINI_PROMPT},{'inline_data':{'mime_type':'audio/ogg' if path.suffix=='.ogg' else 'audio/wav','data':base64.b64encode(data).decode()}}]}]}); j={'text':''.join(p.get('text','') for p in j['candidates'][0]['content']['parts'])}
         return validate_audio_result(j)
