@@ -208,6 +208,24 @@ WELCOME = """🇺🇦 Привіт! Я NebulaVoice — український б
 Просто надсилайте голосові або кружечки, а решту я зроблю сам!
 
 Для розпізнавання аудіо передається зовнішнім ШІ-сервісам.</blockquote>"""
+@dp.message(Command('server'),F.chat.type=='private',F.from_user.id==OWNER)
+async def server_status(m:Message):
+    names={'azure':'Azure VPS','fadehost':'FadeHost','wispbyte':'WispByte'}
+    try:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session:
+            rows=await d1_query(session,'SELECT role, expires-unixepoch() AS remaining FROM runtime_lease WHERE id=1 AND expires>unixepoch()')
+        if not rows:
+            return await m.reply('⚠️ Немає чинного блокування. Активний сервер не підтверджено.')
+        role=rows[0]['role']
+        lines=['🖥 Стан серверів']
+        for key,name in names.items():
+            lines.append(('🟢 '+name+' — власник блокування' if key==role else '⚪ '+name+' — не власник блокування'))
+        lines.append('Блокування дійсне ще '+str(rows[0]['remaining'])+' с')
+        lines.append('Це статус блокування, а не перевірка всіх API.')
+        await m.reply('\n'.join(lines))
+    except Exception:
+        await m.reply('⚠️ Не вдалося підтвердити активний сервер.')
+
 @dp.message(Command('help'))
 async def help_command(m:Message):
     group=m.chat.type in ('group','supergroup')
