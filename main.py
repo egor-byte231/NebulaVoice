@@ -654,51 +654,77 @@ def load_menu():
     rows.extend([[InlineKeyboardButton(text='⚡ Запустити реальні запити',callback_data='owner:load:run')],[InlineKeyboardButton(text='Назад',callback_data='owner:back')]])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 async def run_load_test(message,config):
-    import secrets
-    run=secrets.token_hex(16)
-    try:
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as session:
-            async with session.post('https://nebulavoice-ai.maxvyn09.workers.dev/load-test',json={'run':run,**config},headers={'Authorization':'Bearer '+os.environ['WORKER_SECRET']},allow_redirects=False) as response:
-                if response.status!=202: raise RuntimeError('HTTP '+str(response.status))
-        for _ in range(120):
-            await asyncio.sleep(5)
-            rows=await d1_query(history_session,'SELECT * FROM load_results WHERE run=? ORDER BY idx',(run,))
-            if len(rows)>=config['count']: break
-        await reconcile_load_stats()
-        await d1_snapshot(history_session)
-        events=sorted([(r['started'],1) for r in rows]+[(r['ended'],-1) for r in rows],key=lambda x:(x[0],x[1]))
-        peak=active=0
-        for _,delta in events:
-            active+=delta
+    routes=[r for r in TEXT_ROUTES if config['mode']!='selected' or r[0] in config['routes']]
+    if not routes: return await message.answer('Немає локально налаштованих моделей.')
+    start=time.monotonic()
+    active=peak=0
+    async def job(i,session):
+        nonlocal active,peak
+        async with azure_text_gate.slot():
+            began=time.monotonic()
+            active+=1
             peak=max(peak,active)
-        ok=sum(r['ok'] for r in rows)
-        lines=[f"Тест: {len(rows)}/{config['count']} завершено",f"Успішно: {ok}; помилки: {len(rows)-ok}; без результату: {config['count']-len(rows)}",f"Пік обробників: {peak}",f"Токени (фактичні + оцінені): {sum(r['tokens'] for r in rows)}",f"Спроби з невідомими витратами: {sum(v.get('unknown',0) for r in rows for v in json.loads(r['attempts']).values())}"]
-        usages=[v for r in rows for v in json.loads(r['attempts']).values()]
-        lines.append(f"Підтверджені токени: {sum(v.get('actual_tokens',0) for v in usages)}")
-        lines.append(f"Оцінені токени: {sum(v.get('estimated_tokens',0) for v in usages)}")
-        lines.append(f"Токени без розподілу (старий формат): {sum(v.get('tokens',0) for v in usages if 'actual_tokens' not in v)}")
-        if rows:
-            lines.append(f"Макс. очікування: {max(r['started']-r['queued'] for r in rows)/1000:.2f} с")
-        for r in rows:
-            attempts=json.loads(r['attempts'])
-            detail=', '.join(f"{name}: {v.get('error',v.get('status','?'))} {v.get('origin','')} {v.get('error_detail','')} ({v['attempts']} спр.)" for name,v in attempts.items())
-            lines.append(f"#{r['idx']+1} {r['route'] or 'Помилка'} | черга {(r['started']-r['queued'])/1000:.2f} с | обробка {(r['ended']-r['started'])/1000:.2f} с | {r['tokens']} ток. | {detail}")
-        chunk=''
-        for line in lines:
-            if len(chunk)+len(line)>3500:
-                await message.answer(chunk,parse_mode=None)
-                chunk=''
-            chunk+=line+'\n'
-        if chunk: await message.answer(chunk,parse_mode=None)
-    except Exception as e:
-        await message.answer('Тест не завершено: '+type(e).__name__+'. Частина запитів могла бути прийнята.')
+            attempts=[]
+            tokens=0
+            winner=''
+            try:
+                order=routes if config['mode']=='auto' else [routes[i%len(routes)]]
+                for route in order:
+                    if not testing_enabled(): break
+                    name=route[0]
+                    key,url,model=text_config(route)
+                    if not key or not url or not model or not url.startswith('https://') or blocked('text:'+name)>time.time():
+                        attempts.append(name+': недоступний')
+                        continue
+                    day=text_day()
+                    reserve=600
+                    text_charge(day,name,reserve,1)
+                    tokens+=reserve
+                    try:
+                        async with session.post(url,headers={'Authorization':'Bearer '+key},json={'model':model,'messages':[{'role':'user','content':'Відповідай українською: скільки буде 2+2?'}],'max_tokens':128},allow_redirects=False) as response:
+                            if response.status!=200:
+                                attempts.append(name+': HTTP '+str(response.status))
+                                if response.status==429: block('text:'+name,60)
+                                continue
+                            data=await response.json()
+                        actual=(data.get('usage') or {}).get('total_tokens')
+                        if isinstance(actual,int) and actual>=0:
+                            text_charge(day,name,actual-reserve)
+                            tokens+=actual-reserve
+                        answer=data['choices'][0]['message']['content']
+                        if not isinstance(answer,str) or not answer.strip(): raise ValueError('Empty response')
+                        winner=name
+                        attempts.append(name+': OK')
+                        break
+                    except Exception as e:
+                        attempts.append(name+': '+type(e).__name__)
+                return bool(winner),tokens,f'#{i+1} {winner or "Помилка"} | черга {began-start:.2f} с | обробка {time.monotonic()-began:.2f} с | '+', '.join(attempts)
+            finally:
+                active-=1
+    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=20)) as session:
+        tasks=[asyncio.create_task(job(i,session)) for i in range(config['count'])]
+        try:
+            done,pending=await asyncio.wait(tasks,timeout=180)
+            results=[t.result() for t in done if not t.cancelled() and t.exception() is None]
+        finally:
+            for t in tasks:
+                if not t.done(): t.cancel()
+            await asyncio.gather(*tasks,return_exceptions=True)
+    lines=[f'Azure VPS: {sum(r[0] for r in results)}/{config["count"]} успішно; пік {peak}; токени (фактичні + оцінені): {sum(r[1] for r in results)}',f'Без результату: {config["count"]-len(results)}']+[r[2] for r in results]
+    chunk=''
+    for line in lines:
+        if len(chunk)+len(line)>3500:
+            await message.answer(chunk,parse_mode=None)
+            chunk=''
+        chunk+=line+'\n'
+    if chunk: await message.answer(chunk,parse_mode=None)
 
 audio_load_wait=None
 load_count_wait=False
 async def safe_audio_load(m,config):
     progress=None
     try:
-        progress=await asyncio.wait_for(m.reply('⏳ FadeHost: підготовка аудіо...',reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='Скасувати тест',callback_data='owner:load:cancel')]])),10)
+        progress=await asyncio.wait_for(m.reply('⏳ Azure VPS: підготовка аудіо...',reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='Скасувати тест',callback_data='owner:load:cancel')]])),10)
         await asyncio.wait_for(run_audio_load_inner(m,config,progress),210)
     except asyncio.CancelledError:
         if progress: await progress.edit_text('Тест скасовано.',reply_markup=None)
