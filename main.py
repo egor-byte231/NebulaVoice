@@ -1673,7 +1673,7 @@ async def text_message(m:Message):
     if group and not group_enabled(chat): return
     
     raw=m.text or ''
-    if not group:
+    if not group or group_enabled(chat):
         from urllib.parse import urlsplit
         try:
             p=urlsplit(raw.strip())
@@ -1688,7 +1688,7 @@ async def text_message(m:Message):
             status=await m.reply('🎬 Відео додано до черги.')
             try:
                 async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as video_session:
-                    async with video_session.post('https://nebulavoice-ai.maxvyn09.workers.dev/video/enqueue',headers={'Authorization':'Bearer '+os.environ['WORKER_SECRET']},json={'url':raw.strip(),'user_id':m.from_user.id,'chat_id':chat,'reply_id':m.message_id,'status_id':status.message_id},allow_redirects=False) as response:
+                    async with video_session.post('https://nebulavoice-ai.maxvyn09.workers.dev/video/enqueue',headers={'Authorization':'Bearer '+os.environ['WORKER_SECRET']},json={'url':raw.strip(),'user_id':m.from_user.id,'chat_id':chat,'reply_id':m.message_id,'status_id':status.message_id,'thread_id':m.message_thread_id if m.is_topic_message else None},allow_redirects=False) as response:
                         accepted=response.status==202
                         logging.info('Video: Cloudflare enqueue HTTP %s',response.status)
                 if not accepted: await status.edit_text('⚠️ NebulaVideo тимчасово недоступний або черга заповнена.')
