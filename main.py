@@ -208,6 +208,15 @@ WELCOME = """🇺🇦 Привіт! Я NebulaVoice — український б
 Просто надсилайте голосові або кружечки, а решту я зроблю сам!
 
 Для розпізнавання аудіо передається зовнішнім ШІ-сервісам.</blockquote>"""
+async def record_server_result(m,kind):
+    role=os.getenv('NEBULA_RUNTIME','unknown').lower()
+    try:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=5)) as session:
+            await d1_query(session,'CREATE TABLE IF NOT EXISTS runtime_results (chat INTEGER, message_id INTEGER, kind TEXT, role TEXT, completed INTEGER, PRIMARY KEY(chat,message_id,kind))')
+            await d1_query(session,'INSERT OR IGNORE INTO runtime_results VALUES (?,?,?,?,unixepoch())',(m.chat.id,m.message_id,kind,role))
+    except Exception:
+        logging.warning('Runtime result counter unavailable')
+
 async def server_status_text():
     names={'azure':'Azure VPS','fadehost':'FadeHost','wispbyte':'WispByte'}
     try:
@@ -220,6 +229,15 @@ async def server_status_text():
         for key,name in names.items():
             lines.append(('🟢 '+name+' — власник блокування' if key==role else '⚪ '+name+' — не власник блокування'))
         lines.append('Блокування дійсне ще '+str(rows[0]['remaining'])+' с')
+        try:
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=5)) as session:
+                stats=await d1_query(session,'SELECT role,kind,COUNT(*) AS n FROM runtime_results GROUP BY role,kind')
+            lines.append('Доставлені результати (з початку обліку):')
+            for key,name in names.items():
+                counts={r['kind']:r['n'] for r in stats if r['role']==key}
+                lines.append(name+': аудіо '+str(counts.get('audio',0))+', відео '+str(counts.get('video',0))+', текст '+str(counts.get('text',0)))
+        except Exception:
+            lines.append('Статистика ще недоступна.')
         lines.append('Це статус блокування, а не перевірка всіх API.')
         return '\n'.join(lines)
     except Exception:
@@ -461,6 +479,7 @@ async def deliver_transcript(m,status,result):
         if i==0: await status.edit_text(body,parse_mode='HTML')
         else: await m.reply(body,parse_mode='HTML')
     if chunks: overview_add(m,voices=int(bool(m.voice)),circles=int(bool(m.video_note)))
+    if chunks: await record_server_result(m,'audio' if m.voice else 'video')
 audio_cloud_retry=0
 audio_local_active=0
 def audio_platform():
@@ -1508,6 +1527,7 @@ async def generate_text(m,question,context='',group=False,history_context=''):
             await m.reply(html.escape(answer[:3700])+('\n\n<blockquote>'+html.escape(DISCLAIMER)+'</blockquote>' if development_enabled() else ''),parse_mode='HTML')
         else:
             await m.reply(html.escape(answer[:3700])+('\n\n<blockquote>'+html.escape(DISCLAIMER)+'</blockquote>' if development_enabled() else ''),parse_mode='HTML')
+        await record_server_result(m,'text')
         return
     await m.reply('Текстовий ШІ тимчасово недоступний.')
 @dp.message(Command('premium'),F.chat.type.in_({'group','supergroup','private'}))
