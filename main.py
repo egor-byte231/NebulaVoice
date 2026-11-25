@@ -545,8 +545,15 @@ async def voice(m:Message):
     d={'queue':waiting.qsize()+1,'queued':time.time(),'source':source,'attempts':[],'state':'у черзі'}
     cur=db.execute('INSERT INTO audio_diagnostics(data) VALUES (?)',('{}',)); d['id']=cur.lastrowid; diag_save(d)
     audio_diag_pending[(m.chat.id,m.message_id)]=d
+    try:
+        await d1_query(history_session,'INSERT INTO audio_queue_jobs (chat,message_id,source,status,queued) VALUES (?,?,?,?,?) ON CONFLICT(chat,message_id) DO NOTHING',(m.chat.id,m.message_id,m.model_dump_json(exclude_none=True),status.model_dump_json(exclude_none=True),time.time()))
+    except Exception as e:
+        audio_diag_pending.pop((m.chat.id,m.message_id),None)
+        logging.warning('Audio queue persistence failed: %s',type(e).__name__)
+        return await audio_status(status,'⚠️ Не вдалося зберегти завдання. Надішли аудіо повторно.')
     try: waiting.put_nowait((m,status))
     except asyncio.QueueFull:
+        await audio_queue_remove(m)
         audio_diag_pending.pop((m.chat.id,m.message_id),None); d['state']='черга заповнена'; diag_save(d)
         await status.edit_text('Черга заповнена. Повтори пізніше.')
 
@@ -863,6 +870,7 @@ async def disable(reason):
     while not waiting.empty():
         m,status=waiting.get_nowait()
         queued.append(status)
+        await audio_queue_remove(m)
         waiting.task_done()
     current=asyncio.current_task()
     jobs=[(t,status) for t,status in active_jobs.items() if t is not current]
@@ -1132,13 +1140,32 @@ async def process_voice_inner(m,status,failures,selected):
         if not enabled(): return await mark_disabled(status)
         await notify_error('Черга: 10 хвилин очікування',TimeoutError())
         await audio_status(status,'⚠️ Не вдалося завершити транскрипцію за 10 хвилин. Надішли аудіо повторно.')
+async def audio_queue_remove(m):
+    for attempt in range(3):
+        try:
+            await d1_query(history_session,'DELETE FROM audio_queue_jobs WHERE chat=? AND message_id=?',(m.chat.id,m.message_id))
+            return
+        except Exception as e:
+            logging.warning('Audio queue completion persistence failed: %s',type(e).__name__)
+            if attempt<2: await asyncio.sleep(2)
+async def audio_queue_restore():
+    rows=await d1_query(history_session,'SELECT source,status FROM audio_queue_jobs ORDER BY queued')
+    for row in rows:
+        m=Message.model_validate_json(row['source'],context={'bot':bot})
+        status=Message.model_validate_json(row['status'],context={'bot':bot})
+        await waiting.put((m,status))
+    logging.info('Audio queue restored: %s jobs',len(rows))
+
 async def worker(index=0):
     while True:
         while index>=audio_slot_limit(): await asyncio.sleep(0.5)
         m,status=await waiting.get()
+        keep=False
         try:
             if index>=audio_slot_limit() and enabled():
-                try: waiting.put_nowait((m,status))
+                try:
+                    waiting.put_nowait((m,status))
+                    keep=True
                 except asyncio.QueueFull:
                     await audio_status(status,'⚠️ Черга заповнена. Надішли аудіо повторно.')
                 continue
@@ -1150,7 +1177,9 @@ async def worker(index=0):
             try:
                 await asyncio.wait_for(job, timeout=720)
             except asyncio.CancelledError:
-                if asyncio.current_task().cancelling(): raise
+                if asyncio.current_task().cancelling():
+                    keep=True
+                    raise
                 if not enabled(): await mark_disabled(status)
                 else: await audio_status(status,'⚠️ Обробку перервано. Надішли аудіо повторно.')
             finally: active_jobs.pop(job,None)
@@ -1164,7 +1193,9 @@ async def worker(index=0):
             else:
                 await audio_status(status,'⚠️ Не вдалося обробити аудіо. Надішли його повторно.')
             await notify_error('Обробка аудіо',e)
-        finally: waiting.task_done()
+        finally:
+            if not keep: await audio_queue_remove(m)
+            waiting.task_done()
 async def quota_reset_monitor():
     while True:
         try:
@@ -1736,6 +1767,7 @@ async def d1_snapshot(session):
     await d1_query(session,'DELETE FROM nebula_snapshot_chunks WHERE generation<>?',(generation,))
 
 async def d1_initialize(session):
+    await d1_query(session,'CREATE TABLE IF NOT EXISTS audio_queue_jobs (chat INTEGER,message_id INTEGER,source TEXT NOT NULL,status TEXT NOT NULL,queued REAL NOT NULL,PRIMARY KEY(chat,message_id))')
     await d1_query(session,'CREATE TABLE IF NOT EXISTS cloud_reservations (id TEXT PRIMARY KEY,chat INTEGER,day TEXT,budget INTEGER)')
     await d1_query(session,'CREATE TABLE IF NOT EXISTS chat_history (chat INTEGER, message_id INTEGER, sent_at REAL, line TEXT, PRIMARY KEY(chat,message_id))')
     await d1_query(session,'CREATE TABLE IF NOT EXISTS nebula_snapshot_chunks (generation TEXT, part INTEGER, data TEXT, PRIMARY KEY(generation,part))')
@@ -1788,6 +1820,7 @@ async def main():
     db.commit()
     logging.info('Cloud text Worker readiness: %s',await cloud_text_probe())
     tasks=[asyncio.create_task(worker(i)) for i in range(40)]
+    tasks.append(asyncio.create_task(audio_queue_restore()))
     if cloud_ready: tasks.append(asyncio.create_task(d1_monitor(session)))
     tasks.append(asyncio.create_task(quota_reset_monitor()))
     if os.getenv('CLOUD_TEXT_ENABLED','auto')!='0':
