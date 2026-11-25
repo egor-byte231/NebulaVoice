@@ -25,6 +25,9 @@ OWNER=int(os.environ['OWNER_ID']); bot=Bot(os.environ['BOT_TOKEN']); dp=Dispatch
 bot.session.middleware(telegram_retry)
 ORDER=['groq1','groq2','groq1t','groq2t','cf1','cf2','ovh']
 db=sqlite3.connect('state.db')
+from azure_runtime import RuntimeSettings, SlotGate
+azure_settings=RuntimeSettings(db)
+azure_text_gate=SlotGate(azure_settings,'text')
 db.execute('CREATE TABLE IF NOT EXISTS cloud_completed (id TEXT PRIMARY KEY)')
 db.execute('CREATE TABLE IF NOT EXISTS cloud_pending (id TEXT PRIMARY KEY,chat INTEGER,day TEXT,budget INTEGER)')
 db.commit()
@@ -443,11 +446,12 @@ async def deliver_transcript(m,status,result):
 audio_cloud_retry=0
 audio_local_active=0
 def audio_platform():
-    return 'Cloudflare'
+    return 'Azure VPS'
 def audio_slot_limit():
-    return audio_settings()[2 if audio_platform()=='Cloudflare' else 3]
+    return azure_settings.get('audio')
 async def cloud_audio(k,path):
     global audio_cloud_retry
+    return None
     if not os.getenv('WORKER_SECRET') or time.monotonic()<audio_cloud_retry: return None
     data=path.read_bytes()
     if k=='ovh':
@@ -1345,7 +1349,7 @@ db.commit()
 from collections import deque, OrderedDict
 
 group_busy=set()
-text_slots=asyncio.Semaphore(4)
+text_slots=asyncio.Semaphore(20)
 def group_enabled(chat):
     return not bool(db.execute('SELECT 1 FROM text_disabled WHERE chat=?',(chat,)).fetchone())
 def premium_until(chat):
@@ -1756,7 +1760,7 @@ async def text_message(m:Message):
     if not (mentioned or replied): return
     question=re.sub(r'(?<!\w)@Nebulavcbot(?!\w)','',raw,flags=re.I).strip()
     if not question: return
-    if os.getenv('CLOUD_TEXT_ENABLED','auto')!='0' and await cloud_text_probe():
+    if False and await cloud_text_probe():
         overview_add(m,requests=1)
         return await submit_cloud_text(m,question,group,replied,reply)
     if test_route('text',m): return await m.reply('Тест текстової моделі потребує доступного Cloudflare.')
@@ -1864,7 +1868,7 @@ async def main():
     tasks.append(asyncio.create_task(audio_queue_restore()))
     if cloud_ready: tasks.append(asyncio.create_task(d1_monitor(session)))
     tasks.append(asyncio.create_task(quota_reset_monitor()))
-    if os.getenv('CLOUD_TEXT_ENABLED','auto')!='0':
+    if False:
         await cloud_restore_reservations()
         tasks.append(asyncio.create_task(cloud_reconcile()))
     try: await dp.start_polling(bot,handle_as_tasks=True)
