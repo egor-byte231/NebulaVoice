@@ -1674,20 +1674,27 @@ async def text_message(m:Message):
     
     raw=m.text or ''
     from urllib.parse import urlsplit
-    try:
-        p=urlsplit(raw.strip())
-        video_link=p.scheme=='https' and p.hostname in {'youtube.com','www.youtube.com','m.youtube.com','youtu.be','tiktok.com','www.tiktok.com','vm.tiktok.com','vt.tiktok.com','instagram.com','www.instagram.com','facebook.com','www.facebook.com','m.facebook.com','fb.watch','fb.com','x.com','www.x.com','twitter.com','www.twitter.com','mobile.twitter.com','t.co','reddit.com','www.reddit.com','old.reddit.com','redd.it','v.redd.it','pinterest.com','www.pinterest.com','pin.it','twitch.tv','www.twitch.tv','clips.twitch.tv','vimeo.com','www.vimeo.com','player.vimeo.com','dailymotion.com','www.dailymotion.com','dai.ly','snapchat.com','www.snapchat.com','t.snapchat.com','soundcloud.com','www.soundcloud.com','m.soundcloud.com','on.soundcloud.com'} and not p.username and not p.password and p.port in (None,443) and not any(c.isspace() for c in raw.strip())
-    except ValueError:
-        video_link=False
+    media_url=None
+    for candidate in re.findall(r'https://[^\s<>]+',raw):
+        candidate=candidate.rstrip('.,;!?)]}')
+        try:
+            p=urlsplit(candidate)
+            video_link=p.scheme=='https' and p.hostname in {'youtube.com','www.youtube.com','m.youtube.com','youtu.be','tiktok.com','www.tiktok.com','vm.tiktok.com','vt.tiktok.com','instagram.com','www.instagram.com','facebook.com','www.facebook.com','m.facebook.com','fb.watch','fb.com','x.com','www.x.com','twitter.com','www.twitter.com','mobile.twitter.com','t.co','reddit.com','www.reddit.com','old.reddit.com','redd.it','v.redd.it','pinterest.com','www.pinterest.com','pin.it','twitch.tv','www.twitch.tv','clips.twitch.tv','vimeo.com','www.vimeo.com','player.vimeo.com','dailymotion.com','www.dailymotion.com','dai.ly','snapchat.com','www.snapchat.com','t.snapchat.com','soundcloud.com','www.soundcloud.com','m.soundcloud.com','on.soundcloud.com'} and not p.username and not p.password and p.port in (None,443) and not any(c.isspace() for c in candidate)
+            if video_link:
+                media_url=candidate
+                break
+        except ValueError:
+            continue
+    video_link=media_url is not None
     if video_link:
-        logging.info('Video: link recognized, host=%s',p.hostname)
+        logging.info('Video: link recognized, host=%s, group=%s',p.hostname,group)
         if not os.getenv('WORKER_SECRET','').strip():
             logging.warning('Video: WORKER_SECRET missing')
             return await m.reply('⚠️ NebulaVideo: відсутня конфігурація Cloudflare.')
         status=await m.reply('🎵 Аудіо додано до черги.' if p.hostname in {'soundcloud.com','www.soundcloud.com','m.soundcloud.com','on.soundcloud.com'} else '🎬 Відео додано до черги.')
         try:
             async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as video_session:
-                async with video_session.post('https://nebulavoice-ai.maxvyn09.workers.dev/video/enqueue',headers={'Authorization':'Bearer '+os.environ['WORKER_SECRET']},json={'url':raw.strip(),'user_id':m.from_user.id,'chat_id':chat,'reply_id':m.message_id,'status_id':status.message_id,'thread_id':m.message_thread_id if m.is_topic_message else None},allow_redirects=False) as response:
+                async with video_session.post('https://nebulavoice-ai.maxvyn09.workers.dev/video/enqueue',headers={'Authorization':'Bearer '+os.environ['WORKER_SECRET']},json={'url':media_url,'user_id':m.from_user.id,'chat_id':chat,'reply_id':m.message_id,'status_id':status.message_id,'thread_id':m.message_thread_id if m.is_topic_message else None},allow_redirects=False) as response:
                     accepted=response.status==202
                     logging.info('Video: Cloudflare enqueue HTTP %s',response.status)
             if not accepted: await status.edit_text('⚠️ NebulaVideo тимчасово недоступний або черга заповнена.')
