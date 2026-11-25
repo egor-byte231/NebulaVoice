@@ -1459,17 +1459,13 @@ def text_stats_menu():
     return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='🔄 Оновити',callback_data='owner:ai')],[InlineKeyboardButton(text='⬅️ Назад',callback_data='owner:back')]])
 def text_report():
     day=text_day()
-    rows=list(db.execute('SELECT route,tokens,attempts FROM text_usage WHERE day=?',(day,)))
-    f=db.execute('SELECT attempts,ok,needed,tokens,ms,bypass FROM classifier_daily WHERE day=?',(day,)).fetchone() or (0,0,0,0,0,0)
-    attempts,ok,needed,tokens,ms,bypass=f
-    active=5-history_classifier_slots._value
-    pending=db.execute('SELECT COUNT(*) FROM cloud_pending').fetchone()[0]
+    rows=list(db.execute('SELECT route,tokens,attempts FROM text_usage WHERE day=? ORDER BY route',(day,)))
     groups=db.execute('SELECT COUNT(*) FROM text_groups').fetchone()[0]
     charged=db.execute('SELECT COALESCE(SUM(tokens),0) FROM text_group_usage WHERE day=?',(day,)).fetchone()[0]
-    lines=['🤖 <b>Статистика текстового ШІ</b>',f'📅 {day} (UTC)','', '🖥 <b>FadeHost — визначення історії</b>',f'Активні слоти: {active}/5',f'Черга: {max(0,history_classifier_admitted-active)}/2',f'Спроби: {attempts}',f'Успішні: {ok} | Невдалі: {attempts-ok}',f'Історія потрібна: {needed} | Непотрібна: {ok-needed}',f'Напряму Cloudflare: {bypass}',f'Токени (за API): {tokens}',f'Середній час API: {ms/attempts/1000:.2f} с' if attempts else 'Середній час API: —','', '☁️ <b>Cloudflare — відповіді</b>',f'Незавершений облік: {pending}', 'Активні слоти / черга: немає телеметрії', 'Успішність / час: немає телеметрії','', '<b>Зведений облік API (включно з тестами)</b>',f'Токени: {sum(x[1] for x in rows)} | Спроби: {sum(x[2] for x in rows)}',f'Токени чатів: {charged} | Групи: {groups}','Групи Free/Prem: 40k / 100k','ЛС Free/Prem: 10k / 40k','']
+    lines=['🤖 <b>Статистика текстового ШІ</b>',f'📅 {day} (UTC)','', '🖥 <b>Azure VPS — текстові відповіді</b>',f'Активні слоти: {azure_text_gate.active}/{azure_settings.get("text")}',f'Черга: {azure_text_gate.waiting}', '', '<b>Добовий облік API (включно з тестами)</b>',f'Токени: {sum(x[1] for x in rows)} | Спроби: {sum(x[2] for x in rows)}',f'Токени чатів: {charged} | Групи: {groups}','Групи Free/Prem: 40k / 100k','ЛС Free/Prem: 10k / 40k','']
     for name,t,a in rows:
         lines.append(f'{html.escape(name)}: {t} ток. / {a} спроб')
-    lines.extend(['','<i>Зведені дані можуть включати FadeHost; не додавайте їх до його токенів. Квоти API невідомі. Нові лічильники — з моменту оновлення.</i>'])
+    lines.extend(['','<i>Добовий облік включає історичні дані резервних серверів і тести. Успішність та час API окремо не обліковуються цим звітом.</i>'])
     return '\n'.join(lines)
 @dp.message(Command('ai_status'),F.chat.type=='private',F.from_user.id==OWNER)
 async def text_status(m:Message):
