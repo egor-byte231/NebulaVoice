@@ -1614,7 +1614,7 @@ async def text_message(m:Message):
     if group and not group_enabled(chat): return
     
     raw=m.text or ''
-    if not group and m.from_user.id==OWNER and os.getenv('VIDEO_WORKER_URL') and os.getenv('VIDEO_WORKER_SECRET'):
+    if not group and m.from_user.id==OWNER and os.getenv('WORKER_SECRET'):
         from urllib.parse import urlsplit
         try:
             p=urlsplit(raw.strip())
@@ -1624,7 +1624,7 @@ async def text_message(m:Message):
         if video_link:
             try:
                 async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as video_session:
-                    async with video_session.post(os.environ['VIDEO_WORKER_URL'].rstrip('/')+'/jobs',headers={'Authorization':'Bearer '+os.environ['VIDEO_WORKER_SECRET']},json={'url':raw.strip(),'user_id':OWNER,'chat_id':chat},allow_redirects=False) as response:
+                    async with video_session.post('https://nebulavoice-ai.maxvyn09.workers.dev/video/enqueue',headers={'Authorization':'Bearer '+os.environ['WORKER_SECRET']},json={'url':raw.strip(),'user_id':OWNER,'chat_id':chat},allow_redirects=False) as response:
                         accepted=response.status==202
                 return await m.reply('🎬 Відео додано до черги.' if accepted else '⚠️ NebulaVideo тимчасово недоступний або черга заповнена.')
             except Exception:
