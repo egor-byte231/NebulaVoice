@@ -466,7 +466,17 @@ async def audio_diag_command(m:Message):
     if not row: return await m.answer('Транскрипцію не знайдено.')
     d=json.loads(row[0])
     lines=[f"🔎 Транскрипція #{d.get('number',d['id'])}",f"Стан: {d.get('state','очікування')}",f"Позиція при вході в чергу: {d.get('queue','—')}",f"Активних обробників при вході: {d.get('active_at_enqueue','—')}",f"Час обробки: {d.get('processing','—')} с",f"Очікування: {d.get('wait','—')} с",f"Платформа транскрипції: {d.get('platform') or ('Cloudflare (за даними слота)' if any(a.get('slot') is not None for a in d.get('attempts',[])) else 'Не зафіксовано')}",f"Обраний ШІ: {d.get('selected') or '—'}",f"Джерело: {d.get('source','—')}"]
-    for i,a in enumerate(d.get('attempts',[]),1):
+    attempts=d.get('attempts',[])
+    failed=[a for a in attempts if a.get('error')]
+    first=attempts[0]['model'] if attempts else 'Не зафіксовано'
+    lines.append('Початковий ШІ (перша фактична спроба): '+first)
+    lines.append('Кінцевий ШІ: '+(d.get('selected') or 'Не визначено'))
+    lines.append('Помилки: '+('так' if failed or d.get('errors') else 'не зафіксовано'))
+    for a in failed:
+        lines.append('Невдала модель: '+a['model'])
+        lines.append('Точна зафіксована помилка: '+a['error'])
+        lines.append('Заміна: '+(d.get('selected') or 'успішної заміни немає'))
+    for i,a in enumerate(attempts,1):
         lines.append(f"\n{i}. {a['model']} | платформа: {a.get('platform','—')} | {a.get('ms','—')} мс | очікування слота: {a.get('busy',0)*0.5:.1f} с (мін.)")
         if a.get('error'): lines.append('Помилка: '+a['error'])
     for e in d.get('errors',[]): lines.append('Помилка: '+e)
