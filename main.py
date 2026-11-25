@@ -1134,7 +1134,7 @@ async def audio_has_speech(path):
         logging.warning('Speech detection unavailable',exc_info=True)
         return None
 
-azure_video_slots=asyncio.Semaphore(2)
+azure_video_slots=asyncio.Semaphore(8)
 async def azure_video(m,status,url):
     if not enabled(): return await mark_disabled(status)
     from urllib.parse import urlsplit
