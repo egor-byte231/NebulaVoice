@@ -1874,4 +1874,31 @@ async def main():
         try:
             if cloud_ready: await d1_snapshot(session)
         finally: await session.close()
-if __name__=='__main__': asyncio.run(main())
+async def standby_entrypoint():
+    from azure_failover import RuntimeLease
+    role=os.getenv('NEBULA_RUNTIME','').lower()
+    if role not in ('fadehost','wispbyte'):
+        raise RuntimeError('Set NEBULA_RUNTIME to fadehost or wispbyte')
+    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session:
+        lease=RuntimeLease(d1_query,session,role)
+        while True:
+            try:
+                await lease.initialize()
+                if await lease.acquire(): break
+            except Exception:
+                logging.warning('Standby lease unavailable')
+            await asyncio.sleep(5 if role=='fadehost' else 15)
+        task=asyncio.create_task(main())
+        async def lost():
+            logging.error('Standby lease lost')
+            task.cancel()
+        monitor=asyncio.create_task(lease.monitor(lost))
+        try:
+            await task
+        finally:
+            monitor.cancel()
+            await asyncio.gather(monitor,return_exceptions=True)
+            try: await lease.release()
+            except Exception: logging.warning('Standby lease release failed')
+
+if __name__=='__main__': asyncio.run(standby_entrypoint())
