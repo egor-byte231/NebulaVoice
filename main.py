@@ -2072,6 +2072,19 @@ def daily_report_body(day,values):
             f'🪙 Текстові токени: <b>≈ {n("text_tokens")}</b>\n\n'
             'Дані з початку нового обліку; токени включають оцінки та тести.')
 
+@dp.message(Command('daily_now'),F.chat.type=='private',F.from_user.id==OWNER)
+async def daily_now(m:Message):
+    now=daily_kyiv_now()
+    day=now.date().isoformat()
+    await d1_query(history_session,'CREATE TABLE IF NOT EXISTS daily_reports (day TEXT PRIMARY KEY, body TEXT NOT NULL)')
+    await d1_query(history_session,'CREATE TABLE IF NOT EXISTS daily_publications (day TEXT,chat INTEGER,PRIMARY KEY(day,chat))')
+    db.execute('CREATE TABLE IF NOT EXISTS daily_kyiv_stats (day TEXT,key TEXT,value REAL,PRIMARY KEY(day,key))')
+    values=dict(db.execute('SELECT key,value FROM daily_kyiv_stats WHERE day=?',(day,)).fetchall())
+    body=daily_report_body(day,values).replace('00:00–23:00','00:00–'+now.strftime('%H:%M'))
+    report_id=day+'-manual-'+str(int(time.time()))
+    await d1_query(history_session,'INSERT INTO daily_reports VALUES (?,?)',(report_id,body))
+    await m.answer(body,parse_mode='HTML',reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='📢 Опублікувати в групах',callback_data='daily_publish:'+report_id)]]))
+
 async def daily_report_monitor():
     while True:
         try:
