@@ -488,20 +488,14 @@ async def cloud_audio(k,path):
                 audio_cloud_retry=time.monotonic()+30
                 return None
 async def transcribe(k,path):
-    d=audio_diag.get(); a={'model':NAMES[k],'busy':0,'platform':'Cloudflare'}
+    d=audio_diag.get()
+    a={'model':NAMES[k],'busy':0,'platform':'Azure VPS'}
     if d: d['attempts'].append(a)
     try:
-        j=await cloud_audio(k,path)
-        if j is None: raise RuntimeError('Cloudflare audio unavailable')
-        a['language']=j.get('language') or j.get('detected_language')
-        try:
-            return validate_audio_result(j)
-        except RejectedTranscript as e:
-            if str(e) in ('Мова поза списком підтримуваних','Підозріла транслітерація мовлення'):
-                e.partial_text=str(j.get('text') or '').strip()
-            raise
+        return await transcribe_local(k,path)
     except Exception as e:
-        a['error']=type(e).__name__+': '+diag_safe(e); raise
+        a['error']=type(e).__name__+': '+diag_safe(e)
+        raise
     finally:
         if d: diag_save(d)
 async def transcribe_local(k,path):
