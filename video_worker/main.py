@@ -14,7 +14,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 from aiohttp import web, ClientSession, ClientTimeout, FormData, TCPConnector
 
-HOSTS = {"youtube.com", "www.youtube.com", "m.youtube.com", "youtu.be", "tiktok.com", "www.tiktok.com", "vm.tiktok.com", "vt.tiktok.com", "instagram.com", "www.instagram.com"}
+HOSTS = {"youtube.com", "www.youtube.com", "m.youtube.com", "youtu.be", "tiktok.com", "www.tiktok.com", "vm.tiktok.com", "vt.tiktok.com", "instagram.com", "www.instagram.com","facebook.com","www.facebook.com","m.facebook.com","fb.watch","fb.com","x.com","www.x.com","twitter.com","www.twitter.com","mobile.twitter.com","t.co","reddit.com","www.reddit.com","old.reddit.com","redd.it","v.redd.it","pinterest.com","www.pinterest.com","pin.it","twitch.tv","www.twitch.tv","clips.twitch.tv","vimeo.com","www.vimeo.com","player.vimeo.com","dailymotion.com","www.dailymotion.com","dai.ly","snapchat.com","www.snapchat.com","t.snapchat.com","soundcloud.com","www.soundcloud.com","m.soundcloud.com","on.soundcloud.com"}
 def valid(url):
     try:
         p = urlsplit(url)
@@ -56,15 +56,17 @@ async def process(session, url, chat, reply_id=None, thread_id=None):
     with tempfile.TemporaryDirectory(prefix="video-", dir=VIDEO_TMP) as tmp:
         ffmpeg = shutil.which("ffmpeg")
         started=time.monotonic()
+        audio=urlsplit(url).hostname in {"soundcloud.com","www.soundcloud.com","m.soundcloud.com","on.soundcloud.com"}
         fmt = "b[ext=mp4][height<=720]/b[ext=mp4]" if not ffmpeg else "b[ext=mp4][height<=720]/bv*[ext=mp4][height<=720]+ba[ext=m4a]/b[ext=mp4]"
-        proc = await asyncio.create_subprocess_exec(sys.executable, "-m", "yt_dlp", "--concurrent-fragments", "3", "--no-playlist", "--no-cache-dir", "--no-progress", "--max-filesize", "45M", "--socket-timeout", "20", "--retries", "1", "-f", fmt, "--merge-output-format", "mp4", "-o", str(Path(tmp)/"video.%(ext)s"), "--", url, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
+        options=["-f","bestaudio","-x","--audio-format","mp3","--audio-quality","192K"] if audio else ["-f",fmt,"--merge-output-format","mp4"]
+        proc = await asyncio.create_subprocess_exec(sys.executable, "-m", "yt_dlp", "--concurrent-fragments", "3", "--no-playlist", "--no-cache-dir", "--no-progress", "--max-filesize", "45M", "--socket-timeout", "20", "--retries", "1", *options, "-o", str(Path(tmp)/"video.%(ext)s"), "--", url, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
         try:
             await asyncio.wait_for(proc.wait(), 120)
         finally:
             if proc.returncode is None:
                 proc.kill()
                 await proc.wait()
-        path = Path(tmp)/"video.mp4"
+        path = Path(tmp)/("video.mp3" if audio else "video.mp4")
         if proc.returncode or not path.is_file() or path.stat().st_size > 49_000_000:
             raise RuntimeError("download failed or exceeds limit")
         downloaded=time.monotonic()
@@ -74,8 +76,8 @@ async def process(session, url, chat, reply_id=None, thread_id=None):
             data.add_field("chat_id", str(chat))
             if thread_id: data.add_field("message_thread_id",str(thread_id))
             if reply_id: data.add_field("reply_parameters",json.dumps({"message_id":reply_id,"allow_sending_without_reply":True}))
-            data.add_field("video", f, filename="video.mp4", content_type="video/mp4")
-            async with session.post(f"https://api.telegram.org/bot{TOKEN}/sendVideo", data=data) as r:
+            data.add_field("audio" if audio else "video", f, filename="audio.mp3" if audio else "video.mp4", content_type="audio/mpeg" if audio else "video/mp4")
+            async with session.post(f"https://api.telegram.org/bot{TOKEN}/"+("sendAudio" if audio else "sendVideo"), data=data) as r:
                 result=await r.json()
                 if r.status != 200 or not result.get("ok"):
                     raise RuntimeError("Telegram upload failed")
@@ -93,7 +95,7 @@ async def handle_job(session, job):
         except Exception as e:
             log.warning("Video processing failed: %s", type(e).__name__)
             try:
-                await notify(session, chat, "⚠️ Не вдалося завантажити відео.", reply_id, job.get("thread_id"))
+                await notify(session, chat, "⚠️ Не вдалося завантажити медіа. Можливо, публікація недоступна або файл завеликий.", reply_id, job.get("thread_id"))
             except Exception:
                 pass
         if job.get("status_id"):
