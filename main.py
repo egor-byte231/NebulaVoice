@@ -1614,7 +1614,7 @@ async def text_message(m:Message):
     if group and not group_enabled(chat): return
     
     raw=m.text or ''
-    if not group and m.from_user.id==OWNER and os.getenv('WORKER_SECRET'):
+    if not group and m.from_user.id==OWNER:
         from urllib.parse import urlsplit
         try:
             p=urlsplit(raw.strip())
@@ -1622,12 +1622,18 @@ async def text_message(m:Message):
         except ValueError:
             video_link=False
         if video_link:
+            logging.info('Video: owner link recognized, host=%s',p.hostname)
+            if not os.getenv('WORKER_SECRET','').strip():
+                logging.warning('Video: WORKER_SECRET missing')
+                return await m.reply('⚠️ NebulaVideo: відсутня конфігурація Cloudflare.')
             try:
                 async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as video_session:
                     async with video_session.post('https://nebulavoice-ai.maxvyn09.workers.dev/video/enqueue',headers={'Authorization':'Bearer '+os.environ['WORKER_SECRET']},json={'url':raw.strip(),'user_id':OWNER,'chat_id':chat},allow_redirects=False) as response:
                         accepted=response.status==202
+                        logging.info('Video: Cloudflare enqueue HTTP %s',response.status)
                 return await m.reply('🎬 Відео додано до черги.' if accepted else '⚠️ NebulaVideo тимчасово недоступний або черга заповнена.')
-            except Exception:
+            except Exception as e:
+                logging.warning('Video: enqueue failed: %s',type(e).__name__)
                 return await m.reply('⚠️ NebulaVideo тимчасово недоступний.')
     if raw.startswith('/'): return
     reply=m.reply_to_message
