@@ -1143,21 +1143,30 @@ async def azure_video(m,status,url):
     async with azure_video_slots:
         try:
             with tempfile.TemporaryDirectory() as folder:
-                downloader=str(Path.home()/ 'NebulaVoice' / '.audiomack-venv' / 'bin' / 'yt-dlp') if music and (urlsplit(url).hostname or '').lower() in ('audiomack.com','www.audiomack.com') and (Path.home()/ 'NebulaVoice' / '.audiomack-venv' / 'bin' / 'yt-dlp').is_file() else 'yt-dlp'
+                downloader=str(Path.home()/ 'NebulaVoice' / '.audiomack-venv' / 'bin' / 'yt-dlp') if music and (urlsplit(url).hostname or '').lower() in ('audiomack.com','www.audiomack.com') and (Path.home()/ 'NebulaVoice' / '.audiomack-venv' / 'bin' / 'yt-dlp').is_file() else str(Path(__file__).resolve().parent / '.venv' / 'bin' / 'yt-dlp') if (Path(__file__).resolve().parent / '.venv' / 'bin' / 'yt-dlp').is_file() else 'yt-dlp'
                 args=[downloader,'--ignore-config','--no-playlist','--max-filesize','25M','--socket-timeout','15','--match-filter','duration <= 300']
                 if music:
                     args+=['-f','bestaudio/best','-x','--audio-format','mp3']
                 else:
                     args+=['-f','bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/bestvideo+bestaudio/best','--merge-output-format','mp4','--remux-video','mp4']
                 args+=['-o',str(Path(folder)/'media.%(ext)s'),'--',url]
-                proc=await asyncio.create_subprocess_exec(*args,stdout=asyncio.subprocess.DEVNULL,stderr=asyncio.subprocess.PIPE)
-                try:
-                    _,err=await asyncio.wait_for(proc.communicate(),180)
-                    if proc.returncode: raise RuntimeError(diag_safe(err.decode(errors='replace')))
-                finally:
-                    if proc.returncode is None:
-                        proc.kill()
-                        await proc.wait()
+                for attempt in range(3):
+                    try:
+                        proc=await asyncio.create_subprocess_exec(*args,stdout=asyncio.subprocess.DEVNULL,stderr=asyncio.subprocess.PIPE)
+                        try:
+                            _,err=await asyncio.wait_for(proc.communicate(),180)
+                            if proc.returncode: raise RuntimeError(diag_safe(err.decode(errors='replace')))
+                        finally:
+                            if proc.returncode is None:
+                                proc.kill()
+                                await proc.wait()
+                        break
+                    except (RuntimeError, asyncio.TimeoutError) as exc:
+                        logging.warning('Media download attempt %s/3: %s',attempt+1,diag_safe(exc))
+                        if attempt==2: raise
+                        for partial in Path(folder).glob('media.*'):
+                            if partial.is_file(): partial.unlink()
+                        await asyncio.sleep(2**attempt)
                 files=list(Path(folder).glob('media.mp3' if music else 'media.mp4'))
                 if len(files)!=1 or files[0].stat().st_size>25*1024*1024: raise ValueError('Media size or format')
                 if music:
