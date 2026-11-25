@@ -473,6 +473,7 @@ async def transcribe(k,path):
     try:
         j=await cloud_audio(k,path)
         if j is None: raise RuntimeError('Cloudflare audio unavailable')
+        a['language']=j.get('language') or j.get('detected_language')
         return validate_audio_result(j)
     except Exception as e:
         a['error']=type(e).__name__+': '+diag_safe(e); raise
@@ -950,13 +951,14 @@ async def process_voice(m,status):
             d['selected']=selected[-1] if selected else None
             d['platform']='Cloudflare' if selected else None
             d['errors']=[where+': '+type(error).__name__+': '+diag_safe(error) for where,error in failures]
-            d['state']='результат обрано' if selected else 'не завершено'; diag_save(d)
+            d['state']='результат обрано' if selected else d.get('outcome','не завершено'); diag_save(d)
         audio_diag.reset(token)
         if failures:
             chat=m.chat
             link=(f'https://t.me/{chat.username}/{m.message_id}' if chat.username else f'https://t.me/c/{str(chat.id)[4:]}/{m.message_id}' if str(chat.id).startswith('-100') else None)
             source=link or f'Чат {chat.id}, повідомлення {m.message_id} (пряме посилання недоступне)'
             for where,error in failures:
+                if isinstance(error,RejectedTranscript): continue
                 await notify_error(where,error,source=source,replacement=selected[-1] if selected else 'Не визначено / транскрипцію не завершено')
 
 async def process_voice_inner(m,status,failures,selected):
@@ -1014,6 +1016,13 @@ async def process_voice_inner(m,status,failures,selected):
         candidate=None
         tried_models=set()
         rejected=set()
+        empty_count=0
+        uncertain_count=0
+        warning='⚠️ Можливо, в аудіо багато голосів або фонового шуму. Жодна з перевірених моделей не змогла надійно розпізнати мовлення.'
+        async def finish_unclear(message):
+            diag=audio_diag.get()
+            if diag: diag['outcome']=message; diag_save(diag)
+            return await deliver_transcript(m,status,message)
         while time.time()<deadline and enabled():
             primary=next((k for k in order if blocked(k)<=time.time() and k not in rejected),None)
             overflow=primary is not None and audio_profile_active.get(primary,0)>=4
@@ -1032,6 +1041,15 @@ async def process_voice_inner(m,status,failures,selected):
                 except RejectedTranscript as e:
                     rejected.add(k)
                     failures.append((NAMES[k],e))
+                    if str(e)=='Порожня транскрипція': empty_count+=1
+                    else: uncertain_count+=1
+                    if empty_count>=2 and not candidate and not uncertain_count:
+                        return await finish_unclear('Мовлення не виявлено')
+                    if empty_count+uncertain_count>=2:
+                        if candidate:
+                            selected.append(NAMES[candidate[2]])
+                            return await deliver_transcript(m,status,candidate[0]+'\n\n'+warning)
+                        return await finish_unclear(warning)
                     continue
                 except RateLimited as e:
                     block(k,e.seconds)
@@ -1060,6 +1078,7 @@ async def process_voice_inner(m,status,failures,selected):
                         result=old_text
                         k=old_k
                     selected.append(NAMES[k])
+                    if quality[0] and old_quality[0]: result+='\n\n'+warning
                     return await deliver_transcript(m,status,result)
                 if quality[0]:
                     candidate=(result,quality,k)
@@ -1068,10 +1087,9 @@ async def process_voice_inner(m,status,failures,selected):
                 return await deliver_transcript(m,status,result)
             if candidate:
                 selected.append(NAMES[candidate[2]])
-                return await deliver_transcript(m,status,candidate[0])
+                return await deliver_transcript(m,status,candidate[0]+'\n\n'+warning)
             if rejected:
-                await notify_error('Жодна доступна модель не повернула прийнятну транскрипцію',RejectedTranscript())
-                return await status.edit_text('Не вдалося розпізнати аудіо. Спробуй надіслати його ще раз.')
+                return await finish_unclear('Мовлення не виявлено' if empty_count and not uncertain_count else warning)
             if not active_providers and all(blocked('quota:'+k)>time.time() for k in ORDER):
                 await status.edit_text('⏳ Усі моделі тимчасово досягли ліміту. Очікуємо відновлення...')
                 notified=True
