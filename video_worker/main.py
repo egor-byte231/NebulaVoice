@@ -1,9 +1,10 @@
-"""Owner-only video worker. No Telegram update polling."""
+"""Public video worker. No Telegram update polling."""
 import asyncio
 import logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
 log = logging.getLogger('NebulaVideo')
 import os
+import json
 import re
 import shutil
 import tempfile
@@ -33,11 +34,12 @@ async def request_job(session, action, data):
         r.raise_for_status()
         return await r.json()
 
-async def notify(session, chat, text):
-    async with session.post(f"https://api.telegram.org/bot{TOKEN}/sendMessage", json={"chat_id": chat, "text": text}) as r:
+async def notify(session, chat, text, reply_id=None):
+    async with session.post(f"https://api.telegram.org/bot{TOKEN}/sendMessage", json={"chat_id": chat, "text": text, **({"reply_parameters":{"message_id":reply_id,"allow_sending_without_reply":True}} if reply_id else {})}) as r:
+        r.raise_for_status()
         await r.read()
 
-async def process(session, url, chat):
+async def process(session, url, chat, reply_id=None):
     with tempfile.TemporaryDirectory(prefix="video-", dir=os.getcwd()) as tmp:
         ffmpeg = shutil.which("ffmpeg")
         fmt = "b[ext=mp4][height<=720]/b[ext=mp4]" if not ffmpeg else "bv*[ext=mp4][height<=720]+ba[ext=m4a]/b[ext=mp4][height<=720]/b[ext=mp4]"
@@ -54,6 +56,7 @@ async def process(session, url, chat):
         with path.open("rb") as f:
             data = FormData()
             data.add_field("chat_id", str(chat))
+            if reply_id: data.add_field("reply_parameters",json.dumps({"message_id":reply_id,"allow_sending_without_reply":True}))
             data.add_field("video", f, filename="video.mp4", content_type="video/mp4")
             async with session.post(f"https://api.telegram.org/bot{TOKEN}/sendVideo", data=data) as r:
                 if r.status != 200:
@@ -67,16 +70,23 @@ async def worker(session):
                 await asyncio.sleep(5)
                 continue
             log.info("Video job claimed: %s", job.get("id"))
-            if job.get("user_id") == OWNER and job.get("chat_id") == OWNER and valid(job["url"]):
+            if type(job.get("user_id")) is int and job.get("user_id") == job.get("chat_id") and valid(job["url"]):
+                chat=job["chat_id"]
+                reply_id=job.get("reply_id")
                 try:
-                    await process(session, job["url"], OWNER)
+                    await process(session, job["url"], chat, reply_id)
                     log.info("Video uploaded: %s", job["id"])
                 except Exception as e:
                     log.warning("Video processing failed: %s", type(e).__name__)
                     try:
-                        await notify(session, OWNER, "⚠️ Не вдалося завантажити відео.")
+                        await notify(session, chat, "⚠️ Не вдалося завантажити відео.", reply_id)
                     except Exception:
                         pass
+                if job.get("status_id"):
+                    try:
+                        async with session.post(f"https://api.telegram.org/bot{TOKEN}/deleteMessage",json={"chat_id":chat,"message_id":job["status_id"]}) as response:
+                            if response.status!=200: log.warning("Video status deletion HTTP %s",response.status)
+                    except Exception as e: log.warning("Video status deletion failed: %s",type(e).__name__)
             for attempt in range(5):
                 try:
                     await request_job(session, "done", {"id":job["id"],"token":job["token"]})
