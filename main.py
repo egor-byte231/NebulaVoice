@@ -12,6 +12,9 @@ NAMES={k:f"{ {'groq':'Groq','cf':'Cloudflare','gemini':'Gemini','ovh':'OVHcloud 
 OWNER=int(os.environ['OWNER_ID']); bot=Bot(os.environ['BOT_TOKEN']); dp=Dispatcher(); lock=asyncio.Lock()
 ORDER=['groq1','groq2','groq1t','groq2t','cf1','cf2','ovh']
 db=sqlite3.connect('state.db')
+db.execute('CREATE TABLE IF NOT EXISTS cloud_completed (id TEXT PRIMARY KEY)')
+db.execute('CREATE TABLE IF NOT EXISTS cloud_pending (id TEXT PRIMARY KEY,chat INTEGER,day TEXT,budget INTEGER)')
+db.commit()
 db.execute('CREATE TABLE IF NOT EXISTS cooldowns (provider TEXT PRIMARY KEY, until REAL)')
 db.execute('CREATE TABLE IF NOT EXISTS control (id INTEGER PRIMARY KEY, enabled INTEGER)')
 db.execute('INSERT OR IGNORE INTO control VALUES (1,1)')
