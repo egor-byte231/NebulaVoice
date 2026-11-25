@@ -1167,7 +1167,7 @@ async def azure_video(m,status,url):
                 except Exception: pass
         except Exception as e:
             logging.warning('Azure media failed: %s',diag_safe(e))
-            return await status.edit_text('⚠️ Не вдалося завантажити медіа на Azure.')
+            return await status.edit_text('⚠️ Не вдалося завантажити медіа.')
 
 async def process_voice_inner(m,status,failures,selected,local_media=None,local_duration=None):
     global ovh_cooldown_until
@@ -1892,7 +1892,7 @@ async def text_message(m:Message):
     video_link=media_url is not None
     if video_link:
         logging.info('Video: link recognized, host=%s, group=%s',p.hostname,group)
-        status=await m.reply('🎬 Відео додано до черги Azure.')
+        status=await m.reply('⏳ Завантажую медіа…')
         return await azure_video(m,status,media_url)
     if group and not group_enabled(chat): return
     if raw.startswith('/'): return
