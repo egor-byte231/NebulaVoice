@@ -670,7 +670,7 @@ async def safe_audio_load(m,config):
 async def run_audio_load_inner(m,config,progress):
     item=m.voice or m.video_note
     routes=config['routes'] if config['mode']=='selected' else list(ORDER)
-    if (item.duration.total_seconds() if hasattr(item.duration,'total_seconds') else item.duration)>15: routes=[k for k in routes if k!='ovh']
+    if (item.duration.total_seconds() if hasattr(item.duration,'total_seconds') else item.duration)/0.65>15: routes=[k for k in routes if k!='ovh']
     if not routes: return await progress.edit_text('Немає сумісних моделей.',reply_markup=None)
     if (item.file_size or 0)>10*1024*1024: return await m.reply('Файл завеликий.')
     start=time.monotonic()
@@ -683,7 +683,7 @@ async def run_audio_load_inner(m,config,progress):
         src=Path(d)/'source'
         p=Path(d)/'normalized.ogg'
         await asyncio.wait_for(bot.download(item,destination=src),30)
-        proc=await asyncio.create_subprocess_exec('ffmpeg','-nostdin','-loglevel','error','-i',str(src),'-vn','-af','atempo=0.80,acompressor=threshold=0.125:ratio=2:attack=15:release=150,volume=5dB,alimiter=limit=0.95:level=0:latency=1','-ac','1','-ar','48000','-c:a','libopus','-b:a','96k',str(p),stderr=asyncio.subprocess.DEVNULL)
+        proc=await asyncio.create_subprocess_exec('ffmpeg','-nostdin','-loglevel','error','-i',str(src),'-vn','-af','atempo=0.65,acompressor=threshold=0.125:ratio=2:attack=15:release=150,volume=5dB,alimiter=limit=0.95:level=0:latency=1','-ac','1','-ar','48000','-c:a','libopus','-b:a','96k',str(p),stderr=asyncio.subprocess.DEVNULL)
         try:
             code=await asyncio.wait_for(proc.wait(),30)
         except (asyncio.TimeoutError,asyncio.CancelledError):
@@ -1004,7 +1004,7 @@ async def process_voice_inner(m,status,failures,selected):
         audio_seconds=item.duration
         if m.video_note or m.voice:
             out=Path(d)/'normalized.ogg'
-            proc=await asyncio.create_subprocess_exec('ffmpeg','-nostdin','-loglevel','error','-i',str(p),'-vn','-af','atempo=0.80,acompressor=threshold=0.125:ratio=2:attack=15:release=150,volume=5dB,alimiter=limit=0.95:level=0:latency=1','-ac','1','-ar','48000','-c:a','libopus','-b:a','96k',str(out),stderr=asyncio.subprocess.DEVNULL)
+            proc=await asyncio.create_subprocess_exec('ffmpeg','-nostdin','-loglevel','error','-i',str(p),'-vn','-af','atempo=0.65,acompressor=threshold=0.125:ratio=2:attack=15:release=150,volume=5dB,alimiter=limit=0.95:level=0:latency=1','-ac','1','-ar','48000','-c:a','libopus','-b:a','96k',str(out),stderr=asyncio.subprocess.DEVNULL)
             try:
                 code=await asyncio.wait_for(proc.wait(),30)
             finally:
@@ -1014,7 +1014,7 @@ async def process_voice_inner(m,status,failures,selected):
                 if m.video_note: raise ValueError('Не вдалося витягти аудіо')
             else:
                 p=out
-                audio_seconds=item.duration/0.80
+                audio_seconds=item.duration/0.65
         forced=test_route('audio',m)
         if forced:
             if forced=='ovh' and (time.monotonic()<ovh_cooldown_until or audio_profile_active.get('ovh',0)): return await status.edit_text('OVH: очікування 30 секунд або активний запит')
