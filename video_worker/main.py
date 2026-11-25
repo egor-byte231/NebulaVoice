@@ -17,6 +17,9 @@ def valid(url):
     except ValueError:
         return False
 
+from dotenv import load_dotenv
+load_dotenv(Path(__file__).resolve().parent.parent / ".env")
+
 OWNER = int(os.environ["OWNER_ID"])
 TOKEN = os.environ["BOT_TOKEN"]
 SECRET = os.environ["VIDEO_WORKER_SECRET"]
