@@ -6,8 +6,6 @@ export default {
   if(req.method!=="POST"||!env.WORKER_SECRET||req.headers.get("Authorization")!=="Bearer "+env.WORKER_SECRET) return new Response("Unauthorized",{status:401});
   if(!env.BOT_TOKEN) return new Response("Not configured",{status:503});
   const j=await req.json();
-  const videoPath=new URL(req.url).pathname;
-  if(["/video/enqueue","/video/claim","/video/done"].includes(videoPath)) return env.DISPATCHER.get(env.DISPATCHER.idFromName("video")).fetch("https://dispatcher"+videoPath,{method:"POST",body:JSON.stringify(j)});
   if(new URL(req.url).pathname==="/audio/transcribe") return env.DISPATCHER.get(env.DISPATCHER.idFromName("audio")).fetch("https://dispatcher/audio",{method:"POST",body:JSON.stringify(j)});
 
   if(new URL(req.url).pathname==="/slots"){
@@ -70,29 +68,6 @@ export class Dispatcher {
  }
  async fetch(req){
   const path=new URL(req.url).pathname;
-  if(path.startsWith("/video/")){
-   const j=await req.json();
-   this.sql.exec("CREATE TABLE IF NOT EXISTS video_jobs (id TEXT PRIMARY KEY, payload TEXT NOT NULL, queued INTEGER NOT NULL, lease INTEGER NOT NULL DEFAULT 0, token TEXT)");
-   const now=Date.now();
-   return this.ctx.storage.transactionSync(()=>{
-    if(path==="/video/enqueue"){
-     let u;try{u=new URL(j.url);}catch{return new Response("Invalid",{status:400});}
-     if(u.protocol!=="https:"||!["youtube.com","www.youtube.com","m.youtube.com","youtu.be","tiktok.com","www.tiktok.com","vm.tiktok.com","vt.tiktok.com","instagram.com","www.instagram.com"].includes(u.hostname)||u.username||u.password||u.port||j.url.length>2048||!Number.isSafeInteger(j.user_id)||j.user_id!==j.chat_id)return new Response("Invalid",{status:400});
-     if(this.sql.exec("SELECT COUNT(*) AS n FROM video_jobs").one().n>=20)return new Response("Busy",{status:429});
-     this.sql.exec("INSERT INTO video_jobs(id,payload,queued) VALUES (?,?,?)",crypto.randomUUID(),JSON.stringify(j),now);
-     return Response.json({accepted:true},{status:202});
-    }
-    if(path==="/video/claim"){
-     if(this.sql.exec("SELECT COUNT(*) AS n FROM video_jobs WHERE lease>?",now).one().n>=5)return Response.json({job:null});
-     const row=this.sql.exec("SELECT id,payload FROM video_jobs WHERE lease<=? ORDER BY queued LIMIT 1",now).toArray()[0];
-     if(!row)return Response.json({job:null});
-     const token=crypto.randomUUID();this.sql.exec("UPDATE video_jobs SET lease=?,token=? WHERE id=?",now+300000,token,row.id);
-     return Response.json({job:{...JSON.parse(row.payload),id:row.id,token}});
-    }
-    if(path==="/video/done"){this.sql.exec("DELETE FROM video_jobs WHERE id=? AND token=?",String(j.id),String(j.token));return Response.json({ok:true});}
-    return new Response("Not found",{status:404});
-   });
-  }
   if(path==="/audio"){
    const j=await req.json();
    const slots=Math.max(1,Math.min(40,Number(j.slots)||20));
