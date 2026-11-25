@@ -1932,6 +1932,8 @@ async def d1_initialize(session):
                 if source.execute('PRAGMA integrity_check').fetchone()[0]!='ok': raise RuntimeError('D1 snapshot corrupt')
                 source.backup(db)
             finally: source.close()
+        # Restoring a legacy snapshot can remove Azure-only schema.
+        RuntimeSettings(db)
         db.execute('CREATE TABLE IF NOT EXISTS overview_users (day TEXT, scope TEXT, user_id INTEGER, PRIMARY KEY(day,scope,user_id))')
         db.commit()
     await d1_snapshot(session)
