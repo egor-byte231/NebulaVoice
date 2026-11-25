@@ -2072,6 +2072,20 @@ def daily_report_body(day,values):
             f'🪙 Текстові токени: <b>≈ {n("text_tokens")}</b>\n\n'
             'Дані з початку нового обліку; токени включають оцінки та тести.')
 
+@dp.message(Command('daily_recover'),F.chat.type=='private',F.from_user.id==OWNER)
+async def daily_recover(m:Message):
+    day='2026-11-25'
+    v,c,q=db.execute('SELECT COALESCE(SUM(voices),0),COALESCE(SUM(circles),0),COALESCE(SUM(requests),0) FROM overview_daily WHERE day=?',(day,)).fetchone()
+    seconds=db.execute('SELECT COALESCE(SUM(seconds),0) FROM usage_daily WHERE day=?',(day,)).fetchone()[0]
+    tokens=db.execute('SELECT COALESCE(SUM(tokens),0) FROM text_usage WHERE day=?',(day,)).fetchone()[0]
+    body=daily_report_body(day,dict(voices=v,circles=c,requests=q,audio_seconds=seconds,text_tokens=tokens)).replace('00:00–23:00 за Києвом','Архівний облік за UTC (не точний київський період)').replace('Дані з початку нового обліку;','Відновлений звіт зі старих таблиць;')
+    report_id=day+'-recovered'
+    await d1_query(history_session,'CREATE TABLE IF NOT EXISTS daily_reports (day TEXT PRIMARY KEY, body TEXT NOT NULL)')
+    await d1_query(history_session,'CREATE TABLE IF NOT EXISTS daily_publications (day TEXT,chat INTEGER,PRIMARY KEY(day,chat))')
+    await d1_query(history_session,'INSERT OR IGNORE INTO daily_reports VALUES (?,?)',(report_id,body))
+    rows=await d1_query(history_session,'SELECT body FROM daily_reports WHERE day=?',(report_id,))
+    await m.answer(rows[0]['body'],parse_mode='HTML',reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='📢 Опублікувати в групах',callback_data='daily_publish:'+report_id)]]))
+
 @dp.message(Command('daily_now'),F.chat.type=='private',F.from_user.id==OWNER)
 async def daily_now(m:Message):
     now=daily_kyiv_now()
@@ -2106,6 +2120,20 @@ async def daily_report_monitor():
 
 daily_publish_lock=asyncio.Lock()
 @dp.callback_query(F.data.startswith('daily_publish:'),F.from_user.id==OWNER)
+async def daily_preview(c:CallbackQuery):
+    await c.answer()
+    day=c.data.split(':',1)[1]
+    rows=await d1_query(history_session,'SELECT body FROM daily_reports WHERE day=?',(day,))
+    if not rows: return await bot.send_message(OWNER,'Звіт не знайдено.')
+    await bot.send_message(OWNER,'👀 Попередній перегляд публікації:')
+    await bot.send_message(OWNER,rows[0]['body'],parse_mode='HTML',reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='✅ Підтвердити',callback_data='daily_confirm:'+day)],[InlineKeyboardButton(text='❌ Скасувати',callback_data='daily_cancel')]]))
+
+@dp.callback_query(F.data=='daily_cancel',F.from_user.id==OWNER)
+async def daily_cancel(c:CallbackQuery):
+    await c.message.edit_reply_markup(reply_markup=None)
+    await c.answer('Публікацію скасовано')
+
+@dp.callback_query(F.data.startswith('daily_confirm:'),F.from_user.id==OWNER)
 async def daily_publish(c:CallbackQuery):
     await c.answer('Публікую статистику…')
     async with daily_publish_lock:
