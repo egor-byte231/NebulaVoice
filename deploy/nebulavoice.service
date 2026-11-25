@@ -1,0 +1,21 @@
+[Unit]
+Description=NebulaVoice Azure primary bot
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=Guestmaxtop
+WorkingDirectory=/home/Guestmaxtop/NebulaVoice
+EnvironmentFile=/home/Guestmaxtop/NebulaVoice/.env
+Environment=NEBULA_RUNTIME=azure
+Environment=CLOUD_TEXT_ENABLED=0
+ExecStart=/home/Guestmaxtop/NebulaVoice/.venv/bin/python /home/Guestmaxtop/NebulaVoice/main.py
+Restart=always
+RestartSec=5
+TimeoutStopSec=90
+UMask=0077
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target
