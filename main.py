@@ -1611,6 +1611,21 @@ async def text_message(m:Message):
     if group and not group_enabled(chat): return
     
     raw=m.text or ''
+    if not group and m.from_user.id==OWNER and os.getenv('VIDEO_WORKER_URL') and os.getenv('VIDEO_WORKER_SECRET'):
+        from urllib.parse import urlsplit
+        try:
+            p=urlsplit(raw.strip())
+            video_link=p.scheme=='https' and p.hostname in {'youtube.com','www.youtube.com','m.youtube.com','youtu.be','tiktok.com','www.tiktok.com','vm.tiktok.com','vt.tiktok.com','instagram.com','www.instagram.com'} and not p.username and not p.password and p.port in (None,443) and not any(c.isspace() for c in raw.strip())
+        except ValueError:
+            video_link=False
+        if video_link:
+            try:
+                async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as video_session:
+                    async with video_session.post(os.environ['VIDEO_WORKER_URL'].rstrip('/')+'/jobs',headers={'Authorization':'Bearer '+os.environ['VIDEO_WORKER_SECRET']},json={'url':raw.strip(),'user_id':OWNER,'chat_id':chat},allow_redirects=False) as response:
+                        accepted=response.status==202
+                return await m.reply('🎬 Відео додано до черги.' if accepted else '⚠️ NebulaVideo тимчасово недоступний або черга заповнена.')
+            except Exception:
+                return await m.reply('⚠️ NebulaVideo тимчасово недоступний.')
     if raw.startswith('/'): return
     reply=m.reply_to_message
     replied=bool(reply and reply.from_user and reply.from_user.id==bot.id)
