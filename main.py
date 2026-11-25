@@ -807,6 +807,22 @@ def audio_settings():
     db.commit()
     return db.execute('SELECT primary_host,backup_host,cloud_slots,local_slots FROM audio_settings WHERE id=1').fetchone()
 
+def azure_resource_stats():
+    try:
+        import shutil
+        from pathlib import Path
+        mem={}
+        for line in Path('/proc/meminfo').read_text().splitlines():
+            key,value=line.split(':',1)
+            mem[key]=int(value.split()[0])
+        total=mem['MemTotal']
+        used=total-mem['MemAvailable']
+        disk=shutil.disk_usage('.')
+        load=os.getloadavg()[0]
+        return f'RAM: {used/1048576:.2f}/{total/1048576:.2f} GiB\nДиск: {disk.used/2**30:.1f}/{disk.total/2**30:.1f} GiB\nLoad average (1 хв): {load:.2f}'
+    except (OSError,ValueError,KeyError):
+        return 'Метрики системи недоступні'
+
 async def azure_slots_action(c, kind):
     parts=c.data.split(':')
     if len(parts)==3 and parts[2].isdigit():
@@ -825,6 +841,7 @@ async def azure_slots_action(c, kind):
     active=azure_text_gate.active if kind=='text' else len(active_jobs)
     waiting_count=azure_text_gate.waiting if kind=='text' else waiting.qsize()
     body=f'Azure VPS — {kind}\nСлоти: {current}/{maximum}\nАктивні: {active}\nЧерга: {waiting_count}'
+    body+='\n\n'+azure_resource_stats()
     try: await c.message.edit_text(body,reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
     except Exception as e:
         if 'message is not modified' not in str(e).lower(): raise
