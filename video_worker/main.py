@@ -1,5 +1,7 @@
 """Public video worker. No Telegram update polling."""
 import asyncio
+import time
+import sys
 import logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
 log = logging.getLogger('NebulaVideo')
@@ -10,7 +12,7 @@ import shutil
 import tempfile
 from pathlib import Path
 from urllib.parse import urlsplit
-from aiohttp import web, ClientSession, ClientTimeout, FormData
+from aiohttp import web, ClientSession, ClientTimeout, FormData, TCPConnector
 
 HOSTS = {"youtube.com", "www.youtube.com", "m.youtube.com", "youtu.be", "tiktok.com", "www.tiktok.com", "vm.tiktok.com", "vt.tiktok.com", "instagram.com", "www.instagram.com"}
 def valid(url):
@@ -53,8 +55,9 @@ async def process(session, url, chat, reply_id=None):
         raise RuntimeError("insufficient disk space")
     with tempfile.TemporaryDirectory(prefix="video-", dir=VIDEO_TMP) as tmp:
         ffmpeg = shutil.which("ffmpeg")
-        fmt = "b[ext=mp4][height<=720]/b[ext=mp4]" if not ffmpeg else "bv*[ext=mp4][height<=720]+ba[ext=m4a]/b[ext=mp4][height<=720]/b[ext=mp4]"
-        proc = await asyncio.create_subprocess_exec("python", "-m", "yt_dlp", "--no-playlist", "--no-cache-dir", "--no-progress", "--max-filesize", "45M", "--socket-timeout", "20", "--retries", "1", "-f", fmt, "--merge-output-format", "mp4", "-o", str(Path(tmp)/"video.%(ext)s"), "--", url, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
+        started=time.monotonic()
+        fmt = "b[ext=mp4][height<=720]/b[ext=mp4]" if not ffmpeg else "b[ext=mp4][height<=720]/bv*[ext=mp4][height<=720]+ba[ext=m4a]/b[ext=mp4]"
+        proc = await asyncio.create_subprocess_exec(sys.executable, "-m", "yt_dlp", "--concurrent-fragments", "3", "--no-playlist", "--no-cache-dir", "--no-progress", "--max-filesize", "45M", "--socket-timeout", "20", "--retries", "1", "-f", fmt, "--merge-output-format", "mp4", "-o", str(Path(tmp)/"video.%(ext)s"), "--", url, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
         try:
             await asyncio.wait_for(proc.wait(), 120)
         finally:
@@ -64,59 +67,79 @@ async def process(session, url, chat, reply_id=None):
         path = Path(tmp)/"video.mp4"
         if proc.returncode or not path.is_file() or path.stat().st_size > 49_000_000:
             raise RuntimeError("download failed or exceeds limit")
+        downloaded=time.monotonic()
+        log.info("Video download+merge %.2fs; size %.2f MB",downloaded-started,path.stat().st_size/1048576)
         with path.open("rb") as f:
             data = FormData()
             data.add_field("chat_id", str(chat))
             if reply_id: data.add_field("reply_parameters",json.dumps({"message_id":reply_id,"allow_sending_without_reply":True}))
             data.add_field("video", f, filename="video.mp4", content_type="video/mp4")
             async with session.post(f"https://api.telegram.org/bot{TOKEN}/sendVideo", data=data) as r:
-                if r.status != 200:
+                result=await r.json()
+                if r.status != 200 or not result.get("ok"):
                     raise RuntimeError("Telegram upload failed")
+        log.info("Video upload %.2fs; processing total %.2fs",time.monotonic()-downloaded,time.monotonic()-started)
 
-async def worker(session):
-    while True:
+async def handle_job(session, job):
+    started=time.monotonic()
+    log.info("Video job claimed: %s", job.get("id"))
+    if type(job.get("user_id")) is int and job.get("user_id") == job.get("chat_id") and valid(job["url"]):
+        chat=job["chat_id"]
+        reply_id=job.get("reply_id")
         try:
-            job = (await request_job(session, "claim", {})).get("job")
-            if not job:
-                await asyncio.sleep(5)
-                continue
-            log.info("Video job claimed: %s", job.get("id"))
-            if type(job.get("user_id")) is int and job.get("user_id") == job.get("chat_id") and valid(job["url"]):
-                chat=job["chat_id"]
-                reply_id=job.get("reply_id")
-                try:
-                    await process(session, job["url"], chat, reply_id)
-                    log.info("Video uploaded: %s", job["id"])
-                except Exception as e:
-                    log.warning("Video processing failed: %s", type(e).__name__)
-                    try:
-                        await notify(session, chat, "⚠️ Не вдалося завантажити відео.", reply_id)
-                    except Exception:
-                        pass
-                if job.get("status_id"):
-                    try:
-                        async with session.post(f"https://api.telegram.org/bot{TOKEN}/deleteMessage",json={"chat_id":chat,"message_id":job["status_id"]}) as response:
-                            if response.status!=200: log.warning("Video status deletion HTTP %s",response.status)
-                    except Exception as e: log.warning("Video status deletion failed: %s",type(e).__name__)
-            for attempt in range(5):
-                try:
-                    await request_job(session, "done", {"id":job["id"],"token":job["token"]})
-                    break
-                except Exception:
-                    await asyncio.sleep(2**attempt)
+            await process(session, job["url"], chat, reply_id)
+            log.info("Video uploaded: %s", job["id"])
         except Exception as e:
-            log.warning("Video queue polling failed: %s", type(e).__name__)
-            await asyncio.sleep(30)
+            log.warning("Video processing failed: %s", type(e).__name__)
+            try:
+                await notify(session, chat, "⚠️ Не вдалося завантажити відео.", reply_id)
+            except Exception:
+                pass
+        if job.get("status_id"):
+            try:
+                async with session.post(f"https://api.telegram.org/bot{TOKEN}/deleteMessage",json={"chat_id":chat,"message_id":job["status_id"]}) as response:
+                    if response.status!=200: log.warning("Video status deletion HTTP %s",response.status)
+            except Exception as e: log.warning("Video status deletion failed: %s",type(e).__name__)
+    for attempt in range(5):
+        try:
+            await request_job(session, "done", {"id":job["id"],"token":job["token"]})
+            break
+        except Exception:
+            await asyncio.sleep(2**attempt)
+    log.info('Video job total %.2fs',time.monotonic()-started)
+
+async def dispatcher(session):
+    active=set()
+    idle=0
+    try:
+        while True:
+            active={t for t in active if not t.done()}
+            if len(active)>=5:
+                await asyncio.wait(active,return_when=asyncio.FIRST_COMPLETED)
+                continue
+            try:
+                job=(await request_job(session,"claim",{})).get("job")
+                if job:
+                    idle=0
+                    active.add(asyncio.create_task(handle_job(session,job)))
+                    continue
+                idle+=1
+                await asyncio.sleep(1 if idle<=10 else 3)
+            except Exception as e:
+                log.warning("Video queue polling failed: %s",type(e).__name__)
+                await asyncio.sleep(10)
+    finally:
+        for task in active: task.cancel()
+        await asyncio.gather(*active,return_exceptions=True)
 
 async def lifecycle(app):
     clean_video_tmp()
-    async with ClientSession(timeout=ClientTimeout(total=120)) as session:
-        log.info("NebulaVideo started: 5 polling slots, ffmpeg=%s", bool(shutil.which("ffmpeg")))
-        tasks = [asyncio.create_task(worker(session)) for _ in range(5)]
+    async with ClientSession(timeout=ClientTimeout(total=120),connector=TCPConnector(limit=20,ttl_dns_cache=300,keepalive_timeout=30)) as session:
+        log.info("NebulaVideo started: 1 dispatcher, 5 processing slots, ffmpeg=%s",bool(shutil.which("ffmpeg")))
+        task=asyncio.create_task(dispatcher(session))
         yield
-        for task in tasks:
-            task.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
+        task.cancel()
+        await asyncio.gather(task,return_exceptions=True)
 
 async def health(request):
     return web.json_response({"ready": True, "ffmpeg": bool(shutil.which("ffmpeg"))})
