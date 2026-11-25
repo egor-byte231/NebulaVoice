@@ -1,5 +1,8 @@
 """Owner-only video worker. No Telegram update polling."""
 import asyncio
+import logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
+log = logging.getLogger('NebulaVideo')
 import os
 import re
 import shutil
@@ -25,6 +28,8 @@ SECRET = os.environ["WORKER_SECRET"]
 BASE = "https://nebulavoice-ai.maxvyn09.workers.dev"
 async def request_job(session, action, data):
     async with session.post(BASE+"/video/"+action, json=data, headers={"Authorization":"Bearer "+SECRET}, timeout=ClientTimeout(total=15), allow_redirects=False) as r:
+        if r.status >= 400:
+            log.warning("Video queue %s: HTTP %s", action, r.status)
         r.raise_for_status()
         return await r.json()
 
@@ -61,10 +66,13 @@ async def worker(session):
             if not job:
                 await asyncio.sleep(5)
                 continue
+            log.info("Video job claimed: %s", job.get("id"))
             if job.get("user_id") == OWNER and job.get("chat_id") == OWNER and valid(job["url"]):
                 try:
                     await process(session, job["url"], OWNER)
-                except Exception:
+                    log.info("Video uploaded: %s", job["id"])
+                except Exception as e:
+                    log.warning("Video processing failed: %s", type(e).__name__)
                     try:
                         await notify(session, OWNER, "⚠️ Не вдалося завантажити відео.")
                     except Exception:
@@ -75,11 +83,13 @@ async def worker(session):
                     break
                 except Exception:
                     await asyncio.sleep(2**attempt)
-        except Exception:
-            await asyncio.sleep(10)
+        except Exception as e:
+            log.warning("Video queue polling failed: %s", type(e).__name__)
+            await asyncio.sleep(30)
 
 async def lifecycle(app):
     async with ClientSession(timeout=ClientTimeout(total=120)) as session:
+        log.info("NebulaVideo started: 5 polling slots, ffmpeg=%s", bool(shutil.which("ffmpeg")))
         tasks = [asyncio.create_task(worker(session)) for _ in range(5)]
         yield
         for task in tasks:
