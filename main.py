@@ -1243,12 +1243,14 @@ async def process_voice_inner(m,status,failures,selected,local_media=None,local_
         empty_count=0
         uncertain_count=0
         partial_text=''
-        warning='⚠️ Можливо, в аудіо багато голосів або фонового шуму. Жодна з перевірених моделей не змогла надійно розпізнати мовлення.'
+        warning='⚠️ В аудіо може бути багато шуму, тому ШІ може помилятися:'
         async def finish_unclear(message):
             diag=audio_diag.get()
             if diag: diag['outcome']=message; diag_save(diag)
             if message==warning and partial_text:
-                message=partial_text+'\n\n'+warning
+                message=warning+'\n\n'+partial_text
+            elif message==warning:
+                message='⚠️ Не вдалося отримати текст транскрипції. Спробуй надіслати аудіо повторно.'
             return await deliver_transcript(m,status,message)
         while time.time()<deadline and enabled():
             primary=next((k for k in order if blocked(k)<=time.time() and k not in rejected),None)
@@ -1275,10 +1277,10 @@ async def process_voice_inner(m,status,failures,selected,local_media=None,local_
                         if partial: partial_text=partial
                     if empty_count>=2 and not candidate and not uncertain_count:
                         return await finish_unclear('Мовлення не виявлено')
-                    if empty_count+uncertain_count>=2:
+                    if empty_count+uncertain_count>=2 and candidate:
                         if candidate:
                             selected.append(NAMES[candidate[2]])
-                            return await deliver_transcript(m,status,candidate[0]+'\n\n'+warning)
+                            return await deliver_transcript(m,status,warning+'\n\n'+candidate[0])
                         return await finish_unclear(warning)
                     continue
                 except RateLimited as e:
@@ -1308,7 +1310,7 @@ async def process_voice_inner(m,status,failures,selected,local_media=None,local_
                         result=old_text
                         k=old_k
                     selected.append(NAMES[k])
-                    if quality[0] and old_quality[0]: result+='\n\n'+warning
+                    if quality[0] and old_quality[0]: result=warning+'\n\n'+result
                     return await deliver_transcript(m,status,result)
                 if quality[0]:
                     candidate=(result,quality,k)
@@ -1317,7 +1319,7 @@ async def process_voice_inner(m,status,failures,selected,local_media=None,local_
                 return await deliver_transcript(m,status,result)
             if candidate:
                 selected.append(NAMES[candidate[2]])
-                return await deliver_transcript(m,status,candidate[0]+'\n\n'+warning)
+                return await deliver_transcript(m,status,warning+'\n\n'+candidate[0])
             if rejected:
                 return await finish_unclear('Мовлення не виявлено' if empty_count and not uncertain_count else warning)
             if not active_providers and all(blocked('quota:'+k)>time.time() for k in ORDER):
