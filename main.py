@@ -1909,4 +1909,29 @@ async def main():
         try:
             if cloud_ready: await d1_snapshot(session)
         finally: await session.close()
-if __name__=='__main__': asyncio.run(main())
+async def azure_entrypoint():
+    # Enable only after every backup host uses the same lease protocol.
+    if os.getenv('NEBULA_LEASE_ENABLED','0')!='1':
+        return await main()
+    from azure_failover import RuntimeLease
+    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session:
+        lease=RuntimeLease(d1_query,session,'azure')
+        await lease.initialize()
+        while not await lease.acquire():
+            await asyncio.sleep(5)
+        task=asyncio.create_task(main())
+        async def lost():
+            logging.error('Runtime lease lost; stopping Azure')
+            task.cancel()
+        monitor=asyncio.create_task(lease.monitor(lost))
+        try:
+            await task
+        finally:
+            monitor.cancel()
+            await asyncio.gather(monitor,return_exceptions=True)
+            try:
+                await lease.release()
+            except Exception:
+                logging.warning('Lease release failed; waiting for expiry')
+
+if __name__=='__main__': asyncio.run(azure_entrypoint())
