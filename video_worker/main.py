@@ -1,6 +1,5 @@
 """Owner-only video worker. No Telegram update polling."""
 import asyncio
-import hmac
 import os
 import re
 import shutil
@@ -22,10 +21,12 @@ load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
 OWNER = int(os.environ["OWNER_ID"])
 TOKEN = os.environ["BOT_TOKEN"]
-SECRET = os.environ["VIDEO_WORKER_SECRET"]
-if len(SECRET) < 32:
-    raise RuntimeError("VIDEO_WORKER_SECRET must have at least 32 characters")
-queue = asyncio.Queue(maxsize=15)
+SECRET = os.environ["WORKER_SECRET"]
+BASE = "https://nebulavoice-ai.maxvyn09.workers.dev"
+async def request_job(session, action, data):
+    async with session.post(BASE+"/video/"+action, json=data, headers={"Authorization":"Bearer "+SECRET}, timeout=ClientTimeout(total=15), allow_redirects=False) as r:
+        r.raise_for_status()
+        return await r.json()
 
 async def notify(session, chat, text):
     async with session.post(f"https://api.telegram.org/bot{TOKEN}/sendMessage", json={"chat_id": chat, "text": text}) as r:
@@ -55,31 +56,27 @@ async def process(session, url, chat):
 
 async def worker(session):
     while True:
-        url, chat = await queue.get()
         try:
-            await process(session, url, chat)
+            job = (await request_job(session, "claim", {})).get("job")
+            if not job:
+                await asyncio.sleep(5)
+                continue
+            if job.get("user_id") == OWNER and job.get("chat_id") == OWNER and valid(job["url"]):
+                try:
+                    await process(session, job["url"], OWNER)
+                except Exception:
+                    try:
+                        await notify(session, OWNER, "⚠️ Не вдалося завантажити відео.")
+                    except Exception:
+                        pass
+            for attempt in range(5):
+                try:
+                    await request_job(session, "done", {"id":job["id"],"token":job["token"]})
+                    break
+                except Exception:
+                    await asyncio.sleep(2**attempt)
         except Exception:
-            try:
-                await notify(session, chat, "⚠️ Не вдалося завантажити відео. Можливе обмеження платформи, розміру або формату.")
-            except Exception:
-                pass
-        finally:
-            queue.task_done()
-
-async def submit(request):
-    if not hmac.compare_digest(request.headers.get("Authorization", ""), "Bearer "+SECRET):
-        raise web.HTTPUnauthorized()
-    data = await request.json()
-    if not isinstance(data, dict) or data.get("user_id") != OWNER or data.get("chat_id") != OWNER:
-        raise web.HTTPForbidden()
-    url = data.get("url")
-    if not isinstance(url, str) or len(url)>2048 or not valid(url):
-        raise web.HTTPBadRequest()
-    try:
-        queue.put_nowait((url, OWNER))
-    except asyncio.QueueFull:
-        raise web.HTTPServiceUnavailable()
-    return web.json_response({"accepted": True}, status=202)
+            await asyncio.sleep(10)
 
 async def lifecycle(app):
     async with ClientSession(timeout=ClientTimeout(total=120)) as session:
@@ -94,7 +91,6 @@ async def health(request):
 
 if __name__ == "__main__":
     app = web.Application(client_max_size=4096)
-    app.router.add_post("/jobs", submit)
     app.router.add_get("/health", health)
     app.cleanup_ctx.append(lifecycle)
     web.run_app(app, host="0.0.0.0", port=int(os.getenv("SERVER_PORT", os.getenv("PORT", "8080"))), access_log=None)
