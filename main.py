@@ -2,6 +2,18 @@ import difflib, datetime, html, wave, re, os, asyncio, time, tempfile, logging, 
 from pathlib import Path
 import aiohttp
 from aiogram import Bot, Dispatcher, F
+from aiogram.exceptions import TelegramRetryAfter
+
+async def telegram_retry(make_request, bot, method):
+    for attempt in range(4):
+        try:
+            return await make_request(bot, method)
+        except TelegramRetryAfter as error:
+            logging.warning('Telegram rate limit: %s; retry_after=%s; attempt=%s', type(method).__name__, error.retry_after, attempt+1)
+            if attempt == 3 or type(method).__name__ in ('GetUpdates', 'AnswerPreCheckoutQuery'):
+                raise
+            await asyncio.sleep(max(1, error.retry_after)+0.25)
+
 from aiogram.filters import Command
 from aiogram.types import ChatMemberUpdated, Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, LabeledPrice, PreCheckoutQuery
 from dotenv import load_dotenv
@@ -10,6 +22,7 @@ logging.basicConfig(level=logging.INFO)
 MODELS={'groq1':('groq',1,'whisper-large-v3'),'groq1t':('groq',1,'whisper-large-v3-turbo'),'groq2':('groq',2,'whisper-large-v3'),'groq2t':('groq',2,'whisper-large-v3-turbo'),'cf1':('cf',1,'@cf/openai/whisper-large-v3-turbo'),'cf2':('cf',2,'@cf/openai/whisper-large-v3-turbo'),'ovh':('ovh',1,'solaria-3')}
 NAMES={k:f"{ {'groq':'Groq','cf':'Cloudflare','gemini':'Gemini','ovh':'OVHcloud Gladia'}[p]} #{n} • {model.split('/')[-1]}" for k,(p,n,model) in MODELS.items()}
 OWNER=int(os.environ['OWNER_ID']); bot=Bot(os.environ['BOT_TOKEN']); dp=Dispatcher(); lock=asyncio.Lock()
+bot.session.middleware(telegram_retry)
 ORDER=['groq1','groq2','groq1t','groq2t','cf1','cf2','ovh']
 db=sqlite3.connect('state.db')
 db.execute('CREATE TABLE IF NOT EXISTS cloud_completed (id TEXT PRIMARY KEY)')
@@ -815,6 +828,7 @@ async def notify_error(where,error,source=None,replacement=None):
     match=re.match(r'API HTTP [0-9]{3}',raw)
     if match: detail=match.group(0)
     elif raw in allowed: detail=raw
+    elif isinstance(error,TelegramRetryAfter): detail=f'Telegram тимчасово обмежив запити; повтор через {error.retry_after} с'
     elif isinstance(error,asyncio.TimeoutError): detail='Перевищено час очікування'
     elif isinstance(error,aiohttp.ClientResponseError): detail=f'HTTP {error.status}'
     elif isinstance(error,aiohttp.ClientConnectionError): detail='Помилка з’єднання з API'
