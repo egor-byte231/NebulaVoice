@@ -39,8 +39,19 @@ async def notify(session, chat, text, reply_id=None):
         r.raise_for_status()
         await r.read()
 
+VIDEO_TMP=Path(__file__).resolve().parent / ".video-tmp"
+
+def clean_video_tmp():
+    VIDEO_TMP.mkdir(exist_ok=True)
+    for path in VIDEO_TMP.iterdir():
+        if path.name.startswith("video-") and path.is_dir() and not path.is_symlink():
+            shutil.rmtree(path)
+    log.info("Video temporary directory cleaned; free disk: %s MB", shutil.disk_usage(VIDEO_TMP).free//1048576)
+
 async def process(session, url, chat, reply_id=None):
-    with tempfile.TemporaryDirectory(prefix="video-", dir=os.getcwd()) as tmp:
+    if shutil.disk_usage(VIDEO_TMP).free < 150*1048576:
+        raise RuntimeError("insufficient disk space")
+    with tempfile.TemporaryDirectory(prefix="video-", dir=VIDEO_TMP) as tmp:
         ffmpeg = shutil.which("ffmpeg")
         fmt = "b[ext=mp4][height<=720]/b[ext=mp4]" if not ffmpeg else "bv*[ext=mp4][height<=720]+ba[ext=m4a]/b[ext=mp4][height<=720]/b[ext=mp4]"
         proc = await asyncio.create_subprocess_exec("python", "-m", "yt_dlp", "--no-playlist", "--no-cache-dir", "--no-progress", "--max-filesize", "45M", "--socket-timeout", "20", "--retries", "1", "-f", fmt, "--merge-output-format", "mp4", "-o", str(Path(tmp)/"video.%(ext)s"), "--", url, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
@@ -98,6 +109,7 @@ async def worker(session):
             await asyncio.sleep(30)
 
 async def lifecycle(app):
+    clean_video_tmp()
     async with ClientSession(timeout=ClientTimeout(total=120)) as session:
         log.info("NebulaVideo started: 5 polling slots, ffmpeg=%s", bool(shutil.which("ffmpeg")))
         tasks = [asyncio.create_task(worker(session)) for _ in range(5)]
