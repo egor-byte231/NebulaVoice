@@ -850,9 +850,11 @@ async def notify_error(where,error,source=None,replacement=None):
     except Exception as e:
         error_alert_times.pop(key,None)
         logging.warning('Owner error notification failed: %s',type(e).__name__)
+async def audio_status(status, message):
+    try: await status.edit_text(message)
+    except Exception as e: logging.warning('Audio status update failed: %s',type(e).__name__)
 async def mark_disabled(status):
-    try: await status.edit_text(DISABLED)
-    except Exception: pass
+    await audio_status(status, DISABLED)
 async def disable(reason):
     if not enabled(): return
     db.execute('UPDATE control SET enabled=0 WHERE id=1')
@@ -1033,7 +1035,7 @@ async def process_voice_inner(m,status,failures,selected):
                 if not audio_profile_active[forced]: active_providers.discard(forced)
         order=[k for k in ORDER if k!='ovh']
         # Secondary credentials must represent independently permitted quotas; only use after primary HTTP 429.
-        deadline=time.time()+86400
+        deadline=time.time()+600
         notified=False
         candidate=None
         tried_models=set()
@@ -1128,28 +1130,40 @@ async def process_voice_inner(m,status,failures,selected):
             delay=max(1,min(300,min((blocked(k) for k in order if blocked(k)>time.time()),default=time.time()+60)-time.time()))
             await asyncio.sleep(min(delay,1) if active_providers else delay)
         if not enabled(): return await mark_disabled(status)
-        await notify_error('Черга: 24 години очікування',TimeoutError())
-        await mark_disabled(status)
+        await notify_error('Черга: 10 хвилин очікування',TimeoutError())
+        await audio_status(status,'⚠️ Не вдалося завершити транскрипцію за 10 хвилин. Надішли аудіо повторно.')
 async def worker(index=0):
     while True:
         while index>=audio_slot_limit(): await asyncio.sleep(0.5)
         m,status=await waiting.get()
-        while index>=audio_slot_limit() and enabled(): await asyncio.sleep(0.5)
         try:
+            if index>=audio_slot_limit() and enabled():
+                try: waiting.put_nowait((m,status))
+                except asyncio.QueueFull:
+                    await audio_status(status,'⚠️ Черга заповнена. Надішли аудіо повторно.')
+                continue
             if not enabled():
                 await mark_disabled(status)
                 continue
             job=asyncio.create_task(process_voice(m,status))
             active_jobs[job]=status
-            try: await job
+            try:
+                await asyncio.wait_for(job, timeout=720)
             except asyncio.CancelledError:
                 if asyncio.current_task().cancelling(): raise
-                await mark_disabled(status)
+                if not enabled(): await mark_disabled(status)
+                else: await audio_status(status,'⚠️ Обробку перервано. Надішли аудіо повторно.')
             finally: active_jobs.pop(job,None)
         except Exception as e:
-            logging.warning('Job failed: %s',type(e).__name__)
+            logging.warning('Audio job failed: %s',type(e).__name__)
+            if not enabled(): await mark_disabled(status)
+            elif isinstance(e,asyncio.TimeoutError):
+                await audio_status(status,'⚠️ Перевищено час обробки аудіо. Надішли його повторно.')
+            elif isinstance(e,TelegramRetryAfter):
+                await audio_status(status,'⚠️ Telegram тимчасово обмежив запити. Спробуй пізніше.')
+            else:
+                await audio_status(status,'⚠️ Не вдалося обробити аудіо. Надішли його повторно.')
             await notify_error('Обробка аудіо',e)
-            await mark_disabled(status)
         finally: waiting.task_done()
 async def quota_reset_monitor():
     while True:
