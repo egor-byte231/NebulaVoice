@@ -2129,6 +2129,19 @@ async def daily_report_monitor():
             logging.warning('Daily report: %s',type(e).__name__)
         await asyncio.sleep(15)
 
+def daily_public_body(body):
+    def count(label):
+        match=re.search(re.escape(label)+r':\s*<b>([\d ]+)</b>',body)
+        return match.group(1) if match else '0'
+    return ('💜 <b>Дякуємо, що ви з NebulaVoice!</b>\n\n'
+            'Разом із вами ми досягли таких результатів за день:\n\n'
+            f'🎙 Розшифрували голосових повідомлень: <b>{count("Голосові")}</b>\n'
+            f'⭕ Опрацювали відеокружечків: <b>{count("Кружечки")}</b>\n'
+            f'🤖 Отримали запитів до ШІ: <b>{count("Запити текстового ШІ")}</b>\n\n'
+            '🚀 Ми продовжуємо розвиватися та ставати кращими для вас!\n\n'
+            'Дякуємо кожному, хто користується нашим ботом, підтримує нас та допомагає вдосконалювати NebulaVoice.\n\n'
+            '<b>З любов’ю, команда NebulaVoice 💜</b>')
+
 daily_publish_lock=asyncio.Lock()
 @dp.callback_query(F.data.startswith('daily_publish:'),F.from_user.id==OWNER)
 async def daily_preview(c:CallbackQuery):
@@ -2137,7 +2150,7 @@ async def daily_preview(c:CallbackQuery):
     rows=await d1_query(history_session,'SELECT body FROM daily_reports WHERE day=?',(day,))
     if not rows: return await bot.send_message(OWNER,'Звіт не знайдено.')
     await bot.send_message(OWNER,'👀 Попередній перегляд публікації:')
-    await bot.send_message(OWNER,rows[0]['body'],parse_mode='HTML',reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='✅ Підтвердити',callback_data='daily_confirm:'+day)],[InlineKeyboardButton(text='❌ Скасувати',callback_data='daily_cancel')]]))
+    await bot.send_message(OWNER,daily_public_body(rows[0]['body']),parse_mode='HTML',reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='✅ Підтвердити',callback_data='daily_confirm:'+day)],[InlineKeyboardButton(text='❌ Скасувати',callback_data='daily_cancel')]]))
 
 @dp.callback_query(F.data=='daily_cancel',F.from_user.id==OWNER)
 async def daily_cancel(c:CallbackQuery):
@@ -2163,7 +2176,7 @@ async def daily_publish(c:CallbackQuery):
             try:
                 info=await bot.get_chat(chat)
                 name=info.title or name
-                await bot.send_message(chat,rows[0]['body'],parse_mode='HTML')
+                await bot.send_message(chat,daily_public_body(rows[0]['body']),parse_mode='HTML')
                 await d1_query(history_session,'INSERT OR IGNORE INTO daily_publications VALUES (?,?)',(day,chat))
                 sent.append(name+' ('+str(chat)+')')
             except Exception as e:
