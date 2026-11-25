@@ -2134,13 +2134,12 @@ def daily_public_body(body):
         match=re.search(re.escape(label)+r':\s*<b>([\d ]+)</b>',body)
         return match.group(1) if match else '0'
     return ('💜 <b>Дякуємо, що ви з NebulaVoice!</b>\n\n'
-            'Разом із вами ми досягли таких результатів за день:\n\n'
+            'Разом із вами ми досягли таких результатів за день:\n\n<blockquote expandable>'
             f'🎙 Розшифрували голосових повідомлень: <b>{count("Голосові")}</b>\n'
             f'⭕ Опрацювали відеокружечків: <b>{count("Кружечки")}</b>\n'
-            f'🤖 Отримали запитів до ШІ: <b>{count("Запити текстового ШІ")}</b>\n\n'
+            f'🤖 Отримали запитів до ШІ: <b>{count("Запити текстового ШІ")}</b></blockquote>\n\n'
             '🚀 Ми продовжуємо розвиватися та ставати кращими для вас!\n\n'
-            'Дякуємо кожному, хто користується нашим ботом, підтримує нас та допомагає вдосконалювати NebulaVoice.\n\n'
-            '<b>З любов’ю, команда NebulaVoice 💜</b>')
+            'Дякуємо кожному, хто користується нашим ботом, підтримує нас та допомагає вдосконалювати NebulaVoice. 💜')
 
 daily_publish_lock=asyncio.Lock()
 @dp.callback_query(F.data.startswith('daily_publish:'),F.from_user.id==OWNER)
