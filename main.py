@@ -57,6 +57,8 @@ def overview_user(m):
     db.commit()
 
 def overview_add(m,voices=0,circles=0,requests=0):
+    for key,value in (('voices',voices),('circles',circles),('requests',requests)):
+        if value: daily_stat_add(key,value)
     overview_user(m)
     scope='private' if m.chat.type=='private' else 'groups'
     day=datetime.datetime.now(datetime.timezone.utc).date().isoformat()
@@ -103,6 +105,7 @@ def development_enabled():
 def enabled():
     return bool(db.execute('SELECT enabled FROM control WHERE id=1').fetchone()[0])
 def usage(k,seconds=0,attempt=0,success=0,limited=0):
+    if seconds: daily_stat_add('audio_seconds',seconds)
     day=datetime.datetime.now(datetime.timezone.utc).date().isoformat()
     db.execute('INSERT INTO usage_daily VALUES (?,?,?,?,?,?) ON CONFLICT(day,provider) DO UPDATE SET attempts=attempts+excluded.attempts, seconds=seconds+excluded.seconds, successes=successes+excluded.successes, limited=limited+excluded.limited',(day,k,attempt,seconds,success,limited))
     db.commit()
@@ -1451,6 +1454,7 @@ def text_day():
 def text_used():
     return db.execute('SELECT COALESCE(SUM(tokens),0) FROM text_usage WHERE day=?',(text_day(),)).fetchone()[0]
 def text_charge(day,name,tokens,attempts=0):
+    if tokens: daily_stat_add('text_tokens',tokens)
     db.execute('INSERT INTO text_usage VALUES (?,?,?,?) ON CONFLICT(day,route) DO UPDATE SET tokens=tokens+excluded.tokens,attempts=attempts+excluded.attempts',(day,name,tokens,attempts))
     db.commit()
 @dp.callback_query(F.data.startswith('aimodel:'))
@@ -2046,6 +2050,78 @@ async def d1_monitor(session):
         try: await d1_snapshot(session)
         except Exception as e: logging.error('D1 snapshot failed: %s',type(e).__name__)
 
+
+def daily_kyiv_now():
+    from zoneinfo import ZoneInfo
+    return datetime.datetime.now(ZoneInfo('Europe/Kyiv'))
+
+def daily_stat_add(key,value):
+    db.execute('CREATE TABLE IF NOT EXISTS daily_kyiv_stats (day TEXT,key TEXT,value REAL,PRIMARY KEY(day,key))')
+    db.execute('INSERT INTO daily_kyiv_stats VALUES (?,?,?) ON CONFLICT(day,key) DO UPDATE SET value=value+excluded.value',(daily_kyiv_now().date().isoformat(),key,value))
+
+def daily_report_body(day,values):
+    def n(key): return f"{int(values.get(key,0)):,}".replace(',',' ')
+    return (f'📊 <b>NebulaVoice — статистика за {day}</b>\n'
+            '🇺🇦 00:00–23:00 за Києвом\n\n'
+            f'🎙 Голосові: <b>{n("voices")}</b>\n'
+            f'⭕ Кружечки: <b>{n("circles")}</b>\n'
+            f'🎧 Усього аудіо: <b>{int(values.get("voices",0)+values.get("circles",0))}</b>\n'
+            f'⏱ Аудіо на API: {n("audio_seconds")} с (з повторами)\n'
+            '🔋 Аудіотокени: API не надають загального обліку\n\n'
+            f'🤖 Запити текстового ШІ: <b>{n("requests")}</b>\n'
+            f'🪙 Текстові токени: <b>≈ {n("text_tokens")}</b>\n\n'
+            'Дані з початку нового обліку; токени включають оцінки та тести.')
+
+async def daily_report_monitor():
+    while True:
+        try:
+            now=daily_kyiv_now()
+            day=now.date().isoformat()
+            if now.hour==23:
+                await d1_query(history_session,'CREATE TABLE IF NOT EXISTS daily_reports (day TEXT PRIMARY KEY, body TEXT NOT NULL)')
+                await d1_query(history_session,'CREATE TABLE IF NOT EXISTS daily_publications (day TEXT,chat INTEGER,PRIMARY KEY(day,chat))')
+                rows=await d1_query(history_session,'SELECT day FROM daily_reports WHERE day=?',(day,))
+                if not rows:
+                    db.execute('CREATE TABLE IF NOT EXISTS daily_kyiv_stats (day TEXT,key TEXT,value REAL,PRIMARY KEY(day,key))')
+                    values=dict(db.execute('SELECT key,value FROM daily_kyiv_stats WHERE day=?',(day,)).fetchall())
+                    body=daily_report_body(day,values)
+                    await bot.send_message(OWNER,body,parse_mode='HTML',reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='📢 Опублікувати в групах',callback_data='daily_publish:'+day)]]))
+                    await d1_query(history_session,'INSERT OR IGNORE INTO daily_reports VALUES (?,?)',(day,body))
+        except Exception as e:
+            logging.warning('Daily report: %s',type(e).__name__)
+        await asyncio.sleep(15)
+
+daily_publish_lock=asyncio.Lock()
+@dp.callback_query(F.data.startswith('daily_publish:'),F.from_user.id==OWNER)
+async def daily_publish(c:CallbackQuery):
+    await c.answer('Публікую статистику…')
+    async with daily_publish_lock:
+        day=c.data.split(':',1)[1]
+        rows=await d1_query(history_session,'SELECT body FROM daily_reports WHERE day=?',(day,))
+        if not rows: return await bot.send_message(OWNER,'Звіт не знайдено.')
+        groups={r[0] for r in db.execute('SELECT chat FROM text_groups WHERE chat<0')}
+        groups.update(r['chat'] for r in await d1_query(history_session,'SELECT DISTINCT chat FROM runtime_results WHERE chat<0'))
+        sent=[]; failed=[]; skipped=0
+        for chat in sorted(groups):
+            if not group_enabled(chat): continue
+            if await d1_query(history_session,'SELECT chat FROM daily_publications WHERE day=? AND chat=?',(day,chat)):
+                skipped+=1
+                continue
+            name=str(chat)
+            try:
+                info=await bot.get_chat(chat)
+                name=info.title or name
+                await bot.send_message(chat,rows[0]['body'],parse_mode='HTML')
+                await d1_query(history_session,'INSERT OR IGNORE INTO daily_publications VALUES (?,?)',(day,chat))
+                sent.append(name+' ('+str(chat)+')')
+            except Exception as e:
+                failed.append(name+' — '+type(e).__name__)
+            await asyncio.sleep(0.1)
+        report=f'📢 Публікація за {day}\n✅ Надіслано: {len(sent)}\n❌ Помилки: {len(failed)}\n⏭ Уже опубліковано: {skipped}\n\n'+'\n'.join('✅ '+x for x in sent)+'\n'+'\n'.join('❌ '+x for x in failed)
+        for start in range(0,len(report),3500):
+            await bot.send_message(OWNER,report[start:start+3500],parse_mode=None)
+
+
 async def main():
     global history_session
     session=aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30))
@@ -2071,6 +2147,7 @@ async def main():
     tasks.append(asyncio.create_task(audio_queue_restore()))
     if cloud_ready: tasks.append(asyncio.create_task(d1_monitor(session)))
     tasks.append(asyncio.create_task(quota_reset_monitor()))
+    tasks.append(asyncio.create_task(daily_report_monitor()))
     if False:
         await cloud_restore_reservations()
         tasks.append(asyncio.create_task(cloud_reconcile()))
