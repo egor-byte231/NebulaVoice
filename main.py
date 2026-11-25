@@ -474,7 +474,12 @@ async def transcribe(k,path):
         j=await cloud_audio(k,path)
         if j is None: raise RuntimeError('Cloudflare audio unavailable')
         a['language']=j.get('language') or j.get('detected_language')
-        return validate_audio_result(j)
+        try:
+            return validate_audio_result(j)
+        except RejectedTranscript as e:
+            if str(e) in ('Мова поза списком підтримуваних','Підозріла транслітерація мовлення'):
+                e.partial_text=str(j.get('text') or '').strip()
+            raise
     except Exception as e:
         a['error']=type(e).__name__+': '+diag_safe(e); raise
     finally:
@@ -1018,10 +1023,13 @@ async def process_voice_inner(m,status,failures,selected):
         rejected=set()
         empty_count=0
         uncertain_count=0
+        partial_text=''
         warning='⚠️ Можливо, в аудіо багато голосів або фонового шуму. Жодна з перевірених моделей не змогла надійно розпізнати мовлення.'
         async def finish_unclear(message):
             diag=audio_diag.get()
             if diag: diag['outcome']=message; diag_save(diag)
+            if message==warning and partial_text:
+                message=partial_text+'\n\n'+warning
             return await deliver_transcript(m,status,message)
         while time.time()<deadline and enabled():
             primary=next((k for k in order if blocked(k)<=time.time() and k not in rejected),None)
@@ -1042,7 +1050,10 @@ async def process_voice_inner(m,status,failures,selected):
                     rejected.add(k)
                     failures.append((NAMES[k],e))
                     if str(e)=='Порожня транскрипція': empty_count+=1
-                    else: uncertain_count+=1
+                    else:
+                        uncertain_count+=1
+                        partial=getattr(e,'partial_text','')
+                        if partial: partial_text=partial
                     if empty_count>=2 and not candidate and not uncertain_count:
                         return await finish_unclear('Мовлення не виявлено')
                     if empty_count+uncertain_count>=2:
