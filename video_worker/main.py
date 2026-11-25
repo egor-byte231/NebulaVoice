@@ -36,8 +36,8 @@ async def request_job(session, action, data):
         r.raise_for_status()
         return await r.json()
 
-async def notify(session, chat, text, reply_id=None):
-    async with session.post(f"https://api.telegram.org/bot{TOKEN}/sendMessage", json={"chat_id": chat, "text": text, **({"reply_parameters":{"message_id":reply_id,"allow_sending_without_reply":True}} if reply_id else {})}) as r:
+async def notify(session, chat, text, reply_id=None, thread_id=None):
+    async with session.post(f"https://api.telegram.org/bot{TOKEN}/sendMessage", json={"chat_id": chat, "text": text, **({"message_thread_id":thread_id} if thread_id else {}), **({"reply_parameters":{"message_id":reply_id,"allow_sending_without_reply":True}} if reply_id else {})}) as r:
         r.raise_for_status()
         await r.read()
 
@@ -50,7 +50,7 @@ def clean_video_tmp():
             shutil.rmtree(path)
     log.info("Video temporary directory cleaned; free disk: %s MB", shutil.disk_usage(VIDEO_TMP).free//1048576)
 
-async def process(session, url, chat, reply_id=None):
+async def process(session, url, chat, reply_id=None, thread_id=None):
     if shutil.disk_usage(VIDEO_TMP).free < 150*1048576:
         raise RuntimeError("insufficient disk space")
     with tempfile.TemporaryDirectory(prefix="video-", dir=VIDEO_TMP) as tmp:
@@ -72,6 +72,7 @@ async def process(session, url, chat, reply_id=None):
         with path.open("rb") as f:
             data = FormData()
             data.add_field("chat_id", str(chat))
+            if thread_id: data.add_field("message_thread_id",str(thread_id))
             if reply_id: data.add_field("reply_parameters",json.dumps({"message_id":reply_id,"allow_sending_without_reply":True}))
             data.add_field("video", f, filename="video.mp4", content_type="video/mp4")
             async with session.post(f"https://api.telegram.org/bot{TOKEN}/sendVideo", data=data) as r:
@@ -83,16 +84,16 @@ async def process(session, url, chat, reply_id=None):
 async def handle_job(session, job):
     started=time.monotonic()
     log.info("Video job claimed: %s", job.get("id"))
-    if type(job.get("user_id")) is int and job.get("user_id") == job.get("chat_id") and valid(job["url"]):
+    if type(job.get("user_id")) is int and type(job.get("chat_id")) is int and (job["chat_id"]<0 or job["user_id"]==job["chat_id"]) and valid(job["url"]):
         chat=job["chat_id"]
         reply_id=job.get("reply_id")
         try:
-            await process(session, job["url"], chat, reply_id)
+            await process(session, job["url"], chat, reply_id, job.get("thread_id"))
             log.info("Video uploaded: %s", job["id"])
         except Exception as e:
             log.warning("Video processing failed: %s", type(e).__name__)
             try:
-                await notify(session, chat, "⚠️ Не вдалося завантажити відео.", reply_id)
+                await notify(session, chat, "⚠️ Не вдалося завантажити відео.", reply_id, job.get("thread_id"))
             except Exception:
                 pass
         if job.get("status_id"):
