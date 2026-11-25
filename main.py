@@ -517,6 +517,9 @@ async def transcribe_local(k,path):
 def validate_audio_result(j):
     text=j.get('text') if isinstance(j,dict) else None
     if not isinstance(text,str) or not text.strip(): raise RejectedTranscript('Порожня транскрипція')
+    segments=[seg for seg in (j.get('segments') or []) if isinstance(seg,dict)]
+    if segments and all(isinstance(seg.get('no_speech_prob'),(int,float)) and seg['no_speech_prob']>=0.65 and (not isinstance(seg.get('avg_logprob'),(int,float)) or seg['avg_logprob'] < -0.5) for seg in segments):
+        raise RejectedTranscript('Порожня транскрипція')
     if prompt_echo(text): raise RejectedTranscript('Повторення старого промпту')
     if re.search(r'\b(?:bláď|bljať|blyat|bljad|blatj)\b',text,re.I) and not re.search(r'[А-Яа-яІіЇїЄєҐґ]',text):
         raise RejectedTranscript('Підозріла транслітерація мовлення')
@@ -993,6 +996,32 @@ async def process_voice(m,status):
                 if isinstance(error,RejectedTranscript): continue
                 await notify_error(where,error,source=source,replacement=selected[-1] if selected else 'Не визначено / транскрипцію не завершено')
 
+async def audio_has_speech(path):
+    # Inspect original audio before gain and tempo changes. Stream bounded PCM frames.
+    try:
+        import webrtcvad
+        vad=webrtcvad.Vad(2)
+        proc=await asyncio.create_subprocess_exec('ffmpeg','-nostdin','-loglevel','error','-i',str(path),'-vn','-ac','1','-ar','16000','-f','s16le','pipe:1',stdout=asyncio.subprocess.PIPE,stderr=asyncio.subprocess.DEVNULL)
+        async def scan():
+            run=voiced=frames=0
+            while True:
+                try: frame=await proc.stdout.readexactly(960)
+                except asyncio.IncompleteReadError: break
+                frames+=1
+                if vad.is_speech(frame,16000):
+                    voiced+=1
+                    run+=1
+                    if run>=4 or voiced>=8: return True
+                else: run=0
+            if await proc.wait()!=0: return None
+            return False if frames>=4 else None
+        try: return await asyncio.wait_for(scan(),30)
+        finally:
+            if proc.returncode is None: proc.kill(); await proc.wait()
+    except Exception:
+        logging.warning('Speech detection unavailable',exc_info=True)
+        return None
+
 async def process_voice_inner(m,status,failures,selected):
     global ovh_cooldown_until
     item=m.voice or m.video_note
@@ -1001,6 +1030,8 @@ async def process_voice_inner(m,status,failures,selected):
         p=Path(d)/('voice.ogg' if m.voice else 'circle.mp4')
         await bot.download(item,destination=p)
         original=p
+        if await audio_has_speech(p) is False:
+            return await deliver_transcript(m,status,'Мовлення не виявлено')
         audio_seconds=item.duration
         if m.video_note or m.voice:
             out=Path(d)/'normalized.ogg'
