@@ -1137,29 +1137,37 @@ async def audio_has_speech(path):
 azure_video_slots=asyncio.Semaphore(2)
 async def azure_video(m,status,url):
     if not enabled(): return await mark_disabled(status)
+    from urllib.parse import urlsplit
+    from aiogram.types import FSInputFile
+    music=any((urlsplit(url).hostname or '').lower()==h or (urlsplit(url).hostname or '').lower().endswith('.'+h) for h in ('audiomack.com','soundcloud.com','music.youtube.com','bandcamp.com'))
     async with azure_video_slots:
         try:
             with tempfile.TemporaryDirectory() as folder:
-                async def run(*args):
-                    proc=await asyncio.create_subprocess_exec(*args,stdout=asyncio.subprocess.PIPE,stderr=asyncio.subprocess.DEVNULL)
-                    try:
-                        out,_=await asyncio.wait_for(proc.communicate(),180)
-                        if proc.returncode: raise RuntimeError('Media subprocess failed')
-                        return out
-                    finally:
-                        if proc.returncode is None:
-                            proc.kill()
-                            await proc.wait()
-                await run('yt-dlp','--ignore-config','--no-playlist','--max-filesize','25M','--socket-timeout','15','--match-filter','duration <= 300','-f','bestaudio/best','-o',str(Path(folder)/'media.%(ext)s'),'--',url)
-                files=list(Path(folder).glob('media.*'))
-                if len(files)!=1 or files[0].stat().st_size>25*1024*1024: raise ValueError('Media size')
-                p=files[0]
-                duration=float(await run('ffprobe','-v','error','-show_entries','format=duration','-of','default=noprint_wrappers=1:nokey=1',str(p)))
-                if not 0<duration<=300: raise ValueError('Media duration')
-                return await process_voice_inner(m,status,[],[],local_media=p,local_duration=duration)
+                args=['yt-dlp','--ignore-config','--no-playlist','--max-filesize','25M','--socket-timeout','15','--match-filter','duration <= 300']
+                if music:
+                    args+=['-f','bestaudio/best','-x','--audio-format','mp3']
+                else:
+                    args+=['-f','bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/bestvideo+bestaudio/best','--merge-output-format','mp4','--remux-video','mp4']
+                args+=['-o',str(Path(folder)/'media.%(ext)s'),'--',url]
+                proc=await asyncio.create_subprocess_exec(*args,stdout=asyncio.subprocess.DEVNULL,stderr=asyncio.subprocess.PIPE)
+                try:
+                    _,err=await asyncio.wait_for(proc.communicate(),180)
+                    if proc.returncode: raise RuntimeError(diag_safe(err.decode(errors='replace')))
+                finally:
+                    if proc.returncode is None:
+                        proc.kill()
+                        await proc.wait()
+                files=list(Path(folder).glob('media.mp3' if music else 'media.mp4'))
+                if len(files)!=1 or files[0].stat().st_size>25*1024*1024: raise ValueError('Media size or format')
+                if music:
+                    await m.reply_audio(FSInputFile(files[0]))
+                else:
+                    await m.reply_video(FSInputFile(files[0]),supports_streaming=True)
+                try: await status.delete()
+                except Exception: pass
         except Exception as e:
-            logging.warning('Azure video failed: %s',type(e).__name__)
-            return await status.edit_text('⚠️ Не вдалося обробити відео на Azure.')
+            logging.warning('Azure media failed: %s',diag_safe(e))
+            return await status.edit_text('⚠️ Не вдалося завантажити медіа на Azure.')
 
 async def process_voice_inner(m,status,failures,selected,local_media=None,local_duration=None):
     global ovh_cooldown_until
