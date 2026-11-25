@@ -807,33 +807,33 @@ def audio_settings():
     db.commit()
     return db.execute('SELECT primary_host,backup_host,cloud_slots,local_slots FROM audio_settings WHERE id=1').fetchone()
 
-async def audio_settings_action(c):
-    primary,backup,cloud,local=audio_settings()
+async def azure_slots_action(c, kind):
     parts=c.data.split(':')
-    if len(parts)==4:
-        field,value=parts[2:]
-        if field=='cloud' and value.isdigit() and 1<=int(value)<=40:
-            db.execute('UPDATE audio_settings SET cloud_slots=? WHERE id=1',(int(value),))
-        elif field=='local' and value.isdigit() and 1<=int(value)<=4:
-            db.execute('UPDATE audio_settings SET local_slots=? WHERE id=1',(int(value),))
-        else: return
-        db.commit()
-        primary,backup,cloud,local=audio_settings()
-    rows=[[InlineKeyboardButton(text='Cloudflare: '+str(cloud),callback_data='owner:audiohost:cloud'),InlineKeyboardButton(text='FadeHost: '+str(local),callback_data='owner:audiohost:local')]]
-    if len(parts)>=3 and parts[2] in ('cloud','local'):
-        field=parts[2]
-        maximum=40 if field=='cloud' else 4
-        current=cloud if field=='cloud' else local
-        for start in range(1,maximum+1,5):
-            rows.append([InlineKeyboardButton(text=('✓ ' if i==current else '')+str(i),callback_data='owner:audiohost:'+field+':'+str(i)) for i in range(start,min(start+5,maximum+1))])
+    if len(parts)==3 and parts[2].isdigit():
+        n=int(parts[2])
+        if not 1<=n<=RuntimeSettings.DEFAULTS[kind][1]:
+            return await c.answer('Недопустимий ліміт',show_alert=True)
+        if kind=='text': await azure_text_gate.resize(n)
+        else: azure_settings.set(kind,n)
+    current=azure_settings.get(kind)
+    maximum=RuntimeSettings.DEFAULTS[kind][1]
+    prefix='owner:slots' if kind=='text' else 'owner:audiohost'
+    rows=[]
+    for start in range(1,maximum+1,5):
+        rows.append([InlineKeyboardButton(text=('✓ ' if i==current else '')+str(i),callback_data=prefix+':'+str(i)) for i in range(start,min(start+5,maximum+1))])
     rows.append([InlineKeyboardButton(text='Назад',callback_data='owner:back')])
-    body=f'🎙 Аудіотранскрипція\nОсновний: Cloudflare — {cloud} слотів\nРезервний: FadeHost — {local} слотів\n\nПоточна платформа: {audio_platform()}'
+    active=azure_text_gate.active if kind=='text' else len(active_jobs)
+    waiting_count=azure_text_gate.waiting if kind=='text' else waiting.qsize()
+    body=f'Azure VPS — {kind}\nСлоти: {current}/{maximum}\nАктивні: {active}\nЧерга: {waiting_count}'
     try: await c.message.edit_text(body,reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
     except Exception as e:
         if 'message is not modified' not in str(e).lower(): raise
 
+async def audio_settings_action(c):
+    return await azure_slots_action(c,'audio')
+
 def owner_menu():
-    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='⏸ Вимкнути' if enabled() else '▶️ Увімкнути',callback_data='owner:toggle')],[InlineKeyboardButton(text='📊 Статистика',callback_data='owner:stats')],[InlineKeyboardButton(text='🤖 Статистика ШІ',callback_data='owner:ai')],[InlineKeyboardButton(text='⚙️ Кількість слотів ШІ',callback_data='owner:slots')],[InlineKeyboardButton(text='🎙 Платформи аудіо',callback_data='owner:audiohost')],[InlineKeyboardButton(text='📈 Загальна статистика',callback_data='owner:overview')],[InlineKeyboardButton(text='🟢 Режим розробки: ON' if development_enabled() else '🔴 Режим розробки: OFF',callback_data='owner:development')],[InlineKeyboardButton(text='🧪 Режим тестування: ON' if testing_enabled() else '🧪 Режим тестування: OFF',callback_data='owner:testing')],[InlineKeyboardButton(text='🔄 Обнулити мій ліміт',callback_data='owner:reset_limit')]]+([[InlineKeyboardButton(text='🎙 Тест аудіо',callback_data='owner:testmenu:audio')],[InlineKeyboardButton(text='💬 Тест тексту',callback_data='owner:testmenu:text')],[InlineKeyboardButton(text='⚡ Тест навантаження',callback_data='owner:load')]] if testing_enabled() else []))
+    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='⏸ Вимкнути' if enabled() else '▶️ Увімкнути',callback_data='owner:toggle')],[InlineKeyboardButton(text='📊 Статистика',callback_data='owner:stats')],[InlineKeyboardButton(text='🤖 Статистика ШІ',callback_data='owner:ai')],[InlineKeyboardButton(text='⚙️ Слоти тексту VPS',callback_data='owner:slots')],[InlineKeyboardButton(text='🎙 Слоти аудіо VPS',callback_data='owner:audiohost')],[InlineKeyboardButton(text='📈 Загальна статистика',callback_data='owner:overview')],[InlineKeyboardButton(text='🟢 Режим розробки: ON' if development_enabled() else '🔴 Режим розробки: OFF',callback_data='owner:development')],[InlineKeyboardButton(text='🧪 Режим тестування: ON' if testing_enabled() else '🧪 Режим тестування: OFF',callback_data='owner:testing')],[InlineKeyboardButton(text='🔄 Обнулити мій ліміт',callback_data='owner:reset_limit')]]+([[InlineKeyboardButton(text='🎙 Тест аудіо',callback_data='owner:testmenu:audio')],[InlineKeyboardButton(text='💬 Тест тексту',callback_data='owner:testmenu:text')],[InlineKeyboardButton(text='⚡ Тест навантаження',callback_data='owner:load')]] if testing_enabled() else []))
 error_alert_times={}
 async def notify_error(where,error,source=None,replacement=None):
     raw=str(error)
@@ -914,7 +914,7 @@ async def owner_action(c:CallbackQuery):
         return await c.answer('Тільки власник',show_alert=True)
     await c.answer()
     if c.data=='owner:audiohost' or c.data.startswith('owner:audiohost:'): return await audio_settings_action(c)
-    if c.data=='owner:slots' or c.data.startswith('owner:slots:'): return await slots_action(c)
+    if c.data=='owner:slots' or c.data.startswith('owner:slots:'): return await azure_slots_action(c,'text')
     if c.data=='owner:overview':
         return await c.message.edit_text('📈 Загальна статистика — обери розділ',reply_markup=overview_menu())
     if c.data.startswith('owner:overview:'):
@@ -1349,7 +1349,7 @@ db.commit()
 from collections import deque, OrderedDict
 
 group_busy=set()
-text_slots=asyncio.Semaphore(20)
+text_slots=azure_text_gate
 def group_enabled(chat):
     return not bool(db.execute('SELECT 1 FROM text_disabled WHERE chat=?',(chat,)).fetchone())
 def premium_until(chat):
@@ -1764,7 +1764,8 @@ async def text_message(m:Message):
         overview_add(m,requests=1)
         return await submit_cloud_text(m,question,group,replied,reply)
     if test_route('text',m): return await m.reply('Тест текстової моделі потребує доступного Cloudflare.')
-    await text_slots.acquire()
+    slot_context=text_slots.slot()
+    await slot_context.__aenter__()
     job=asyncio.current_task()
     group_busy.add(job)
     try:
@@ -1778,7 +1779,7 @@ async def text_message(m:Message):
         await generate_text(m,question,'',group,history_context)
     finally:
         group_busy.discard(job)
-        text_slots.release()
+        await slot_context.__aexit__(None,None,None)
 
 async def d1_query(session,sql,params=()):
     account=os.getenv('CF_D1_ACCOUNT_ID') or os.getenv('CF_ACCOUNT_ID_1')
