@@ -14,7 +14,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 from aiohttp import web, ClientSession, ClientTimeout, FormData, TCPConnector
 
-HOSTS = {"youtube.com", "www.youtube.com", "m.youtube.com", "youtu.be", "tiktok.com", "www.tiktok.com", "vm.tiktok.com", "vt.tiktok.com", "instagram.com", "www.instagram.com","facebook.com","www.facebook.com","m.facebook.com","fb.watch","fb.com","x.com","www.x.com","twitter.com","www.twitter.com","mobile.twitter.com","t.co","reddit.com","www.reddit.com","old.reddit.com","redd.it","v.redd.it","pinterest.com","www.pinterest.com","pin.it","twitch.tv","www.twitch.tv","clips.twitch.tv","vimeo.com","www.vimeo.com","player.vimeo.com","dailymotion.com","www.dailymotion.com","dai.ly","snapchat.com","www.snapchat.com","t.snapchat.com","soundcloud.com","www.soundcloud.com","m.soundcloud.com","on.soundcloud.com"}
+HOSTS = {"youtube.com", "www.youtube.com", "m.youtube.com", "youtu.be", "tiktok.com", "www.tiktok.com", "vm.tiktok.com", "vt.tiktok.com", "instagram.com", "www.instagram.com","facebook.com","www.facebook.com","m.facebook.com","fb.watch","fb.com","x.com","www.x.com","twitter.com","www.twitter.com","mobile.twitter.com","t.co","reddit.com","www.reddit.com","old.reddit.com","redd.it","v.redd.it","pinterest.com","www.pinterest.com","pin.it","twitch.tv","www.twitch.tv","clips.twitch.tv","vimeo.com","www.vimeo.com","player.vimeo.com","dailymotion.com","www.dailymotion.com","dai.ly","snapchat.com","www.snapchat.com","t.snapchat.com","soundcloud.com","www.soundcloud.com","m.soundcloud.com","on.soundcloud.com","audiomack.com","www.audiomack.com","m.audiomack.com"}
 def valid(url):
     try:
         p = urlsplit(url)
@@ -56,7 +56,7 @@ async def process(session, url, chat, reply_id=None, thread_id=None):
     with tempfile.TemporaryDirectory(prefix="video-", dir=VIDEO_TMP) as tmp:
         ffmpeg = shutil.which("ffmpeg")
         started=time.monotonic()
-        audio=urlsplit(url).hostname in {"soundcloud.com","www.soundcloud.com","m.soundcloud.com","on.soundcloud.com"}
+        audio=urlsplit(url).hostname in {"soundcloud.com","www.soundcloud.com","m.soundcloud.com","on.soundcloud.com","audiomack.com","www.audiomack.com","m.audiomack.com"}
         fmt = "b[ext=mp4][height<=720]/b[ext=mp4]" if not ffmpeg else "b[ext=mp4][height<=720]/bv*[ext=mp4][height<=720]+ba[ext=m4a]/b[ext=mp4]"
         options=["-f","bestaudio","-x","--audio-format","mp3","--audio-quality","192K"] if audio else ["-f",fmt,"--merge-output-format","mp4"]
         proc = await asyncio.create_subprocess_exec(sys.executable, "-m", "yt_dlp", "--concurrent-fragments", "3", "--no-playlist", "--no-cache-dir", "--no-progress", "--max-filesize", "45M", "--socket-timeout", "20", "--retries", "1", *options, "-o", str(Path(tmp)/"video.%(ext)s"), "--", url, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
