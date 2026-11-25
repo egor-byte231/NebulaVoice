@@ -2074,6 +2074,9 @@ def daily_report_body(day,values):
 
 @dp.message(Command('daily_recover'),F.chat.type=='private',F.from_user.id==OWNER)
 async def daily_recover(m:Message):
+    await send_recovered_report()
+
+async def send_recovered_report(automatic=False):
     day='2026-11-25'
     v,c,q=db.execute('SELECT COALESCE(SUM(voices),0),COALESCE(SUM(circles),0),COALESCE(SUM(requests),0) FROM overview_daily WHERE day=?',(day,)).fetchone()
     seconds=db.execute('SELECT COALESCE(SUM(seconds),0) FROM usage_daily WHERE day=?',(day,)).fetchone()[0]
@@ -2084,7 +2087,11 @@ async def daily_recover(m:Message):
     await d1_query(history_session,'CREATE TABLE IF NOT EXISTS daily_publications (day TEXT,chat INTEGER,PRIMARY KEY(day,chat))')
     await d1_query(history_session,'INSERT OR IGNORE INTO daily_reports VALUES (?,?)',(report_id,body))
     rows=await d1_query(history_session,'SELECT body FROM daily_reports WHERE day=?',(report_id,))
-    await m.answer(rows[0]['body'],parse_mode='HTML',reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='📢 Опублікувати в групах',callback_data='daily_publish:'+report_id)]]))
+    if automatic:
+        await d1_query(history_session,'CREATE TABLE IF NOT EXISTS daily_recovery_sent (id INTEGER PRIMARY KEY)')
+        if await d1_query(history_session,'SELECT id FROM daily_recovery_sent WHERE id=1'): return
+    await bot.send_message(OWNER,rows[0]['body'],parse_mode='HTML',reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='📢 Опублікувати в групах',callback_data='daily_publish:'+report_id)]]))
+    if automatic: await d1_query(history_session,'INSERT OR IGNORE INTO daily_recovery_sent VALUES (1)')
 
 @dp.message(Command('daily_now'),F.chat.type=='private',F.from_user.id==OWNER)
 async def daily_now(m:Message):
@@ -2100,6 +2107,10 @@ async def daily_now(m:Message):
     await m.answer(body,parse_mode='HTML',reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='📢 Опублікувати в групах',callback_data='daily_publish:'+report_id)]]))
 
 async def daily_report_monitor():
+    try:
+        await send_recovered_report(automatic=True)
+    except Exception as e:
+        logging.warning('Recovered report: %s',type(e).__name__)
     while True:
         try:
             now=daily_kyiv_now()
