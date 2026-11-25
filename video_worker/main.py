@@ -59,15 +59,35 @@ async def process(session, url, chat, reply_id=None, thread_id=None):
         audio=urlsplit(url).hostname in {"soundcloud.com","www.soundcloud.com","m.soundcloud.com","on.soundcloud.com","audiomack.com","www.audiomack.com","m.audiomack.com"}
         fmt = "b[ext=mp4][height<=720]/b[ext=mp4]" if not ffmpeg else "b[ext=mp4][height<=720]/bv*[ext=mp4][height<=720]+ba[ext=m4a]/b[ext=mp4]"
         options=["-f","bestaudio","-x","--audio-format","mp3","--audio-quality","192K"] if audio else ["-f",fmt,"--merge-output-format","mp4"]
-        proc = await asyncio.create_subprocess_exec(sys.executable, "-m", "yt_dlp", "--concurrent-fragments", "3", "--no-playlist", "--no-cache-dir", "--no-progress", "--max-filesize", "45M", "--socket-timeout", "20", "--retries", "1", *options, "-o", str(Path(tmp)/"video.%(ext)s"), "--", url, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
-        try:
-            await asyncio.wait_for(proc.wait(), 120)
-        finally:
-            if proc.returncode is None:
-                proc.kill()
-                await proc.wait()
+        audiomack=urlsplit(url).hostname in {"audiomack.com","www.audiomack.com","m.audiomack.com"}
         path = Path(tmp)/("video.mp3" if audio else "video.mp4")
-        if proc.returncode or not path.is_file() or path.stat().st_size > 49_000_000:
+        async def run_download(target, extra=()):
+            proc = await asyncio.create_subprocess_exec(sys.executable, "-m", "yt_dlp", "--concurrent-fragments", "3", "--no-playlist", "--no-cache-dir", "--no-progress", "--max-filesize", "45M", "--socket-timeout", "20", "--retries", "1", *options, *extra, "-o", str(Path(tmp)/"video.%(ext)s"), "--", target, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE if audiomack else asyncio.subprocess.DEVNULL)
+            try:
+                _, err = await asyncio.wait_for(proc.communicate(), 60 if audiomack else 120)
+            except asyncio.TimeoutError:
+                if audiomack: log.warning("Audiomack download timed out")
+                return False
+            finally:
+                if proc.returncode is None:
+                    proc.kill()
+                    await proc.wait()
+            if audiomack and proc.returncode:
+                detail=(err or b"").decode("utf-8",errors="replace")[-2000:]
+                detail=re.sub(r'https?://[^\s]+','[URL]',detail)
+                log.warning("Audiomack yt-dlp exit=%s: %s",proc.returncode,detail)
+            return proc.returncode==0 and path.is_file() and path.stat().st_size<=49_000_000
+        if audiomack:
+            parsed=urlsplit(url)
+            url="https://audiomack.com"+parsed.path
+            log.info("Audiomack: trying canonical track URL")
+        ok=await run_download(url)
+        if not ok and audiomack:
+            log.info("Audiomack: trying public webpage extractor fallback")
+            for partial in Path(tmp).glob("video.*"):
+                if partial.is_file(): partial.unlink()
+            ok=await run_download(url, ("--force-generic-extractor",))
+        if not ok:
             raise RuntimeError("download failed or exceeds limit")
         downloaded=time.monotonic()
         log.info("Video download+merge %.2fs; size %.2f MB",downloaded-started,path.stat().st_size/1048576)
