@@ -2089,9 +2089,9 @@ async def send_recovered_report(automatic=False):
     rows=await d1_query(history_session,'SELECT body FROM daily_reports WHERE day=?',(report_id,))
     if automatic:
         await d1_query(history_session,'CREATE TABLE IF NOT EXISTS daily_recovery_sent (id INTEGER PRIMARY KEY)')
-        if await d1_query(history_session,'SELECT id FROM daily_recovery_sent WHERE id=1'): return
+        if await d1_query(history_session,'SELECT id FROM daily_recovery_sent WHERE id=2'): return
     await bot.send_message(OWNER,rows[0]['body'],parse_mode='HTML',reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='📢 Опублікувати в групах',callback_data='daily_publish:'+report_id)]]))
-    if automatic: await d1_query(history_session,'INSERT OR IGNORE INTO daily_recovery_sent VALUES (1)')
+    if automatic: await d1_query(history_session,'INSERT OR IGNORE INTO daily_recovery_sent VALUES (2)')
 
 @dp.message(Command('daily_now'),F.chat.type=='private',F.from_user.id==OWNER)
 async def daily_now(m:Message):
