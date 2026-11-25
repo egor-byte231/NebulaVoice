@@ -291,7 +291,7 @@ function videoQueue(d,path,j){
  return d.ctx.storage.transactionSync(()=>{
   if(path==="/video/enqueue"){
    let u;try{u=new URL(j.url);}catch{return new Response("Invalid",{status:400});}
-   if(u.protocol!=="https:"||!["youtube.com","www.youtube.com","m.youtube.com","youtu.be","tiktok.com","www.tiktok.com","vm.tiktok.com","vt.tiktok.com","instagram.com","www.instagram.com"].includes(u.hostname)||u.username||u.password||u.port||j.url.length>2048||!Number.isSafeInteger(j.user_id)||j.user_id!==j.chat_id)return new Response("Invalid",{status:400});
+   if(u.protocol!=="https:"||!["youtube.com","www.youtube.com","m.youtube.com","youtu.be","tiktok.com","www.tiktok.com","vm.tiktok.com","vt.tiktok.com","instagram.com","www.instagram.com"].includes(u.hostname)||u.username||u.password||u.port||j.url.length>2048||!Number.isSafeInteger(j.user_id)||!Number.isSafeInteger(j.chat_id)||(j.chat_id>=0&&j.user_id!==j.chat_id))return new Response("Invalid",{status:400});
    if(sql.exec("SELECT COUNT(*) AS n FROM video_jobs").one().n>=20)return new Response("Busy",{status:429});
    sql.exec("INSERT INTO video_jobs(id,payload,queued) VALUES (?,?,?)",crypto.randomUUID(),JSON.stringify(j),now);
    return Response.json({accepted:true},{status:202});
