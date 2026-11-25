@@ -211,23 +211,26 @@ WELCOME = """🇺🇦 Привіт! Я NebulaVoice — український б
 Просто надсилайте голосові або кружечки, а решту я зроблю сам!
 
 Для розпізнавання аудіо передається зовнішнім ШІ-сервісам.</blockquote>"""
-@dp.message(Command('server'),F.chat.type=='private',F.from_user.id==OWNER)
-async def server_status(m:Message):
+async def server_status_text():
     names={'azure':'Azure VPS','fadehost':'FadeHost','wispbyte':'WispByte'}
     try:
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session:
             rows=await d1_query(session,'SELECT role, expires-unixepoch() AS remaining FROM runtime_lease WHERE id=1 AND expires>unixepoch()')
         if not rows:
-            return await m.reply('⚠️ Немає чинного блокування. Активний сервер не підтверджено.')
+            return '⚠️ Немає чинного блокування. Активний сервер не підтверджено.'
         role=rows[0]['role']
         lines=['🖥 Стан серверів']
         for key,name in names.items():
             lines.append(('🟢 '+name+' — власник блокування' if key==role else '⚪ '+name+' — не власник блокування'))
         lines.append('Блокування дійсне ще '+str(rows[0]['remaining'])+' с')
         lines.append('Це статус блокування, а не перевірка всіх API.')
-        await m.reply('\n'.join(lines))
+        return '\n'.join(lines)
     except Exception:
-        await m.reply('⚠️ Не вдалося підтвердити активний сервер.')
+        return '⚠️ Не вдалося підтвердити активний сервер.'
+
+@dp.message(Command('server'),F.chat.type=='private',F.from_user.id==OWNER)
+async def server_status(m:Message):
+    await m.reply(await server_status_text())
 
 @dp.message(Command('help'))
 async def help_command(m:Message):
@@ -862,7 +865,7 @@ async def audio_settings_action(c):
     return await azure_slots_action(c,'audio')
 
 def owner_menu():
-    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='⏸ Вимкнути' if enabled() else '▶️ Увімкнути',callback_data='owner:toggle')],[InlineKeyboardButton(text='📊 Статистика',callback_data='owner:stats')],[InlineKeyboardButton(text='🤖 Статистика ШІ',callback_data='owner:ai')],[InlineKeyboardButton(text='⚙️ Слоти тексту VPS',callback_data='owner:slots')],[InlineKeyboardButton(text='🎙 Слоти аудіо VPS',callback_data='owner:audiohost')],[InlineKeyboardButton(text='📈 Загальна статистика',callback_data='owner:overview')],[InlineKeyboardButton(text='🟢 Режим розробки: ON' if development_enabled() else '🔴 Режим розробки: OFF',callback_data='owner:development')],[InlineKeyboardButton(text='🧪 Режим тестування: ON' if testing_enabled() else '🧪 Режим тестування: OFF',callback_data='owner:testing')],[InlineKeyboardButton(text='🔄 Обнулити мій ліміт',callback_data='owner:reset_limit')]]+([[InlineKeyboardButton(text='🎙 Тест аудіо',callback_data='owner:testmenu:audio')],[InlineKeyboardButton(text='💬 Тест тексту',callback_data='owner:testmenu:text')],[InlineKeyboardButton(text='⚡ Тест навантаження',callback_data='owner:load')]] if testing_enabled() else []))
+    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='⏸ Вимкнути' if enabled() else '▶️ Увімкнути',callback_data='owner:toggle')],[InlineKeyboardButton(text='🖥 Стан серверів',callback_data='owner:server')],[InlineKeyboardButton(text='📊 Статистика',callback_data='owner:stats')],[InlineKeyboardButton(text='🤖 Статистика ШІ',callback_data='owner:ai')],[InlineKeyboardButton(text='⚙️ Слоти тексту VPS',callback_data='owner:slots')],[InlineKeyboardButton(text='🎙 Слоти аудіо VPS',callback_data='owner:audiohost')],[InlineKeyboardButton(text='📈 Загальна статистика',callback_data='owner:overview')],[InlineKeyboardButton(text='🟢 Режим розробки: ON' if development_enabled() else '🔴 Режим розробки: OFF',callback_data='owner:development')],[InlineKeyboardButton(text='🧪 Режим тестування: ON' if testing_enabled() else '🧪 Режим тестування: OFF',callback_data='owner:testing')],[InlineKeyboardButton(text='🔄 Обнулити мій ліміт',callback_data='owner:reset_limit')]]+([[InlineKeyboardButton(text='🎙 Тест аудіо',callback_data='owner:testmenu:audio')],[InlineKeyboardButton(text='💬 Тест тексту',callback_data='owner:testmenu:text')],[InlineKeyboardButton(text='⚡ Тест навантаження',callback_data='owner:load')]] if testing_enabled() else []))
 error_alert_times={}
 async def notify_error(where,error,source=None,replacement=None):
     raw=str(error)
@@ -963,6 +966,8 @@ async def owner_action(c:CallbackQuery):
         except Exception as e:
             if 'message is not modified' not in str(e).lower(): raise
         return
+    if c.data=='owner:server':
+        return await c.message.edit_text(await server_status_text(),reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='🔄 Оновити',callback_data='owner:server')],[InlineKeyboardButton(text='Назад',callback_data='owner:back')]]))
     if c.data=='owner:back':
         return await c.message.edit_text('Панель власника',reply_markup=owner_menu())
     if c.data=='owner:load' or c.data.startswith('owner:load:'): return await load_action(c)
