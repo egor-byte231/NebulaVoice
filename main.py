@@ -1037,18 +1037,49 @@ async def audio_has_speech(path):
         logging.warning('Speech detection unavailable',exc_info=True)
         return None
 
-async def process_voice_inner(m,status,failures,selected):
+azure_video_slots=asyncio.Semaphore(2)
+async def azure_video(m,status,url):
+    if not enabled(): return await mark_disabled(status)
+    async with azure_video_slots:
+        try:
+            with tempfile.TemporaryDirectory() as folder:
+                async def run(*args):
+                    proc=await asyncio.create_subprocess_exec(*args,stdout=asyncio.subprocess.PIPE,stderr=asyncio.subprocess.DEVNULL)
+                    try:
+                        out,_=await asyncio.wait_for(proc.communicate(),180)
+                        if proc.returncode: raise RuntimeError('Media subprocess failed')
+                        return out
+                    finally:
+                        if proc.returncode is None:
+                            proc.kill()
+                            await proc.wait()
+                await run('yt-dlp','--ignore-config','--no-playlist','--max-filesize','25M','--socket-timeout','15','--match-filter','duration <= 300','-f','bestaudio/best','-o',str(Path(folder)/'media.%(ext)s'),'--',url)
+                files=list(Path(folder).glob('media.*'))
+                if len(files)!=1 or files[0].stat().st_size>25*1024*1024: raise ValueError('Media size')
+                p=files[0]
+                duration=float(await run('ffprobe','-v','error','-show_entries','format=duration','-of','default=noprint_wrappers=1:nokey=1',str(p)))
+                if not 0<duration<=300: raise ValueError('Media duration')
+                return await process_voice_inner(m,status,[],[],local_media=p,local_duration=duration)
+        except Exception as e:
+            logging.warning('Azure video failed: %s',type(e).__name__)
+            return await status.edit_text('⚠️ Не вдалося обробити відео на Azure.')
+
+async def process_voice_inner(m,status,failures,selected,local_media=None,local_duration=None):
     global ovh_cooldown_until
-    item=m.voice or m.video_note
+    from types import SimpleNamespace
+    item=SimpleNamespace(duration=local_duration) if local_media is not None else (m.voice or m.video_note)
     await status.edit_text('⏳ Транскрибую...')
     with tempfile.TemporaryDirectory() as d:
         p=Path(d)/('voice.ogg' if m.voice else 'circle.mp4')
-        await bot.download(item,destination=p)
+        if local_media is None:
+            await bot.download(item,destination=p)
+        else:
+            p=local_media
         original=p
         if await audio_has_speech(p) is False:
             return await deliver_transcript(m,status,'Мовлення не виявлено')
         audio_seconds=item.duration
-        if m.video_note or m.voice:
+        if local_media is not None or m.video_note or m.voice:
             out=Path(d)/'normalized.ogg'
             proc=await asyncio.create_subprocess_exec('ffmpeg','-nostdin','-loglevel','error','-i',str(p),'-vn','-af','atempo=0.65,acompressor=threshold=0.125:ratio=2:attack=15:release=150,volume=5dB,alimiter=limit=0.95:level=0:latency=1','-ac','1','-ar','48000','-c:a','libopus','-b:a','96k',str(out),stderr=asyncio.subprocess.DEVNULL)
             try:
@@ -1057,7 +1088,7 @@ async def process_voice_inner(m,status,failures,selected):
                 if proc.returncode is None: proc.kill(); await proc.wait()
             if code!=0:
                 failures.append(('Нормалізація аудіо',ValueError('FFmpeg')))
-                if m.video_note: raise ValueError('Не вдалося витягти аудіо')
+                if local_media is not None or m.video_note: raise ValueError('Не вдалося витягти аудіо')
             else:
                 p=out
                 audio_seconds=item.duration/0.65
@@ -1735,20 +1766,8 @@ async def text_message(m:Message):
     video_link=media_url is not None
     if video_link:
         logging.info('Video: link recognized, host=%s, group=%s',p.hostname,group)
-        if not os.getenv('WORKER_SECRET','').strip():
-            logging.warning('Video: WORKER_SECRET missing')
-            return await m.reply('⚠️ NebulaVideo: відсутня конфігурація Cloudflare.')
-        status=await m.reply('🎵 Аудіо додано до черги.' if p.hostname in {'soundcloud.com','www.soundcloud.com','m.soundcloud.com','on.soundcloud.com','audiomack.com','www.audiomack.com','m.audiomack.com'} else '🎬 Відео додано до черги.')
-        try:
-            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as video_session:
-                async with video_session.post('https://nebulavoice-ai.maxvyn09.workers.dev/video/enqueue',headers={'Authorization':'Bearer '+os.environ['WORKER_SECRET']},json={'url':media_url,'user_id':m.from_user.id,'chat_id':chat,'reply_id':m.message_id,'status_id':status.message_id,'thread_id':m.message_thread_id if m.is_topic_message else None},allow_redirects=False) as response:
-                    accepted=response.status==202
-                    logging.info('Video: Cloudflare enqueue HTTP %s',response.status)
-            if not accepted: await status.edit_text('⚠️ NebulaVideo тимчасово недоступний або черга заповнена.')
-            return
-        except Exception as e:
-            logging.warning('Video: enqueue failed: %s',type(e).__name__)
-            return await status.edit_text('⚠️ NebulaVideo тимчасово недоступний.')
+        status=await m.reply('🎬 Відео додано до черги Azure.')
+        return await azure_video(m,status,media_url)
     if group and not group_enabled(chat): return
     if raw.startswith('/'): return
     reply=m.reply_to_message
