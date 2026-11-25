@@ -22,7 +22,7 @@ TOKEN = os.environ["BOT_TOKEN"]
 SECRET = os.environ["VIDEO_WORKER_SECRET"]
 if len(SECRET) < 32:
     raise RuntimeError("VIDEO_WORKER_SECRET must have at least 32 characters")
-queue = asyncio.Queue(maxsize=8)
+queue = asyncio.Queue(maxsize=15)
 
 async def notify(session, chat, text):
     async with session.post(f"https://api.telegram.org/bot{TOKEN}/sendMessage", json={"chat_id": chat, "text": text}) as r:
@@ -80,7 +80,7 @@ async def submit(request):
 
 async def lifecycle(app):
     async with ClientSession(timeout=ClientTimeout(total=120)) as session:
-        tasks = [asyncio.create_task(worker(session)) for _ in range(2)]
+        tasks = [asyncio.create_task(worker(session)) for _ in range(5)]
         yield
         for task in tasks:
             task.cancel()
