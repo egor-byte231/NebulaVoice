@@ -459,12 +459,15 @@ async def audio_diag_command(m:Message):
     arg=m.text.split(maxsplit=1)
     if len(arg)!=2 or not arg[1].lstrip('#').isdigit() or len(arg[1])>18: return await m.answer('Використання: /diag 1')
     diag_table()
-    row=db.execute('SELECT data FROM audio_diagnostics WHERE id=?',(int(arg[1].lstrip('#')),)).fetchone()
+    number=int(arg[1].lstrip('#'))
+    await d1_query(history_session,'CREATE TABLE IF NOT EXISTS transcript_diagnostics (number INTEGER PRIMARY KEY, data TEXT NOT NULL)')
+    rows=await d1_query(history_session,'SELECT data FROM transcript_diagnostics WHERE number=?',(number,))
+    row=(rows[0]['data'],) if rows else db.execute('SELECT data FROM audio_diagnostics WHERE id=?',(number,)).fetchone() if number<=134 else None
     if not row: return await m.answer('Транскрипцію не знайдено.')
     d=json.loads(row[0])
-    lines=[f"🔎 Транскрипція #{d['id']}",f"Стан: {d.get('state','очікування')}",f"Місце в черзі FadeHost: {d.get('queue','—')}",f"Очікування: {d.get('wait','—')} с",f"Платформа транскрипції: {d.get('platform') or ('Cloudflare (за даними слота)' if any(a.get('slot') is not None for a in d.get('attempts',[])) else 'Не зафіксовано')}",f"Обраний ШІ: {d.get('selected') or '—'}",f"Джерело: {d.get('source','—')}"]
+    lines=[f"🔎 Транскрипція #{d.get('number',d['id'])}",f"Стан: {d.get('state','очікування')}",f"Позиція при вході в чергу: {d.get('queue','—')}",f"Активних обробників при вході: {d.get('active_at_enqueue','—')}",f"Час обробки: {d.get('processing','—')} с",f"Очікування: {d.get('wait','—')} с",f"Платформа транскрипції: {d.get('platform') or ('Cloudflare (за даними слота)' if any(a.get('slot') is not None for a in d.get('attempts',[])) else 'Не зафіксовано')}",f"Обраний ШІ: {d.get('selected') or '—'}",f"Джерело: {d.get('source','—')}"]
     for i,a in enumerate(d.get('attempts',[]),1):
-        lines.append(f"\n{i}. {a['model']} | слот Cloudflare: {a.get('slot','—')}/{a.get('slots','—')} | {a.get('ms','—')} мс | очікування слота: {a.get('busy',0)*0.5:.1f} с (мін.)")
+        lines.append(f"\n{i}. {a['model']} | платформа: {a.get('platform','—')} | {a.get('ms','—')} мс | очікування слота: {a.get('busy',0)*0.5:.1f} с (мін.)")
         if a.get('error'): lines.append('Помилка: '+a['error'])
     for e in d.get('errors',[]): lines.append('Помилка: '+e)
     if d.get('errors') or any(a.get('error') for a in d.get('attempts',[])): lines.append('Заміна: '+(d.get('selected') or 'не визначено'))
@@ -473,10 +476,19 @@ async def audio_diag_command(m:Message):
 async def deliver_transcript(m,status,result):
     if not enabled(): return await mark_disabled(status)
     chunks=[result[i:i+3700] for i in range(0,len(result),3700)]
+    if chunks:
+        await d1_query(history_session,'CREATE TABLE IF NOT EXISTS transcript_numbers (id INTEGER PRIMARY KEY AUTOINCREMENT, chat INTEGER NOT NULL, message_id INTEGER NOT NULL, UNIQUE(chat,message_id))')
+        await d1_query(history_session,'INSERT OR IGNORE INTO transcript_numbers(id,chat,message_id) VALUES (134,0,0)')
+        rows=await d1_query(history_session,'INSERT INTO transcript_numbers(chat,message_id) VALUES (?,?) ON CONFLICT(chat,message_id) DO UPDATE SET chat=excluded.chat RETURNING id',(m.chat.id,m.message_id))
+        number=rows[0]['id']
+        d=audio_diag.get()
+        if d: d['number']=number; diag_save(d)
+        await d1_query(history_session,'CREATE TABLE IF NOT EXISTS transcript_diagnostics (number INTEGER PRIMARY KEY, data TEXT NOT NULL)')
+        if d: await d1_query(history_session,'INSERT OR REPLACE INTO transcript_diagnostics VALUES (?,?)',(number,json.dumps(d,ensure_ascii=False)))
     for i,chunk in enumerate(chunks):
         body='<blockquote expandable>'+html.escape(chunk)+'</blockquote>'
         if i==len(chunks)-1:
-            d=audio_diag.get(); suffix=f" #{d['id']}" if d else ''
+            suffix=f' #{number}.'
             if development_enabled(): body+='\n\n<blockquote>'+html.escape(DISCLAIMER+suffix)+'</blockquote>'
             elif suffix: body+='\n\n'+suffix.strip()
         if i==0: await status.edit_text(body,parse_mode='HTML')
@@ -529,6 +541,7 @@ async def cloud_audio(k,path):
                 return None
 async def transcribe(k,path):
     d=audio_diag.get()
+    started=time.monotonic()
     a={'model':NAMES[k],'busy':0,'platform':'Azure VPS'}
     if d: d['attempts'].append(a)
     try:
@@ -537,6 +550,7 @@ async def transcribe(k,path):
         a['error']=type(e).__name__+': '+diag_safe(e)
         raise
     finally:
+        a['ms']=round((time.monotonic()-started)*1000)
         if d: diag_save(d)
 async def transcribe_local(k,path):
     provider,n,model=MODELS[k]
@@ -592,7 +606,9 @@ async def voice(m:Message):
         audio_diag_pending.pop((m.chat.id,m.message_id),None)
         logging.warning('Audio queue persistence failed: %s',type(e).__name__)
         return await audio_status(status,'⚠️ Не вдалося зберегти завдання. Надішли аудіо повторно.')
-    try: waiting.put_nowait((m,status))
+    try:
+        d['queue']=waiting.qsize()+1; d['active_at_enqueue']=len(active_jobs); d['queued']=time.time(); diag_save(d)
+        waiting.put_nowait((m,status))
     except asyncio.QueueFull:
         await audio_queue_remove(m)
         audio_diag_pending.pop((m.chat.id,m.message_id),None); d['state']='черга заповнена'; diag_save(d)
@@ -1061,15 +1077,17 @@ async def process_voice(m,status):
     selected=[]
     d=audio_diag_pending.pop((m.chat.id,m.message_id),None)
     token=audio_diag.set(d)
-    if d: d['wait']=round(time.time()-d['queued'],3); d['state']='обробка'; diag_save(d)
+    started=time.monotonic()
+    if d: d['wait']=round(time.time()-d['queued'],3); d['state']='обробка'; d['platform']=audio_platform(); diag_save(d)
     try:
         return await process_voice_inner(m,status,failures,selected)
     finally:
         if d:
             d['selected']=selected[-1] if selected else None
-            d['platform']='Cloudflare' if selected else None
+            d['platform']=audio_platform(); d['processing']=round(time.monotonic()-started,3)
             d['errors']=[where+': '+type(error).__name__+': '+diag_safe(error) for where,error in failures]
             d['state']='результат обрано' if selected else d.get('outcome','не завершено'); diag_save(d)
+            if d.get('number'): await d1_query(history_session,'INSERT OR REPLACE INTO transcript_diagnostics VALUES (?,?)',(d['number'],json.dumps(d,ensure_ascii=False)))
         audio_diag.reset(token)
         if failures:
             chat=m.chat
