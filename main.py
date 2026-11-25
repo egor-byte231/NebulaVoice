@@ -1143,7 +1143,8 @@ async def azure_video(m,status,url):
     async with azure_video_slots:
         try:
             with tempfile.TemporaryDirectory() as folder:
-                args=['yt-dlp','--ignore-config','--no-playlist','--max-filesize','25M','--socket-timeout','15','--match-filter','duration <= 300']
+                downloader=str(Path.home()/ 'NebulaVoice' / '.audiomack-venv' / 'bin' / 'yt-dlp') if music and (urlsplit(url).hostname or '').lower() in ('audiomack.com','www.audiomack.com') and (Path.home()/ 'NebulaVoice' / '.audiomack-venv' / 'bin' / 'yt-dlp').is_file() else 'yt-dlp'
+                args=[downloader,'--ignore-config','--no-playlist','--max-filesize','25M','--socket-timeout','15','--match-filter','duration <= 300']
                 if music:
                     args+=['-f','bestaudio/best','-x','--audio-format','mp3']
                 else:
