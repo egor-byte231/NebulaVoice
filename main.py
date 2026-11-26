@@ -2731,6 +2731,64 @@ def correct_transcript_spelling(text):
         return word
     return re.sub(pattern,replace_word,text,flags=re.IGNORECASE)
 
+# Optional MTProto admin-log monitoring. No group messages are sent.
+def deletion_watch_track(source, sent, kind):
+    if not os.getenv('NEBULA_ADMIN_SESSION') or source.chat.type!='supergroup': return
+    try:
+        db.execute('CREATE TABLE IF NOT EXISTS deletion_watch (chat INTEGER, sent INTEGER, source INTEGER, title TEXT, kind TEXT, created REAL, PRIMARY KEY(chat,sent))')
+        db.execute('INSERT OR REPLACE INTO deletion_watch VALUES (?,?,?,?,?,?)',(source.chat.id,sent.message_id,source.message_id,source.chat.title or str(source.chat.id),kind,time.time()))
+        db.commit()
+    except Exception:
+        logging.warning('Deletion watch registration failed')
+
+async def deletion_watch_monitor():
+    if not os.getenv('NEBULA_ADMIN_SESSION'): return
+    try:
+        from telethon import TelegramClient
+        from telethon.sessions import StringSession
+        from telethon.tl.types import ChannelAdminLogEventActionDeleteMessage
+        client=TelegramClient(StringSession(os.environ['NEBULA_ADMIN_SESSION']),int(os.environ['NEBULA_ADMIN_API_ID']),os.environ['NEBULA_ADMIN_API_HASH'],flood_sleep_threshold=0)
+    except Exception:
+        logging.warning('Deletion monitor configuration unavailable')
+        return
+    try:
+        await client.connect()
+        if not await client.is_user_authorized():
+            logging.warning('Deletion monitor session unauthorized')
+            return
+        db.execute('CREATE TABLE IF NOT EXISTS deletion_watch (chat INTEGER, sent INTEGER, source INTEGER, title TEXT, kind TEXT, created REAL, PRIMARY KEY(chat,sent))')
+        db.commit()
+        while True:
+            now=time.time()
+            rows=db.execute('SELECT chat,sent,source,title,kind,created FROM deletion_watch WHERE created>=?',(now-600,)).fetchall()
+            for chat in set(row[0] for row in rows):
+                watched={row[1]:row for row in rows if row[0]==chat}
+                try:
+                    entity=await client.get_input_entity(chat)
+                    async for event in client.iter_admin_log(entity,delete=True,limit=200):
+                        stamp=event.date.timestamp()
+                        if stamp<min(row[5] for row in watched.values())-1: break
+                        action=event.action
+                        if not isinstance(action,ChannelAdminLogEventActionDeleteMessage): continue
+                        row=watched.get(action.message.id)
+                        if not row or not -1<=stamp-row[5]<=300: continue
+                        if event.user_id==bot.id: continue
+                        link=f'https://t.me/c/{str(chat)[4:]}/{row[2]}'
+                        body=f'🗑 Адміністратор видалив повідомлення NebulaVoice\n\nГрупа: {row[3]}\nТип: {row[4]}\nID адміністратора: {event.user_id}\nВидалено через: {max(0,int(stamp-row[5]))} с\nОригінал: {link}'
+                        await bot.send_message(OWNER,body,parse_mode=None)
+                        db.execute('DELETE FROM deletion_watch WHERE chat=? AND sent=?',(chat,row[1]))
+                        db.commit()
+                        watched.pop(row[1],None)
+                        if not watched: break
+                except Exception as e:
+                    logging.warning('Deletion monitor chat %s: %s',chat,type(e).__name__)
+                    if getattr(e,'seconds',0): await asyncio.sleep(min(300,e.seconds))
+            db.execute('DELETE FROM deletion_watch WHERE created<?',(time.time()-600,))
+            db.commit()
+            await asyncio.sleep(15)
+    finally:
+        await client.disconnect()
+
 async def deliver_transcript(m,status,result):
     if not enabled(): return await mark_disabled(status)
     result=correct_transcript_spelling(result)
@@ -2750,8 +2808,9 @@ async def deliver_transcript(m,status,result):
             suffix=f' #{number}.'
             if development_enabled(): body+='\n\n<blockquote>'+html.escape(DISCLAIMER+suffix)+'</blockquote>'
             elif suffix: body+='\n\n'+suffix.strip()
-        if i==0: await status.edit_text(body,parse_mode='HTML')
-        else: await m.reply(body,parse_mode='HTML')
+        if i==0: sent=await status.edit_text(body,parse_mode='HTML')
+        else: sent=await m.reply(body,parse_mode='HTML')
+        deletion_watch_track(m,sent,'Голосове повідомлення' if m.voice else 'Відеокружечок')
     if chunks: overview_add(m,voices=int(bool(m.voice)),circles=int(bool(m.video_note)))
     if chunks: await record_server_result(m,'audio' if m.voice else 'video')
 audio_cloud_retry=0
@@ -4018,9 +4077,10 @@ async def generate_text(m,question,context='',group=False,history_context='',dia
             continue
         if group:
             if not group_enabled(chat): return
-            await m.reply(html.escape(answer[:3700])+('\n\n<blockquote>'+html.escape(DISCLAIMER)+'</blockquote>' if development_enabled() else ''),parse_mode='HTML')
+            sent=await m.reply(html.escape(answer[:3700])+('\n\n<blockquote>'+html.escape(DISCLAIMER)+'</blockquote>' if development_enabled() else ''),parse_mode='HTML')
         else:
-            await m.reply(html.escape(answer[:3700])+('\n\n<blockquote>'+html.escape(DISCLAIMER)+'</blockquote>' if development_enabled() else ''),parse_mode='HTML')
+            sent=await m.reply(html.escape(answer[:3700])+('\n\n<blockquote>'+html.escape(DISCLAIMER)+'</blockquote>' if development_enabled() else ''),parse_mode='HTML')
+        deletion_watch_track(m,sent,'Відповідь текстового ШІ')
         text_api_health[name]=0
         diagnostic['selected']=name+' • '+model
         await record_server_result(m,'text')
@@ -4596,6 +4656,7 @@ async def main():
     if cloud_ready: tasks.append(asyncio.create_task(d1_monitor(session)))
     tasks.append(asyncio.create_task(quota_reset_monitor()))
     tasks.append(asyncio.create_task(daily_report_monitor()))
+    tasks.append(asyncio.create_task(deletion_watch_monitor()))
     if False:
         await cloud_restore_reservations()
         tasks.append(asyncio.create_task(cloud_reconcile()))
