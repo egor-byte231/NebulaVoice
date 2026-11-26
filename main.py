@@ -489,8 +489,30 @@ async def audio_diag_command(m:Message):
     if d.get('errors') or any(a.get('error') for a in d.get('attempts',[])): lines.append('Заміна: '+(d.get('selected') or 'не визначено'))
     body='\n'.join(lines)
     for i in range(0,len(body),3500): await m.answer(body[i:i+3500],parse_mode=None)
+# Conservative whole-word spelling corrections; no translation or fuzzy matching.
+TRANSCRIPT_SPELLING={
+    'сести':'сісти',
+    'коврік':'коврик',
+    'привєт':'привет',
+    'севодня':'сегодня',
+    'будласка':'будь ласка',
+    'взагаліто':'взагалі-то',
+    'будьласка':'будь ласка',
+}
+def correct_transcript_spelling(text):
+    pattern=r'(?<![\w\u0027\u2019\u02bc-])(?:'+ '|'.join(re.escape(w) for w in TRANSCRIPT_SPELLING)+r')(?![\w\u0027\u2019\u02bc-])'
+    def replace_word(match):
+        word=match.group()
+        replacement=TRANSCRIPT_SPELLING[word.lower()]
+        if word.isupper(): return replacement.upper()
+        if word.islower(): return replacement
+        if word.istitle(): return replacement.capitalize()
+        return word
+    return re.sub(pattern,replace_word,text,flags=re.IGNORECASE)
+
 async def deliver_transcript(m,status,result):
     if not enabled(): return await mark_disabled(status)
+    result=correct_transcript_spelling(result)
     chunks=[result[i:i+3700] for i in range(0,len(result),3700)]
     if chunks:
         await d1_query(history_session,'CREATE TABLE IF NOT EXISTS transcript_numbers (id INTEGER PRIMARY KEY AUTOINCREMENT, chat INTEGER NOT NULL, message_id INTEGER NOT NULL, UNIQUE(chat,message_id))')
