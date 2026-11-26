@@ -470,6 +470,10 @@ async def audio_diag_command(m:Message):
     if not row: return await m.answer('Транскрипцію не знайдено.')
     d=json.loads(row[0])
     lines=[f"🔎 Транскрипція #{d.get('number',d['id'])}",f"Стан: {d.get('state','очікування')}",f"Позиція при вході в чергу: {d.get('queue','—')}",f"Активних обробників при вході: {d.get('active_at_enqueue','—')}",f"Час обробки: {d.get('processing','—')} с",f"Очікування: {d.get('wait','—')} с",f"Платформа транскрипції: {d.get('platform') or ('Cloudflare (за даними слота)' if any(a.get('slot') is not None for a in d.get('attempts',[])) else 'Не зафіксовано')}",f"Обраний ШІ: {d.get('selected') or '—'}",f"Джерело: {d.get('source','—')}"]
+    await d1_query(history_session,'CREATE TABLE IF NOT EXISTS transcript_numbers (id INTEGER PRIMARY KEY AUTOINCREMENT, chat INTEGER NOT NULL, message_id INTEGER NOT NULL, UNIQUE(chat,message_id))')
+    totals=await d1_query(history_session,'SELECT COUNT(*) AS total FROM transcript_numbers WHERE NOT (chat=0 AND message_id=0)')
+    total=134+int(totals[0]['total'])
+    lines.insert(1,f'Усього оброблено транскрипцій (за обліком): {total}')
     attempts=d.get('attempts',[])
     failed=[a for a in attempts if a.get('error')]
     first=attempts[0]['model'] if attempts else 'Не зафіксовано'
