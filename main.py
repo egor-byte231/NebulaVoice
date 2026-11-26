@@ -4429,6 +4429,14 @@ async def text_message(m:Message):
     question=re.sub(r'(?<!\w)@Nebulavcbot(?!\w)','',raw,flags=re.I).strip()
     if not question: return
     overview_add(m,requests=1)
+    greeting=re.fullmatch(r'(привіт|привет|hello|hi|hej|cześć|добрий день|добрый день)[!?.\s]*',question.strip(),re.I)
+    if greeting and not test_route('text',m):
+        word=greeting.group(1).lower()
+        answer={'привет':'Привет!','добрый день':'Добрый день!','добрий день':'Добрий день!'}.get(word,'Привіт!')
+        sent=await m.reply(html.escape(answer)+('\n\n<blockquote>'+html.escape(DISCLAIMER)+'</blockquote>' if development_enabled() else ''),parse_mode='HTML')
+        deletion_watch_track(m,sent,'Відповідь текстового ШІ')
+        await record_server_result(m,'text')
+        return
     diagnostic={'attempts':[],'platform':'Azure VPS'}
     diag_started=time.monotonic()
     try: diag_id=await text_diag_begin(m)
