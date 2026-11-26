@@ -4046,13 +4046,23 @@ async def text_diag_show(m,number):
     else: body+='\nДетальна діагностика відсутня.'
     await m.answer(body[:3900],parse_mode=None,reply_markup=diag_keyboard('text'))
 
-db.execute('CREATE TABLE IF NOT EXISTS local_qwen_control (id INTEGER PRIMARY KEY, slots INTEGER NOT NULL)')
-db.execute('INSERT OR IGNORE INTO local_qwen_control VALUES (1,3)')
-db.execute('UPDATE local_qwen_control SET slots=MAX(1,MIN(3,slots)) WHERE id=1')
-db.commit()
+def ensure_local_qwen_control():
+    db.execute('CREATE TABLE IF NOT EXISTS local_qwen_control (id INTEGER PRIMARY KEY, slots INTEGER NOT NULL)')
+    db.execute('INSERT OR IGNORE INTO local_qwen_control VALUES (1,3)')
+    db.execute('UPDATE local_qwen_control SET slots=MAX(1,MIN(3,slots)) WHERE id=1')
+    db.commit()
+ensure_local_qwen_control()
 class LocalQwenSettings:
     def get(self,kind):
-        return max(1,min(3,db.execute('SELECT slots FROM local_qwen_control WHERE id=1').fetchone()[0]))
+        try:
+            row=db.execute('SELECT slots FROM local_qwen_control WHERE id=1').fetchone()
+        except sqlite3.OperationalError as e:
+            if 'no such table' not in str(e): raise
+            row=None
+        if row is None:
+            ensure_local_qwen_control()
+            row=db.execute('SELECT slots FROM local_qwen_control WHERE id=1').fetchone()
+        return max(1,min(3,row[0]))
 local_qwen_settings=LocalQwenSettings()
 local_qwen_slots=SlotGate(local_qwen_settings,'local')
 def local_qwen_menu():
@@ -4062,6 +4072,7 @@ async def local_qwen_control(c:CallbackQuery):
     if c.message.chat.type!='private': return await c.answer()
     value=c.data.split(':')[-1]
     if value in ('1','2','3'):
+        ensure_local_qwen_control()
         db.execute('UPDATE local_qwen_control SET slots=? WHERE id=1',(int(value),))
         db.commit()
     await c.answer()
@@ -4504,6 +4515,7 @@ async def d1_initialize(session):
             finally: source.close()
         # Restoring a legacy snapshot can remove Azure-only schema.
         RuntimeSettings(db)
+        ensure_local_qwen_control()
         db.execute('CREATE TABLE IF NOT EXISTS cloud_completed (id TEXT PRIMARY KEY)')
         db.execute('CREATE TABLE IF NOT EXISTS cloud_pending (id TEXT PRIMARY KEY,chat INTEGER,day TEXT,budget INTEGER)')
         db.execute('CREATE TABLE IF NOT EXISTS cooldowns (provider TEXT PRIMARY KEY, until REAL)')
