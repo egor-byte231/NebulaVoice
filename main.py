@@ -4021,20 +4021,21 @@ async def text_diag_show(m,number):
     await m.answer(body[:3900],parse_mode=None,reply_markup=diag_keyboard('text'))
 
 db.execute('CREATE TABLE IF NOT EXISTS local_qwen_control (id INTEGER PRIMARY KEY, slots INTEGER NOT NULL)')
-db.execute('INSERT OR IGNORE INTO local_qwen_control VALUES (1,4)')
+db.execute('INSERT OR IGNORE INTO local_qwen_control VALUES (1,3)')
+db.execute('UPDATE local_qwen_control SET slots=MAX(1,MIN(3,slots)) WHERE id=1')
 db.commit()
 class LocalQwenSettings:
     def get(self,kind):
-        return max(1,min(4,db.execute('SELECT slots FROM local_qwen_control WHERE id=1').fetchone()[0]))
+        return max(1,min(3,db.execute('SELECT slots FROM local_qwen_control WHERE id=1').fetchone()[0]))
 local_qwen_settings=LocalQwenSettings()
 local_qwen_slots=SlotGate(local_qwen_settings,'local')
 def local_qwen_menu():
-    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=str(n),callback_data='localqwen:'+str(n)) for n in range(1,5)],[InlineKeyboardButton(text='🔄 Оновити',callback_data='localqwen:show')],[InlineKeyboardButton(text='⬅️ Назад',callback_data='owner:ai')]])
+    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=str(n),callback_data='localqwen:'+str(n)) for n in range(1,4)],[InlineKeyboardButton(text='🔄 Оновити',callback_data='localqwen:show')],[InlineKeyboardButton(text='⬅️ Назад',callback_data='owner:ai')]])
 @dp.callback_query(F.data.startswith('localqwen:'),F.from_user.id==OWNER)
 async def local_qwen_control(c:CallbackQuery):
     if c.message.chat.type!='private': return await c.answer()
     value=c.data.split(':')[-1]
-    if value in ('1','2','3','4'):
+    if value in ('1','2','3'):
         db.execute('UPDATE local_qwen_control SET slots=? WHERE id=1',(int(value),))
         db.commit()
     await c.answer()
