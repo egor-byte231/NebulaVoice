@@ -159,7 +159,7 @@ def report():
     def panel(items):
         return '<pre>'+html.escape('\n'.join(f'{label:<14} {str(value):>12}' for label,value in items))+'</pre>'
     total=[sum(r[i] for r in rows.values()) for i in range(4)]
-    lines=['📊 <b>Статистика NebulaVoice</b>',f'📅 {day} (UTC)', '🟢 Транскрипція увімкнена' if enabled() else '🔴 Транскрипція вимкнена','', '<b>Загальна статистика</b>',panel([('Транскрипцій',total[2]),('Спроб',total[0]),('Аудіо у спробах',duration(total[1])),('У черзі',f'{waiting.qsize()} / 50'),('Активні',f'{azure_audio_gate.active} / {azure_settings.get("audio")}')])]
+    lines=['📊 <b>Статистика NebulaVoice</b>',f'📅 {day} (UTC)', '🟢 Транскрипція увімкнена' if enabled() else '🔴 Транскрипція вимкнена','', '<b>Загальна статистика</b>',panel([('Транскрипцій',total[2]),('Спроб',total[0]),('Аудіо у спробах',duration(total[1])),('У черзі',f'{waiting.qsize()} / 50'),('Активні',f'{len(active_jobs)} / {azure_settings.get("audio")}')])]
     lines.extend(['']+user_stats_lines())
     for k in ORDER:
         a,b,c,d=rows.get(k,(0,0,0,0))
