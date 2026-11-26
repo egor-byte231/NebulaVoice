@@ -2978,7 +2978,6 @@ async def run_load_test(message,config):
                                 continue
                             data=await response.json()
                         actual=(data.get('usage') or {}).get('total_tokens')
-            attempt['tokens']=actual
                         if isinstance(actual,int) and actual>=0:
                             text_charge(day,name,actual-reserve)
                             tokens+=actual-reserve
@@ -3948,6 +3947,7 @@ async def generate_text(m,question,context='',group=False,history_context='',dia
                         continue
                     data=await response.json()
             actual=(data.get('usage') or {}).get('total_tokens')
+            attempt['tokens']=actual
             if isinstance(actual,int) and actual>=0:
                 text_charge(day,name,actual-reserve)
                 group_charge(chat,day,actual-reserve)
