@@ -2911,7 +2911,8 @@ def validate_audio_result(j):
     if segments and all(isinstance(seg.get('no_speech_prob'),(int,float)) and seg['no_speech_prob']>=0.65 and (not isinstance(seg.get('avg_logprob'),(int,float)) or seg['avg_logprob'] < -0.5) for seg in segments):
         raise RejectedTranscript('Порожня транскрипція')
     # Whisper can hallucinate subtitle credits on silence or background noise.
-    credit=re.compile(r'(?im)^[^\S\r\n]*(?:субтитры\s+(?:создавал[аи]?|создал[аи]?|сделал[аи]?|подготовил[аи]?)|субтитри\s+(?:створив|створила|підготував|підготувала)|subtitles\s+by|captions\s+by)[^\S\r\n]*[:–-]?[^\S\r\n]*(?:dima[^\S\r\n]*torzok|дима[^\S\r\n]*торзок|[\w.-]{2,40})[^\S\r\n]*[.!]?[^\S\r\n]*('',text).strip()
+    credit=re.compile(r'(?im)^[^\S\r\n]*(?:субтитры\s+(?:создавал[аи]?|создал[аи]?|сделал[аи]?|подготовил[аи]?)|субтитри\s+(?:створив|створила|підготував|підготувала)|subtitles\s+by|captions\s+by)[^\S\r\n]*[:–-]?[^\S\r\n]*(?:dima[^\S\r\n]*torzok|дима[^\S\r\n]*торзок|[\w.-]{2,40})[^\S\r\n]*[.!]?[^\S\r\n]*$')
+    text=credit.sub('',text).strip()
     if not text: raise RejectedTranscript('Порожня транскрипція')
     if prompt_echo(text): raise RejectedTranscript('Повторення старого промпту')
     if re.search(r'\b(?:bláď|bljať|blyat|bljad|blatj)\b',text,re.I) and not re.search(r'[А-Яа-яІіЇїЄєҐґ]',text):
