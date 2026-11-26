@@ -3398,12 +3398,15 @@ async def owner_action(c:CallbackQuery):
         except Exception as e:
             if 'message is not modified' not in str(e).lower(): raise
         return
-    if c.data=='owner:ai':
-        try: await c.message.edit_text(text_report(),parse_mode='HTML',reply_markup=text_stats_menu())
+    if c.data=='owner:ai' or c.data.startswith('owner:ai:'):
+        try:
+            pages=text_report_pages()
+            page=max(0,min(len(pages)-1,int(c.data.rsplit(':',1)[-1]) if c.data!='owner:ai' else 0))
+            await c.message.edit_text(pages[page],parse_mode='HTML',reply_markup=text_stats_menu(page,len(pages)))
         except Exception as e:
             if 'message is not modified' not in str(e).lower():
                 logging.exception('Owner text statistics failed')
-                await c.message.answer('⚠️ Не вдалося відкрити статистику. Деталі записано в журнал.',reply_markup=text_stats_menu())
+                await c.message.answer('⚠️ Не вдалося відкрити статистику: '+type(e).__name__,parse_mode=None,reply_markup=text_stats_menu())
         return
     if c.data=='owner:stats':
         try: await c.message.edit_text(report(),parse_mode='HTML',reply_markup=stats_menu())
@@ -3872,8 +3875,22 @@ async def text_diagnose(m:Message):
             lines.append(route[0]+': '+type(e).__name__)
     await m.answer('\n'.join(lines)[:3900],parse_mode=None)
 
-def text_stats_menu():
-    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='🔄 Оновити',callback_data='owner:ai')],[InlineKeyboardButton(text='🖥 Локальний ШІ',callback_data='localqwen:show')],[InlineKeyboardButton(text='⬅️ Назад',callback_data='owner:back')]])
+def text_stats_menu(page=0,total=1):
+    rows=[[InlineKeyboardButton(text='🔄 Оновити',callback_data='owner:ai:'+str(page))]]
+    if total>1:
+        rows.append([InlineKeyboardButton(text=('✓ ' if i==page else '')+str(i+1),callback_data='owner:ai:'+str(i)) for i in range(total)])
+    rows.extend([[InlineKeyboardButton(text='🖥 Локальний ШІ',callback_data='localqwen:show')],[InlineKeyboardButton(text='⬅️ Назад',callback_data='owner:back')]])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+def text_report_pages():
+    pages=[]
+    current=''
+    for line in text_report().splitlines():
+        if len(current)+len(line)+1>3000:
+            pages.append(current)
+            current=''
+        current+=line+'\n'
+    if current: pages.append(current)
+    return pages
 def user_stats_lines():
     today=datetime.datetime.now(datetime.timezone.utc).date()
     yesterday=(today-datetime.timedelta(days=1)).isoformat()
@@ -3910,7 +3927,8 @@ def text_report():
 @dp.message(Command('ai_status'),F.chat.type=='private',F.from_user.id==OWNER)
 async def text_status(m:Message):
     try:
-        await m.answer(text_report(),parse_mode='HTML',reply_markup=text_stats_menu())
+        pages=text_report_pages()
+        await m.answer(pages[0],parse_mode='HTML',reply_markup=text_stats_menu(0,len(pages)))
     except Exception:
         logging.exception('Text statistics report failed')
         await m.answer('⚠️ Не вдалося сформувати статистику. Деталі записано в журнал.',reply_markup=text_stats_menu())
