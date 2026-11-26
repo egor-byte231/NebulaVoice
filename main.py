@@ -3871,7 +3871,7 @@ async def text_diagnose(m:Message):
     await m.answer('\n'.join(lines)[:3900],parse_mode=None)
 
 def text_stats_menu():
-    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='🔄 Оновити',callback_data='owner:ai')],[InlineKeyboardButton(text='⬅️ Назад',callback_data='owner:back')]])
+    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='🔄 Оновити',callback_data='owner:ai')],[InlineKeyboardButton(text='🖥 Локальний ШІ',callback_data='localqwen:show')],[InlineKeyboardButton(text='⬅️ Назад',callback_data='owner:back')]])
 def user_stats_lines():
     today=datetime.datetime.now(datetime.timezone.utc).date()
     yesterday=(today-datetime.timedelta(days=1)).isoformat()
@@ -3886,6 +3886,7 @@ def text_report():
     charged=db.execute('SELECT COALESCE(SUM(tokens),0) FROM text_group_usage WHERE day=?',(day,)).fetchone()[0]
     lines=['🤖 <b>Статистика текстового ШІ</b>',f'📅 {day} (UTC)','', '🖥 <b>Azure VPS — текстові відповіді</b>',f'Активні слоти: {azure_text_gate.active}/{azure_settings.get("text")}',f'Черга: {azure_text_gate.waiting}', '', '<b>Добовий облік API (включно з тестами)</b>',f'Токени: {sum(x[1] for x in rows)} | Спроби: {sum(x[2] for x in rows)}',f'Токени чатів: {charged} | Групи: {groups}','Групи Free/Prem: 40k / 100k','ЛС Free/Prem: 10k / 40k','']
     lines.extend(user_stats_lines())
+    lines.append(f'Локальний Qwen: {local_qwen_slots.active}/{local_qwen_settings.get("local")} | черга {local_qwen_slots.waiting}')
     usage_by_route={name:(t,a) for name,t,a in rows}
     for route in TEXT_ROUTES:
         name=route[0]
@@ -4019,7 +4020,30 @@ async def text_diag_show(m,number):
     else: body+='\nДетальна діагностика відсутня.'
     await m.answer(body[:3900],parse_mode=None,reply_markup=diag_keyboard('text'))
 
-local_qwen_slots=asyncio.Semaphore(4)
+db.execute('CREATE TABLE IF NOT EXISTS local_qwen_control (id INTEGER PRIMARY KEY, slots INTEGER NOT NULL)')
+db.execute('INSERT OR IGNORE INTO local_qwen_control VALUES (1,4)')
+db.commit()
+class LocalQwenSettings:
+    def get(self,kind):
+        return max(1,min(4,db.execute('SELECT slots FROM local_qwen_control WHERE id=1').fetchone()[0]))
+local_qwen_settings=LocalQwenSettings()
+local_qwen_slots=SlotGate(local_qwen_settings,'local')
+def local_qwen_menu():
+    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=str(n),callback_data='localqwen:'+str(n)) for n in range(1,5)],[InlineKeyboardButton(text='🔄 Оновити',callback_data='localqwen:show')],[InlineKeyboardButton(text='⬅️ Назад',callback_data='owner:ai')]])
+@dp.callback_query(F.data.startswith('localqwen:'),F.from_user.id==OWNER)
+async def local_qwen_control(c:CallbackQuery):
+    if c.message.chat.type!='private': return await c.answer()
+    value=c.data.split(':')[-1]
+    if value in ('1','2','3','4'):
+        db.execute('UPDATE local_qwen_control SET slots=? WHERE id=1',(int(value),))
+        db.commit()
+    await c.answer()
+    t,a=db.execute('SELECT COALESCE(SUM(tokens),0),COALESCE(SUM(attempts),0) FROM text_usage WHERE day=? AND route=?',(text_day(),'Local Qwen')).fetchone()
+    try:
+        await c.message.edit_text(f'🖥 Qwen3.5 2B — локальний резерв\\nСлоти: {local_qwen_slots.active}/{local_qwen_settings.get("local")}\\nЧерга: {local_qwen_slots.waiting}\\nСпроби сьогодні: {a}\\nТокени (фактичні + оцінені): {t}\\nЛіміт провайдера: відсутній',reply_markup=local_qwen_menu())
+    except Exception as e:
+        if 'message is not modified' not in str(e).lower(): raise
+
 async def generate_text(m,question,context='',group=False,history_context='',diagnostic=None):
     if diagnostic is None: diagnostic={'attempts':[]}
     
@@ -4049,11 +4073,12 @@ async def generate_text(m,question,context='',group=False,history_context='',dia
         group_charge(chat,day,reserve)
         try:
             if local:
-                async with local_qwen_slots:
+                async with local_qwen_slots.slot():
                     async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=300)) as session:
                         async with session.post(url,json={'model':model,'messages':messages,'stream':False,'think':False,'options':{'temperature':0.2,'top_p':0.8,'num_ctx':4096,'num_predict':min(output_limit,300)}},allow_redirects=False) as response:
                             response.raise_for_status()
                             raw=await response.json()
+                    attempt['status']='HTTP 200'
                     data={'usage':{'total_tokens':raw.get('prompt_eval_count',0)+raw.get('eval_count',0)},'choices':[{'message':raw['message'],'finish_reason':raw.get('done_reason')}]}
             else:
                 async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=20)) as session:
