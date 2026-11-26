@@ -287,7 +287,7 @@ async def help_command(m:Message):
             lines.extend(['','🧪 Режим тестування активний:',
                           'Тест аудіо — вибери модель та надішли голосове або кружечок.',
                           'Тест тексту — вибери модель та надішли запит зі згадкою @Nebulavcbot або відповіддю на повідомлення бота.',
-                          'Тест навантаження — текст або аудіо, від 1 до 100 завдань.',
+                          'Тест навантаження — текст або аудіо, від 1 до 1000 завдань.',
                           'Маршрутизація: автоматично, вибрані API або всі API.',
                           'Для аудіотесту надішли один запис після запуску.',
                           'Звіт: API, час черги та обробки, помилки, пікова паралельність і токени для тексту.',
@@ -3132,7 +3132,7 @@ async def load_action(c):
         load_config['routes'].clear()
     if action=='custom':
         load_count_wait=True
-        return await c.message.answer('Введи кількість від 1 до 100.')
+        return await c.message.answer('Введи кількість від 1 до 1000.')
     if action=='n' and parts[3] in ('5','10','20','30','50','100'): load_config['count']=int(parts[3])
     if action=='m' and parts[3] in ('auto','selected','all'): load_config['mode']=parts[3]
     if action=='r' and parts[3].isdigit() and int(parts[3])<len(load_names()):
@@ -4189,7 +4189,7 @@ async def cloud_text_probe():
 async def text_message(m:Message):
     global load_count_wait
     if testing_enabled() and m.from_user and m.from_user.id==OWNER and m.chat.type=='private' and load_count_wait:
-        if not (m.text or '').isdigit() or not 1<=int(m.text)<=100: return await m.reply('Введи число від 1 до 100.')
+        if not (m.text or '').isdigit() or not 1<=int(m.text)<=1000: return await m.reply('Введи число від 1 до 1000.')
         load_count_wait=False
         load_config['count']=int(m.text)
         return await m.reply('Кількість: '+str(load_config['count']),reply_markup=load_menu())
