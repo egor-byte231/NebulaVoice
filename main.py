@@ -3401,7 +3401,9 @@ async def owner_action(c:CallbackQuery):
     if c.data=='owner:ai':
         try: await c.message.edit_text(text_report(),parse_mode='HTML',reply_markup=text_stats_menu())
         except Exception as e:
-            if 'message is not modified' not in str(e).lower(): raise
+            if 'message is not modified' not in str(e).lower():
+                logging.exception('Owner text statistics failed')
+                await c.message.answer('⚠️ Не вдалося відкрити статистику. Деталі записано в журнал.',reply_markup=text_stats_menu())
         return
     if c.data=='owner:stats':
         try: await c.message.edit_text(report(),parse_mode='HTML',reply_markup=stats_menu())
@@ -3888,6 +3890,8 @@ def text_report():
     lines.extend(user_stats_lines())
     lines.append(f'Локальний Qwen: {local_qwen_slots.active}/{local_qwen_settings.get("local")} | черга {local_qwen_slots.waiting}')
     usage_by_route={name:(t,a) for name,t,a in rows}
+    lt,la=usage_by_route.get('Local Qwen',(0,0))
+    lines.append(f'Локальний облік: {lt} токенів | {la} спроб')
     for route in TEXT_ROUTES:
         name=route[0]
         key,url,model=text_config(route)
@@ -3900,12 +3904,16 @@ def text_report():
             details+=f'\nБазова квота: {quota}\nЗалишок (оцінка): {remaining}\nДоступно: {remaining/quota:.1%}'
         else:
             details+='\nЛіміт API: невідомий'
-        lines.extend(['',f'<b>{html.escape(name)} · {html.escape(model)} · {status}</b>','<pre>'+html.escape(details)+'</pre>'])
+        lines.extend(['',f'<b>{html.escape(name)} · {html.escape(model[:100])}</b> · {status}',html.escape(details.replace('\n',' | '))])
     lines.extend(['','<i>Добовий облік включає історичні дані резервних серверів і тести. Успішність та час API окремо не обліковуються цим звітом.</i>'])
     return '\n'.join(lines)
 @dp.message(Command('ai_status'),F.chat.type=='private',F.from_user.id==OWNER)
 async def text_status(m:Message):
-    await m.answer(text_report(),parse_mode='HTML',reply_markup=text_stats_menu())
+    try:
+        await m.answer(text_report(),parse_mode='HTML',reply_markup=text_stats_menu())
+    except Exception:
+        logging.exception('Text statistics report failed')
+        await m.answer('⚠️ Не вдалося сформувати статистику. Деталі записано в журнал.',reply_markup=text_stats_menu())
 # Group AI is opt-in; history stays in RAM and is isolated by chat.
 db.execute('CREATE TABLE IF NOT EXISTS text_groups (chat INTEGER PRIMARY KEY)')
 db.execute('CREATE TABLE IF NOT EXISTS text_disabled (chat INTEGER PRIMARY KEY)')
