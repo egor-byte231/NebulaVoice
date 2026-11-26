@@ -4526,7 +4526,10 @@ async def milestone_reports():
     await d1_query(history_session,'CREATE TABLE IF NOT EXISTS daily_reports (day TEXT PRIMARY KEY, body TEXT NOT NULL)')
     await d1_query(history_session,'CREATE TABLE IF NOT EXISTS daily_publications (day TEXT,chat INTEGER,PRIMARY KEY(day,chat))')
     await d1_query(history_session,'CREATE TABLE IF NOT EXISTS milestone_sent (kind TEXT, threshold INTEGER, PRIMARY KEY(kind,threshold))')
-    for kind,total,label in (('circles',totals[0],'відеокружечків'),('requests',totals[1],'запитів до текстового ШІ')):
+    await d1_query(history_session,'CREATE TABLE IF NOT EXISTS transcript_numbers (id INTEGER PRIMARY KEY AUTOINCREMENT, chat INTEGER NOT NULL, message_id INTEGER NOT NULL, UNIQUE(chat,message_id))')
+    audio_rows=await d1_query(history_session,'SELECT COUNT(*) AS total FROM transcript_numbers WHERE chat!=0')
+    audio_total=134+int(audio_rows[0]['total'])
+    for kind,total,label in (('audio_total',audio_total,'транскрипцій голосових повідомлень та відеокружечків'),('requests',totals[1],'запитів до текстового ШІ')):
         if total<100: continue
         rows=await d1_query(history_session,'SELECT MAX(threshold) AS last FROM milestone_sent WHERE kind=?',(kind,))
         last=rows[0]['last']
