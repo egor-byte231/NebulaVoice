@@ -4082,6 +4082,20 @@ async def local_qwen_control(c:CallbackQuery):
     except Exception as e:
         if 'message is not modified' not in str(e).lower(): raise
 
+def text_answer_quality(answer,question):
+    # Conservative checks for corrupted generation, not a grammar checker.
+    if '\ufffd' in answer or re.search(r'[░▒▓]{1,}',answer) and not re.search(r'графік|график|шкала|прогрес|прогресс|ascii|діаграм|диаграм',question,re.I):
+        return 'corrupted characters'
+    words=re.findall(r'[^\W\d_]+',answer,re.UNICODE)
+    if len(words)>=12:
+        mixed=sum(bool(re.search(r'[A-Za-z]',w) and re.search(r'[А-Яа-яЁёІіЇїЄєҐґ]',w)) for w in words)
+        archaic=sum(bool(re.search(r'[ѣѢѳѲѵѴ]',w)) for w in words)
+        if mixed>=3 and mixed/len(words)>=0.04 or archaic>=3:
+            return 'mixed-script corruption'
+        if len(words)>=35 and len(question.split())<=3 and re.fullmatch(r'(?:що робиш|что делаешь|як справи|как дела|привіт|привет)[?!.\s]*',question.strip(),re.I):
+            return 'excessive response to simple chat'
+    return None
+
 async def generate_text(m,question,context='',group=False,history_context='',diagnostic=None):
     if diagnostic is None: diagnostic={'attempts':[]}
     
@@ -4151,6 +4165,12 @@ async def generate_text(m,question,context='',group=False,history_context='',dia
         except Exception as e:
             text_api_failure(name,503)
             logging.warning('Text AI %s: %s',name,type(e).__name__)
+            continue
+        quality_error=text_answer_quality(answer,question)
+        if quality_error:
+            attempt['status']='rejected: '+quality_error
+            logging.warning('Text AI %s: %s',name,quality_error)
+            text_api_failure(name,503)
             continue
         if re.search(r'(?i)(?:@|(?:https?://)?(?:t\.me|telegram\.me)/)[a-z0-9_]*bot\b|tg://resolve\?domain=[a-z0-9_]*bot\b',answer):
             attempt['status']='blocked external bot reference'
