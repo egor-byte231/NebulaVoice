@@ -2943,6 +2943,37 @@ def load_menu():
             rows.append([InlineKeyboardButton(text=('✓ ' if name in load_config['routes'] else '')+name,callback_data='owner:load:r:'+str(i))])
     rows.extend([[InlineKeyboardButton(text='⚡ Запустити реальні запити',callback_data='owner:load:run')],[InlineKeyboardButton(text='Назад',callback_data='owner:back')]])
     return InlineKeyboardMarkup(inline_keyboard=rows)
+text_api_health={}
+text_api_next={}
+text_api_locks={}
+def text_retry_delay(headers):
+    from email.utils import parsedate_to_datetime
+    value=headers.get('Retry-After','60')
+    try: return max(1,float(value))
+    except ValueError:
+        try: return max(1,parsedate_to_datetime(value).timestamp()-time.time())
+        except Exception: return 60
+
+def text_api_failure(name,status,headers=None):
+    failures=text_api_health.get(name,0)+1
+    text_api_health[name]=failures
+    if status==429: block('text:'+name,text_retry_delay(headers or {}))
+    elif status in (502,503,504) and failures>=3: block('text:'+name,120)
+    elif status in (401,403,404): block('text:'+name,300)
+
+async def text_api_pace(name):
+    lock=text_api_locks.setdefault(name,asyncio.Lock())
+    async with lock:
+        await asyncio.sleep(max(0,text_api_next.get(name,0)-time.monotonic()))
+        if blocked('text:'+name)>time.time(): return False
+        text_api_next[name]=time.monotonic()+0.25
+        return True
+
+def text_api_order(routes,offset=0):
+    if not routes: return []
+    rotated=routes[offset%len(routes):]+routes[:offset%len(routes)]
+    return sorted(rotated,key=lambda r:(blocked('text:'+r[0])>time.time(),text_api_health.get(r[0],0)))
+
 async def run_load_test(message,config):
     routes=[r for r in TEXT_ROUTES if config['mode']!='selected' or r[0] in config['routes']]
     if not routes: return await message.answer('Немає локально налаштованих моделей.')
@@ -2950,59 +2981,76 @@ async def run_load_test(message,config):
     active=peak=0
     async def job(i,session):
         nonlocal active,peak
-        async with azure_text_gate.slot():
-            began=time.monotonic()
-            active+=1
-            peak=max(peak,active)
-            attempts=[]
-            tokens=0
-            winner=''
-            try:
-                order=routes if config['mode']=='auto' else [routes[i%len(routes)]]
-                for route in order:
-                    if not testing_enabled(): break
-                    name=route[0]
-                    key,url,model=text_config(route)
-                    if not key or not url or not model or not url.startswith('https://') or blocked('text:'+name)>time.time():
-                        attempts.append(name+': недоступний')
-                        continue
-                    day=text_day()
-                    reserve=600
-                    text_charge(day,name,reserve,1)
-                    tokens+=reserve
-                    try:
-                        async with session.post(url,headers={'Authorization':'Bearer '+key},json={'model':model,'messages':[{'role':'user','content':'Відповідай українською: скільки буде 2+2?'}],'max_tokens':128},allow_redirects=False) as response:
-                            if response.status!=200:
-                                attempts.append(name+': HTTP '+str(response.status))
-                                if response.status==429: block('text:'+name,60)
+        attempts=[]
+        tokens=0
+        winner=''
+        began=None
+        processing=0
+        order=routes if config['mode']=='auto' else [routes[i%len(routes)]]
+        for cycle in range(3):
+            if not testing_enabled(): break
+            async with azure_text_gate.slot():
+                entered=time.monotonic()
+                if began is None: began=entered
+                active+=1
+                peak=max(peak,active)
+                try:
+                    for route in text_api_order(order,i+cycle):
+                        if not testing_enabled(): break
+                        name=route[0]
+                        key,url,model=text_config(route)
+                        if not key or not url or not model or not url.startswith('https://') or blocked('text:'+name)>time.time(): continue
+                        if not await text_api_pace(name): continue
+                        day=text_day()
+                        reserve=984
+                        text_charge(day,name,reserve,1)
+                        tokens+=reserve
+                        try:
+                            async with session.post(url,headers={'Authorization':'Bearer '+key},json={'model':model,'messages':[{'role':'user','content':'Відповідай українською: скільки буде 2+2?'}],'max_tokens':512},allow_redirects=False) as response:
+                                if response.status!=200:
+                                    attempts.append(name+': HTTP '+str(response.status))
+                                    text_api_failure(name,response.status,response.headers)
+                                    continue
+                                data=await response.json()
+                            actual=(data.get('usage') or {}).get('total_tokens')
+                            if isinstance(actual,int) and actual>=0:
+                                text_charge(day,name,actual-reserve)
+                                tokens+=actual-reserve
+                            choice=data['choices'][0]
+                            answer=choice['message'].get('content')
+                            if not isinstance(answer,str) or not answer.strip():
+                                attempts.append(name+': empty content; finish='+str(choice.get('finish_reason')))
                                 continue
-                            data=await response.json()
-                        actual=(data.get('usage') or {}).get('total_tokens')
-                        if isinstance(actual,int) and actual>=0:
-                            text_charge(day,name,actual-reserve)
-                            tokens+=actual-reserve
-                        answer=data['choices'][0]['message']['content']
-                        if not isinstance(answer,str) or not answer.strip(): raise ValueError('Empty response')
-                        winner=name
-                        attempts.append(name+': OK')
-                        break
-                    except Exception as e:
-                        attempts.append(name+': '+type(e).__name__)
-                return bool(winner),tokens,f'#{i+1} {winner or "Помилка"} | черга {began-start:.2f} с | обробка {time.monotonic()-began:.2f} с | '+', '.join(attempts)
-            finally:
-                active-=1
+                            text_api_health[name]=0
+                            winner=name
+                            attempts.append(name+': OK')
+                            break
+                        except Exception as e:
+                            attempts.append(name+': '+type(e).__name__)
+                            text_api_failure(name,503)
+                finally:
+                    active-=1
+                    processing+=time.monotonic()-entered
+            if winner: break
+            if cycle<2:
+                waits=[max(0,blocked('text:'+r[0])-time.time()) for r in order if all(text_config(r))]
+                delay=max(2**(cycle+1),min(waits,default=0))
+                if delay>120: break
+                await asyncio.sleep(delay)
+        return bool(winner),tokens,f'#{i+1} {winner or "Помилка"} | черга {(began or time.monotonic())-start:.2f} с | обробка {processing:.2f} с | '+', '.join(attempts)
     async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=20)) as session:
         tasks=[asyncio.create_task(job(i,session)) for i in range(config['count'])]
         try:
-            done,pending=await asyncio.wait(tasks,timeout=180)
+            done,pending=await asyncio.wait(tasks,timeout=300)
             results=[t.result() for t in done if not t.cancelled() and t.exception() is None]
         finally:
             for t in tasks:
                 if not t.done(): t.cancel()
             await asyncio.gather(*tasks,return_exceptions=True)
-    lines=[f'Azure VPS: {sum(r[0] for r in results)}/{config["count"]} успішно; пік {peak}; токени (фактичні + оцінені): {sum(r[1] for r in results)}',f'Без результату: {config["count"]-len(results)}']+[r[2] for r in results]
+    lines=[f'Azure VPS: {sum(r[0] for r in results)}/{config["count"]} успішно; пік {peak}; токени (фактичні + оцінені): {sum(r[1] for r in results)}; час {time.monotonic()-start:.1f} с',f'Без результату: {config["count"]-len(results)}']+[r[2] for r in results]
     chunk=''
     for line in lines:
+        line=line[:3400]
         if len(chunk)+len(line)>3500:
             await message.answer(chunk,parse_mode=None)
             chunk=''
@@ -3917,11 +3965,12 @@ async def generate_text(m,question,context='',group=False,history_context='',dia
     reserve=sum(len(x['content'].encode('utf-8')) for x in messages)+output_limit+100
     # Group rollout excludes routes whose free terms or reliability are not established.
     routes=[r for r in TEXT_ROUTES if (not group and m.from_user.id==OWNER) or r[0] in ('Groq 1','Groq 1 20B','Groq 2','Groq 2 20B','Groq 1 Qwen','Groq 2 Qwen','Groq 1 ALLAM','Groq 2 ALLAM','OpenRouter')]
-    for route in routes:
+    for route in text_api_order(routes,m.message_id):
         if group and not group_enabled(chat): return
         name=route[0]
         key,url,model=text_config(route)
         if not key or not url or not model or not url.startswith('https://') or blocked('text:'+name)>time.time(): continue
+        if not await text_api_pace(name): continue
         day=text_day()
         used=group_used(chat,day)
         if used+reserve>(group_limit(chat) if group else private_limit(chat)):
@@ -3937,13 +3986,8 @@ async def generate_text(m,question,context='',group=False,history_context='',dia
             async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=20)) as session:
                 async with session.post(url,headers={'Authorization':'Bearer '+key},json={'model':model,'messages':messages,'max_tokens':output_limit},allow_redirects=False) as response:
                     attempt['status']='HTTP '+str(response.status)
-                    if response.status==429:
-                        try: delay=max(60,float(response.headers.get('Retry-After','60')))
-                        except ValueError: delay=60
-                        block('text:'+name,delay)
-                        continue
                     if response.status!=200:
-                        block('text:'+name,120)
+                        text_api_failure(name,response.status,response.headers)
                         continue
                     data=await response.json()
             actual=(data.get('usage') or {}).get('total_tokens')
@@ -3963,7 +4007,7 @@ async def generate_text(m,question,context='',group=False,history_context='',dia
                 block('text:'+name,60)
                 continue
         except Exception as e:
-            block('text:'+name,120)
+            text_api_failure(name,503)
             logging.warning('Text AI %s: %s',name,type(e).__name__)
             continue
         if re.fullmatch(r'історія(?:\s+потрібна)?[.!]?',answer.strip(),re.I) or (history_context and context!=history_context and re.search(r'(?:інформаці[їі]|информации|даних|данных).{0,45}(?:недостатньо|недостаточно|не вистачає|не хватает)',answer,re.I)):
@@ -3977,6 +4021,7 @@ async def generate_text(m,question,context='',group=False,history_context='',dia
             await m.reply(html.escape(answer[:3700])+('\n\n<blockquote>'+html.escape(DISCLAIMER)+'</blockquote>' if development_enabled() else ''),parse_mode='HTML')
         else:
             await m.reply(html.escape(answer[:3700])+('\n\n<blockquote>'+html.escape(DISCLAIMER)+'</blockquote>' if development_enabled() else ''),parse_mode='HTML')
+        text_api_health[name]=0
         diagnostic['selected']=name+' • '+model
         await record_server_result(m,'text')
         return
