@@ -4019,6 +4019,7 @@ async def text_diag_show(m,number):
     else: body+='\nДетальна діагностика відсутня.'
     await m.answer(body[:3900],parse_mode=None,reply_markup=diag_keyboard('text'))
 
+local_qwen_slots=asyncio.Semaphore(4)
 async def generate_text(m,question,context='',group=False,history_context='',diagnostic=None):
     if diagnostic is None: diagnostic={'attempts':[]}
     
@@ -4028,12 +4029,13 @@ async def generate_text(m,question,context='',group=False,history_context='',dia
     reserve=sum(len(x['content'].encode('utf-8')) for x in messages)+output_limit+100
     # Group rollout excludes routes whose free terms or reliability are not established.
     routes=[r for r in TEXT_ROUTES if (not group and m.from_user.id==OWNER) or r[0] in ('Groq 1','Groq 1 20B','Groq 2','Groq 2 20B','Groq 1 Qwen','Groq 2 Qwen','Groq 1 ALLAM','Groq 2 ALLAM','OpenRouter')]
-    for route in text_api_order(routes,m.message_id):
+    for route in text_api_order(routes,m.message_id)+[("Local Qwen",)]:
         if group and not group_enabled(chat): return
         name=route[0]
-        key,url,model=text_config(route)
-        if not key or not url or not model or not url.startswith('https://') or blocked('text:'+name)>time.time(): continue
-        if not await text_api_pace(name): continue
+        local=name=='Local Qwen'
+        key,url,model=('local','http://127.0.0.1:11434/api/chat','qwen3.5:2b') if local else text_config(route)
+        if not key or not url or not model or (not local and not url.startswith('https://')) or blocked('text:'+name)>time.time(): continue
+        if not local and not await text_api_pace(name): continue
         day=text_day()
         used=group_used(chat,day)
         if used+reserve>(group_limit(chat) if group else private_limit(chat)):
@@ -4046,13 +4048,21 @@ async def generate_text(m,question,context='',group=False,history_context='',dia
         text_charge(day,name,reserve,1)
         group_charge(chat,day,reserve)
         try:
-            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=20)) as session:
-                async with session.post(url,headers={'Authorization':'Bearer '+key},json={'model':model,'messages':messages,'max_tokens':output_limit},allow_redirects=False) as response:
-                    attempt['status']='HTTP '+str(response.status)
-                    if response.status!=200:
-                        text_api_failure(name,response.status,response.headers)
-                        continue
-                    data=await response.json()
+            if local:
+                async with local_qwen_slots:
+                    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=300)) as session:
+                        async with session.post(url,json={'model':model,'messages':messages,'stream':False,'think':False,'options':{'temperature':0.2,'top_p':0.8,'num_ctx':4096,'num_predict':min(output_limit,300)}},allow_redirects=False) as response:
+                            response.raise_for_status()
+                            raw=await response.json()
+                    data={'usage':{'total_tokens':raw.get('prompt_eval_count',0)+raw.get('eval_count',0)},'choices':[{'message':raw['message'],'finish_reason':raw.get('done_reason')}]}
+            else:
+                async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=20)) as session:
+                    async with session.post(url,headers={'Authorization':'Bearer '+key},json={'model':model,'messages':messages,'max_tokens':output_limit},allow_redirects=False) as response:
+                        attempt['status']='HTTP '+str(response.status)
+                        if response.status!=200:
+                            text_api_failure(name,response.status,response.headers)
+                            continue
+                        data=await response.json()
             actual=(data.get('usage') or {}).get('total_tokens')
             attempt['tokens']=actual
             if isinstance(actual,int) and actual>=0:
