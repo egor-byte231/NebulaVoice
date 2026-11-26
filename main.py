@@ -482,6 +482,8 @@ async def audio_diag_command(m:Message):
         lines.append('Заміна: '+(d.get('selected') or 'успішної заміни немає'))
     for i,a in enumerate(attempts,1):
         lines.append(f"\n{i}. {a['model']} | платформа: {a.get('platform','—')} | {a.get('ms','—')} мс | очікування слота: {a.get('busy',0)*0.5:.1f} с (мін.)")
+        lines.append('Мова за даними моделі: '+a.get('language','не зафіксовано'))
+        if a.get('language_override'): lines.append('Перевірка тексту: '+a['language_override'])
         if a.get('error'): lines.append('Помилка: '+a['error'])
     for e in d.get('errors',[]): lines.append('Помилка: '+e)
     if d.get('errors') or any(a.get('error') for a in d.get('attempts',[])): lines.append('Заміна: '+(d.get('selected') or 'не визначено'))
@@ -580,8 +582,19 @@ async def transcribe_local(k,path):
         elif provider=='gemini':
             j=await request(s,'https://generativelanguage.googleapis.com/v1beta/models/'+model+':generateContent',{'x-goog-api-key':need('GEMINI_API_KEY')},json={'generationConfig':{'temperature':0},'contents':[{'parts':[{'text':GEMINI_PROMPT},{'inline_data':{'mime_type':'audio/ogg' if path.suffix=='.ogg' else 'audio/wav','data':base64.b64encode(data).decode()}}]}]}); j={'text':''.join(p.get('text','') for p in j['candidates'][0]['content']['parts'])}
         return validate_audio_result(j)
+def east_slavic_text(text):
+    words=re.findall(r'[А-Яа-яЁёІіЇїЄєҐґ]+',text.lower())
+    letters=[c for c in text if c.isalpha()]
+    if not letters or sum(len(w) for w in words)/len(letters)<0.85: return False
+    markers=set('я ты ти ми мы вы ви он она він вона они вони это що шо что как як не нет ні так да але но і и у в на з из с для мне мені тебе тобі тебе меня мене хочу знаю сказал сказав говорить говорити сейчас зараз тут там просто очень дуже хорошо добре блять нахуй сука привет привіт спасибо дякую'.split())
+    return bool(set(words)&markers) or bool(re.search(r'[іїєґёыэъ]',text.lower()) and len(words)>=2)
+
 def validate_audio_result(j):
     text=j.get('text') if isinstance(j,dict) else None
+    d=audio_diag.get()
+    attempt=d['attempts'][-1] if d and d.get('attempts') else None
+    if attempt is not None:
+        attempt['language']=str(j.get('language') or j.get('detected_language') or 'не повідомлено')[:80] if isinstance(j,dict) else 'не повідомлено'
     if not isinstance(text,str) or not text.strip(): raise RejectedTranscript('Порожня транскрипція')
     segments=[seg for seg in (j.get('segments') or []) if isinstance(seg,dict)]
     if segments and all(isinstance(seg.get('no_speech_prob'),(int,float)) and seg['no_speech_prob']>=0.65 and (not isinstance(seg.get('avg_logprob'),(int,float)) or seg['avg_logprob'] < -0.5) for seg in segments):
@@ -589,9 +602,13 @@ def validate_audio_result(j):
     if prompt_echo(text): raise RejectedTranscript('Повторення старого промпту')
     if re.search(r'\b(?:bláď|bljať|blyat|bljad|blatj)\b',text,re.I) and not re.search(r'[А-Яа-яІіЇїЄєҐґ]',text):
         raise RejectedTranscript('Підозріла транслітерація мовлення')
+    quality=confidence(j)
     if unsupported_language(j):
-        raise RejectedTranscript('Мова поза списком підтримуваних')
-    return text.strip(), confidence(j)
+        if not east_slavic_text(text):
+            raise RejectedTranscript('Мова поза списком підтримуваних')
+        if attempt is not None: attempt['language_override']='Текст схожий на українську, російську або суржик'
+        quality=(True,quality[1],True)
+    return text.strip(), quality
 @dp.message(F.voice | F.video_note)
 async def voice(m:Message):
     global audio_load_wait,load_task
@@ -1246,7 +1263,7 @@ async def process_voice_inner(m,status,failures,selected,local_media=None,local_
         empty_count=0
         uncertain_count=0
         partial_text=''
-        warning='⚠️ В аудіо може бути багато шуму, тому ШІ може помилятися:'
+        warning='⚠️ Мовлення може бути нечітким або в аудіо є шум, тому ШІ може помилятися:'
         async def finish_unclear(message):
             diag=audio_diag.get()
             if diag: diag['outcome']=message; diag_save(diag)
@@ -1312,8 +1329,9 @@ async def process_voice_inner(m,status,failures,selected,local_media=None,local_
                     if (quality[2] and not old_quality[2]) or (quality[2]==old_quality[2] and (quality[1] is None or (quality[0] and old_quality[1] is not None and quality[1]<=old_quality[1]))):
                         result=old_text
                         k=old_k
+                        quality=old_quality
                     selected.append(NAMES[k])
-                    if quality[0] and old_quality[0]: result=warning+'\n\n'+result
+                    if quality[0]: result=warning+'\n\n'+result
                     return await deliver_transcript(m,status,result)
                 if quality[0]:
                     candidate=(result,quality,k)
