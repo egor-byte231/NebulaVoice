@@ -3508,7 +3508,7 @@ azure_video_slots=asyncio.Semaphore(8)
 async def azure_video(m,status,url):
     if not enabled(): return await mark_disabled(status)
     from urllib.parse import urlsplit
-    from aiogram.types import FSInputFile
+    from aiogram.types import FSInputFile, ReplyParameters
     music=any((urlsplit(url).hostname or '').lower()==h or (urlsplit(url).hostname or '').lower().endswith('.'+h) for h in ('audiomack.com','soundcloud.com','music.youtube.com','bandcamp.com'))
     async with azure_video_slots:
         try:
@@ -3539,10 +3539,14 @@ async def azure_video(m,status,url):
                         await asyncio.sleep(2**attempt)
                 files=list(Path(folder).glob('media.mp3' if music else 'media.mp4'))
                 if len(files)!=1 or files[0].stat().st_size>25*1024*1024: raise ValueError('Media size or format')
+                reply=ReplyParameters(message_id=m.message_id,allow_sending_without_reply=True)
+                target={'chat_id':m.chat.id,'reply_parameters':reply}
+                if m.is_topic_message and m.message_thread_id is not None:
+                    target['message_thread_id']=m.message_thread_id
                 if music:
-                    await m.reply_audio(FSInputFile(files[0]))
+                    await bot.send_audio(audio=FSInputFile(files[0]),**target)
                 else:
-                    await m.reply_video(FSInputFile(files[0]),supports_streaming=True)
+                    await bot.send_video(video=FSInputFile(files[0]),supports_streaming=True,**target)
                 try: await status.delete()
                 except Exception: pass
         except Exception as e:
