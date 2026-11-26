@@ -2,7 +2,7 @@ import difflib, datetime, html, wave, re, os, asyncio, time, tempfile, logging, 
 from pathlib import Path
 import aiohttp
 from aiogram import Bot, Dispatcher, F
-from aiogram.exceptions import TelegramRetryAfter
+from aiogram.exceptions import TelegramRetryAfter, TelegramBadRequest
 
 async def telegram_retry(make_request, bot, method):
     for attempt in range(4):
@@ -2808,8 +2808,17 @@ async def deliver_transcript(m,status,result):
             suffix=f' #{number}.'
             if development_enabled(): body+='\n\n<blockquote>'+html.escape(DISCLAIMER+suffix)+'</blockquote>'
             elif suffix: body+='\n\n'+suffix.strip()
-        if i==0: sent=await status.edit_text(body,parse_mode='HTML')
-        else: sent=await m.reply(body,parse_mode='HTML')
+        from aiogram.types import ReplyParameters
+        target={'chat_id':m.chat.id,'reply_parameters':ReplyParameters(message_id=m.message_id,allow_sending_without_reply=True)}
+        if m.is_topic_message and m.message_thread_id is not None: target['message_thread_id']=m.message_thread_id
+        if i==0:
+            try: sent=await status.edit_text(body,parse_mode='HTML')
+            except TelegramBadRequest as e:
+                if 'message is not modified' in str(e).lower(): sent=status
+                elif any(x in str(e).lower() for x in ('message to edit not found','message can\'t be edited','message cannot be edited')):
+                    sent=await bot.send_message(text=body,parse_mode='HTML',**target)
+                else: raise
+        else: sent=await bot.send_message(text=body,parse_mode='HTML',**target)
         deletion_watch_track(m,sent,'Голосове повідомлення' if m.voice else 'Відеокружечок')
     if chunks: overview_add(m,voices=int(bool(m.voice)),circles=int(bool(m.video_note)))
     if chunks: await record_server_result(m,'audio' if m.voice else 'video')
@@ -2925,7 +2934,13 @@ async def voice(m:Message):
     item=m.voice or m.video_note
     if (item.file_size or 0)>10*1024*1024: return await m.reply('Файл завеликий (10 МБ).')
     if waiting.qsize()>=50: return await m.reply('Черга заповнена. Повтори пізніше.')
-    status=await m.reply('⏳ У черзі...')
+    from aiogram.types import ReplyParameters
+    target={'chat_id':m.chat.id,'reply_parameters':ReplyParameters(message_id=m.message_id,allow_sending_without_reply=True)}
+    if m.is_topic_message and m.message_thread_id is not None: target['message_thread_id']=m.message_thread_id
+    try: status=await bot.send_message(text='⏳ У черзі...',**target)
+    except TelegramBadRequest as e:
+        await notify_error('Постановка аудіо в чергу',e,source=error_message_source(m))
+        return
     if not enabled(): return await status.edit_text(DISABLED)
     diag_table()
     chat=m.chat
@@ -3309,6 +3324,14 @@ async def audio_settings_action(c):
 def owner_menu():
     return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='⏸ Вимкнути' if enabled() else '▶️ Увімкнути',callback_data='owner:toggle')],[InlineKeyboardButton(text='🖥 Стан серверів',callback_data='owner:server')],[InlineKeyboardButton(text='📊 Статистика',callback_data='owner:stats')],[InlineKeyboardButton(text='🤖 Статистика текстового ШІ',callback_data='owner:ai')],[InlineKeyboardButton(text='⚙️ Слоти тексту VPS',callback_data='owner:slots')],[InlineKeyboardButton(text='🎙 Слоти аудіо VPS',callback_data='owner:audiohost')],[InlineKeyboardButton(text='📈 Загальна статистика',callback_data='owner:overview')],[InlineKeyboardButton(text='🟢 Режим розробки: ON' if development_enabled() else '🔴 Режим розробки: OFF',callback_data='owner:development')],[InlineKeyboardButton(text='🧪 Режим тестування: ON' if testing_enabled() else '🧪 Режим тестування: OFF',callback_data='owner:testing')],[InlineKeyboardButton(text='🔄 Обнулити мій ліміт',callback_data='owner:reset_limit')]]+([[InlineKeyboardButton(text='🎙 Тест аудіо',callback_data='owner:testmenu:audio')],[InlineKeyboardButton(text='💬 Тест тексту',callback_data='owner:testmenu:text')],[InlineKeyboardButton(text='⚡ Тест навантаження',callback_data='owner:load')]] if testing_enabled() else []))
 error_alert_times={}
+def error_message_source(m):
+    chat=m.chat
+    link=None
+    if chat.type in ('supergroup','channel'):
+        if chat.username: link=f'https://t.me/{chat.username}/{m.message_id}'
+        elif str(chat.id).startswith('-100'): link=f'https://t.me/c/{str(chat.id)[4:]}/{m.message_id}'
+    return f'Чат: {chat.title or chat.full_name or chat.id} ({chat.id})\nID повідомлення: {m.message_id}\nПосилання: {link or "недоступне для цього типу чату"}'
+
 async def notify_error(where,error,source=None,replacement=None):
     raw=str(error)
     # Only locally defined diagnostics and HTTP status codes are exposed.
@@ -3324,7 +3347,7 @@ async def notify_error(where,error,source=None,replacement=None):
     elif isinstance(error,KeyError): detail='У відповіді API відсутнє необхідне поле'
     elif isinstance(error,FileNotFoundError): detail='Не знайдено необхідний файл або програму'
     else: detail='Невідома причина; тип помилки: '+type(error).__name__
-    if source:
+    if source or isinstance(error,TelegramBadRequest):
         detail=re.sub(r'(?i)(bearer\s+|(?:api[_-]?key|token|secret)\s*[:=]\s*)\S+',r'\1[REDACTED]',raw)
         for name,value in os.environ.items():
             if value and len(value)>=8 and any(x in name.upper() for x in ('KEY','TOKEN','SECRET','PASSWORD')): detail=detail.replace(value,'[REDACTED]')
@@ -3478,7 +3501,7 @@ async def process_voice(m,status):
         if failures:
             chat=m.chat
             link=(f'https://t.me/{chat.username}/{m.message_id}' if chat.username else f'https://t.me/c/{str(chat.id)[4:]}/{m.message_id}' if str(chat.id).startswith('-100') else None)
-            source=link or f'Чат {chat.id}, повідомлення {m.message_id} (пряме посилання недоступне)'
+            source=error_message_source(m)
             for where,error in failures:
                 if isinstance(error,RejectedTranscript): continue
                 await notify_error(where,error,source=source,replacement=selected[-1] if selected else 'Не визначено / транскрипцію не завершено')
@@ -3712,7 +3735,7 @@ async def process_voice_inner(m,status,failures,selected,local_media=None,local_
             delay=max(1,min(300,min((blocked(k) for k in order if blocked(k)>time.time()),default=time.time()+60)-time.time()))
             await asyncio.sleep(min(delay,1) if active_providers else delay)
         if not enabled(): return await mark_disabled(status)
-        await notify_error('Черга: 10 хвилин очікування',TimeoutError())
+        await notify_error('Черга: 10 хвилин очікування',TimeoutError(),source=error_message_source(m))
         await audio_status(status,'⚠️ Не вдалося завершити транскрипцію за 10 хвилин. Надішли аудіо повторно.')
 async def audio_queue_remove(m):
     for attempt in range(3):
@@ -3766,7 +3789,7 @@ async def worker(index=0):
                 await audio_status(status,'⚠️ Telegram тимчасово обмежив запити. Спробуй пізніше.')
             else:
                 await audio_status(status,'⚠️ Не вдалося обробити аудіо. Надішли його повторно.')
-            await notify_error('Обробка аудіо',e)
+            await notify_error('Обробка аудіо',e,source=error_message_source(m))
         finally:
             if not keep: await audio_queue_remove(m)
             waiting.task_done()
