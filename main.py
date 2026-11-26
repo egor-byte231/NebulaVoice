@@ -1420,6 +1420,20 @@ async def quota_reset_monitor():
                 await bot.send_message(OWNER,f'🟢 Ліміт поновлено (локальна оцінка)\n\n{NAMES[k]}\n\n{details}\n\nФактичне поновлення залежить від API. Транскрипція автоматично не вмикається.')
                 db.execute('INSERT OR IGNORE INTO quota_alerts VALUES (?,?,101)',(period,k))
                 db.commit()
+            period='text-reset:'+day
+            if not db.execute('SELECT 1 FROM quota_alerts WHERE period=? AND provider=? AND threshold=101',(period,'text-all')).fetchone():
+                lines=['🟢 Текстовий ШІ — нова доба обліку (UTC)','']
+                for route in TEXT_ROUTES:
+                    name=route[0]
+                    key,url,model=text_config(route)
+                    used=db.execute('SELECT COALESCE(SUM(tokens),0) FROM text_usage WHERE day=? AND route=?',(day,name)).fetchone()[0]
+                    state='ключ налаштовано' if key else 'ключ відсутній'
+                    if blocked('text:'+name)>time.time(): state+='; тимчасове обмеження'
+                    lines.append(f'🤖 {name} • {model or route[3]} — {state}; облік: {used} токенів')
+                lines.extend(['','Локальні добові лічильники почали новий період. Фактичні квоти та час їх поновлення залежать від API.'])
+                await bot.send_message(OWNER,'\n'.join(lines),parse_mode=None)
+                db.execute('INSERT OR IGNORE INTO quota_alerts VALUES (?,?,101)',(period,'text-all'))
+                db.commit()
         except Exception as e:
             logging.warning('Quota reset monitor failed: %s',type(e).__name__)
         await asyncio.sleep(15)
