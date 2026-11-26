@@ -4357,6 +4357,24 @@ async def daily_now(m:Message):
     await d1_query(history_session,'INSERT INTO daily_reports VALUES (?,?)',(report_id,body))
     await m.answer(body,parse_mode='HTML',reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='📢 Опублікувати в групах',callback_data='daily_publish:'+report_id)]]))
 
+async def milestone_reports():
+    totals=db.execute('SELECT COALESCE(SUM(circles),0),COALESCE(SUM(requests),0) FROM overview_daily').fetchone()
+    await d1_query(history_session,'CREATE TABLE IF NOT EXISTS daily_reports (day TEXT PRIMARY KEY, body TEXT NOT NULL)')
+    await d1_query(history_session,'CREATE TABLE IF NOT EXISTS daily_publications (day TEXT,chat INTEGER,PRIMARY KEY(day,chat))')
+    await d1_query(history_session,'CREATE TABLE IF NOT EXISTS milestone_sent (kind TEXT, threshold INTEGER, PRIMARY KEY(kind,threshold))')
+    for kind,total,label in (('circles',totals[0],'відеокружечків'),('requests',totals[1],'запитів до текстового ШІ')):
+        if total<100: continue
+        rows=await d1_query(history_session,'SELECT MAX(threshold) AS last FROM milestone_sent WHERE kind=?',(kind,))
+        last=rows[0]['last']
+        # On first run announce only the latest reached milestone.
+        start=(int(total)//100)*100 if last is None else int(last)+100
+        for threshold in range(start,int(total)+1,100):
+            report_id=f'milestone-{kind}-{threshold}'
+            body=f'🏆 <b>Нове досягнення NebulaVoice!</b>\n\nДосягнуто: <b>{threshold} {label}</b> за весь час.\nПоточний загальний показник: <b>{total}</b>'
+            await d1_query(history_session,'INSERT OR IGNORE INTO daily_reports VALUES (?,?)',(report_id,body))
+            await bot.send_message(OWNER,body,parse_mode='HTML',reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='📢 Опублікувати в групах',callback_data='daily_publish:'+report_id)]]))
+            await d1_query(history_session,'INSERT OR IGNORE INTO milestone_sent VALUES (?,?)',(kind,threshold))
+
 async def daily_report_monitor():
     try:
         await send_recovered_report(automatic=True)
@@ -4364,6 +4382,7 @@ async def daily_report_monitor():
         logging.warning('Recovered report: %s',type(e).__name__)
     while True:
         try:
+            await milestone_reports()
             now=daily_kyiv_now()
             day=now.date().isoformat()
             if now.hour==23:
@@ -4381,6 +4400,9 @@ async def daily_report_monitor():
         await asyncio.sleep(15)
 
 def daily_public_body(body):
+    if body.startswith('🏆 <b>Нове досягнення NebulaVoice!</b>'):
+        achievement=body.split('\n\n',1)[1].split('\n',1)[0]
+        return '🏆 <b>Нове досягнення NebulaVoice!</b>\n\n<blockquote expandable>'+achievement+'</blockquote>\n\n💜 Дякуємо кожному, хто користується нашим ботом! Разом ми продовжуємо розвиватися. '
     def count(label):
         match=re.search(re.escape(label)+r':\s*<b>([\d ]+)</b>',body)
         return match.group(1) if match else '0'
