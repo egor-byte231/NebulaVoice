@@ -135,9 +135,9 @@ async def speak(message, text, preference='mykyta', reply_to_message_id=None):
                     with wave.open(wav, "rb") as stream:
                         rate = stream.getframerate()
                     audio_filter = audio_filter.replace("20948", str(round(rate*0.95))).replace("22050", str(rate))
-                # Accelerate every Piper voice by 10% while preserving pitch.
+                # Accelerate every Piper voice by 5% while preserving pitch.
                 # Apply after voice-specific EQ so this also covers original voices.
-                speed_filter = "atempo=1.10"
+                speed_filter = "atempo=1.05"
                 audio_filter = (audio_filter + "," + speed_filter) if audio_filter else speed_filter
                 filters = ["-af", audio_filter]
                 await run_process("ffmpeg", "-nostdin", "-loglevel", "error", "-i", wav, *filters, "-c:a", "libopus", "-threads", "1", ogg)
