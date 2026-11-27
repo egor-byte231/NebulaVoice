@@ -35,13 +35,14 @@ class MiniApp:
             return
         if not self.url.startswith('https://') or not re.fullmatch(r'[A-Za-z0-9_]{3,30}', self.name):
             raise ValueError('Configure a public HTTPS Mini App URL and a valid BotFather short name')
+        # Keep the old bonus table for rollback. The current campaign starts with an empty ledger.
         for statement in (
             'CREATE TABLE IF NOT EXISTS transcript_numbers (id INTEGER PRIMARY KEY AUTOINCREMENT, chat INTEGER NOT NULL, message_id INTEGER NOT NULL, UNIQUE(chat,message_id))',
             'CREATE TABLE IF NOT EXISTS transcript_diagnostics (number INTEGER PRIMARY KEY, data TEXT NOT NULL)',
             'CREATE TABLE IF NOT EXISTS runtime_results (chat INTEGER, message_id INTEGER, kind TEXT, role TEXT, completed INTEGER, PRIMARY KEY(chat,message_id,kind))',
             'CREATE TABLE IF NOT EXISTS text_diagnostics (number INTEGER PRIMARY KEY AUTOINCREMENT, chat INTEGER, message_id INTEGER, data TEXT NOT NULL, UNIQUE(chat,message_id))',
             'CREATE TABLE IF NOT EXISTS mini_write_prompt_results (user_id INTEGER PRIMARY KEY)',
-            'CREATE TABLE IF NOT EXISTS mini_bonus (chat INTEGER PRIMARY KEY, balance INTEGER NOT NULL CHECK(balance>=0))',
+            'CREATE TABLE IF NOT EXISTS mini_bonus_v2 (chat INTEGER PRIMARY KEY, balance INTEGER NOT NULL CHECK(balance>=0))',
             """CREATE TABLE IF NOT EXISTS mini_users (
                 id INTEGER PRIMARY KEY, language TEXT NOT NULL DEFAULT 'auto',
                 style TEXT NOT NULL DEFAULT 'default', notifications INTEGER NOT NULL DEFAULT 0,
@@ -160,7 +161,7 @@ class MiniApp:
             grants.append((chat, GROUP_BONUS))
         values = ','.join('(?,?)' for _ in grants)
         rows = await self.query(
-            f'INSERT OR IGNORE INTO mini_bonus(chat,balance) VALUES {values} RETURNING chat,balance',
+            f'INSERT OR IGNORE INTO mini_bonus_v2(chat,balance) VALUES {values} RETURNING chat,balance',
             tuple(value for grant in grants for value in grant),
         )
         credited = {row['chat']: row['balance'] for row in rows}
@@ -174,7 +175,7 @@ class MiniApp:
         return '🎁 Ви отримали бонус!\n' + '\n'.join(lines)
 
     async def balance(self, chat):
-        rows = await self.query('SELECT balance FROM mini_bonus WHERE chat=?', (chat,))
+        rows = await self.query('SELECT balance FROM mini_bonus_v2 WHERE chat=?', (chat,))
         return rows[0]['balance'] if rows else 0
 
     async def spend(self, chat, tokens):
@@ -182,7 +183,7 @@ class MiniApp:
             return 0
         # The assignment and predicate are evaluated in one database write.
         rows = await self.query(
-            'UPDATE mini_bonus SET balance=balance-? WHERE chat=? AND balance>=? RETURNING balance',
+            'UPDATE mini_bonus_v2 SET balance=balance-? WHERE chat=? AND balance>=? RETURNING balance',
             (tokens, chat, tokens),
         )
         if rows:
@@ -190,7 +191,7 @@ class MiniApp:
         remaining = min(tokens, await self.balance(chat))
         if remaining and remaining < tokens:
             rows = await self.query(
-                'UPDATE mini_bonus SET balance=0 WHERE chat=? AND balance=? RETURNING balance',
+                'UPDATE mini_bonus_v2 SET balance=0 WHERE chat=? AND balance=? RETURNING balance',
                 (chat, remaining),
             )
             if rows:
@@ -274,7 +275,7 @@ class MiniApp:
             await self.query('UPDATE mini_users SET language=?,style=?,notifications=? WHERE id=?',
                              (language, style, int(notifications), uid))
         profile = (await self.query('SELECT language,style,notifications,write_allowed FROM mini_users WHERE id=?', (uid,)))[0]
-        bonus = await self.query('SELECT chat,balance FROM mini_bonus WHERE chat IN (?,?)', (uid, chat))
+        bonus = await self.query('SELECT chat,balance FROM mini_bonus_v2 WHERE chat IN (?,?)', (uid, chat))
         balances = {str(row['chat']): row['balance'] for row in bonus}
         group_bonus_available = (
             claim and chat < 0 and str(chat) not in balances and await self.is_group_owner(chat, uid)
