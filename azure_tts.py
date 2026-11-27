@@ -89,21 +89,46 @@ async def run_process(*args, data=None):
         raise RuntimeError("TTS subprocess failed")
 
 def normalize_ukrainian_tts(text):
-    """Prepare Ukrainian text for speech without altering the visible AI answer."""
+    """Clean Ukrainian speech input without modifying the visible AI answer."""
     import html
+    import unicodedata
+
     text = html.unescape(text)
-    # Remove markup delimiters while keeping their spoken content.
-    text = re.sub(r"<[^>]+>", " ", text)
+    # Strip Telegram usernames, including usernames in parentheses.
+    text = re.sub(r"\(\s*@[A-Za-z0-9_]{5,32}\s*\)", "", text)
+    text = re.sub(r"(?<![\w])@[A-Za-z0-9_]{5,32}\b", "", text)
+    # Markdown links: speak the label, not the URL.
     text = re.sub(r"\[([^\]]+)\]\(https?://[^)\s]+\)", r"\1", text)
-    text = re.sub(r"https?://\S+", " ", text)
+    text = re.sub(r"https?://[^\s<>]+", "", text)
     text = re.sub(r"(?m)^\s{0,3}#{1,6}\s+", "", text)
     text = re.sub(r"(?m)^\s*[-*]\s+", "", text)
     text = re.sub(r"(?m)^\s*>\s*", "", text)
+    text = re.sub(r"<[^>]+>", " ", text)
     text = re.sub(r"[*_~\`]+", "", text)
-    # Quotes and decorative symbols should not be read aloud.
+
+    # Pronunciation hints for foreign names observed in Ukrainian AI replies.
+    # This is intentionally a small, explicit dictionary; guessing all Latin
+    # names phonetically can produce worse pronunciations.
+    foreign_names = {
+        "maks": "Макс",
+        "âmesœur": "Ам-Сер",
+    }
+    text = re.sub(
+        r"(?<![A-Za-zÀ-ÿ])(?:ÂmeSœur|Maks)(?![A-Za-zÀ-ÿ])",
+        lambda m: foreign_names[m.group(0).casefold()],
+        text, flags=re.IGNORECASE,
+    )
     text = re.sub(r"[«»„“”‟\"'‘’‚‹›]", "", text)
-    text = re.sub(r"[#@©®™•▪●★☆✓✔✅❌🔊🎙️]", " ", text)
-    # Preserve ordinary punctuation for natural pauses.
+    # Keep normal sentence punctuation for pauses; drop decorative symbols,
+    # invisible formatting and emoji.
+    text = "".join(
+        char if (
+            char in "\n\t" or
+            (unicodedata.category(char)[0] not in "CS" and
+             (unicodedata.category(char)[0] not in "P" or char in ".,!?;:—-()"))
+        ) else " "
+        for char in text
+    )
     text = re.sub(
         r"(?<!\w)20[\s\-–‑]*словн(ого|ому|ими|их|им|ім|ий|ої|ій|ою|а|у|е|і)(?!\w)",
         lambda match: "двадцятисловн" + match.group(1),
@@ -129,7 +154,7 @@ async def speak(message, text, preference='mykyta', reply_to_message_id=None):
                 wav = str(Path(directory) / "speech.wav")
                 ogg = str(Path(directory) / "speech.ogg")
                 options, audio_filter = PRESETS.get(preference, ([], None)) if Path(model).name.startswith("uk_UA-mykyta-") else ([], None)
-                await run_process(os.getenv("PIPER_BIN", "piper"), "--model", model, "--output_file", wav, *options, data=normalize_ukrainian_tts(text[:3700]).encode("utf-8"))
+                await run_process(os.getenv("PIPER_BIN", "piper"), "--model", model, "--output_file", wav, *options, data=(normalize_ukrainian_tts(text[:3700]) if Path(model).name.startswith("uk_UA-") else text[:3700]).encode("utf-8"))
                 if preference == "deep" and audio_filter:
                     import wave
                     with wave.open(wav, "rb") as stream:
