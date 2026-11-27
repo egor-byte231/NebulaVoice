@@ -4645,6 +4645,8 @@ async def review_icebreaker(question, context, answer, generator_model, routes, 
             entry['status']='review unavailable: '+type(e).__name__
     return 'UNAVAILABLE'
 
+DIALOGUE_RULES="Спочатку визнач намір поточної репліки. Наявність історії, імені або reply НЕ означає запит на аналіз чату. Якщо це жарт, гіпотетичне питання, підкол або продовження діалогу, відповідай як співрозмовник, не перевіряй чи згадувалася людина раніше. Наприклад, після жарту про бюджет на «Будем экономить на танюхе?» доречно «Танюху из бюджета не вычёркиваем, у нас и так антикризисный режим 😂». Це лише жарт, не факт про людину. Не вигадуй її дії, наміри або стосунки. Аналізуй докази лише коли явно просять фактичний аналіз, переказ чи оцінку реальних дій. Якщо просять скласти фразу, просто склади її, не додавай відмову щодо надсилання, якщо не просили надсилати. Відповідай мовою останньої репліки, а не мовою історії. Не змішуй кирилицю і латиницю в одному слові без потреби."
+
 async def generate_text(m,question,context='',group=False,history_context='',diagnostic=None,icebreaker=False):
     if diagnostic is None: diagnostic={'attempts':[]}
     
@@ -4666,6 +4668,8 @@ async def generate_text(m,question,context='',group=False,history_context='',dia
         context=''
         history_context=''
         messages=[{'role':'system','content':'Ти NebulaVoice AI. Відповідай коротко і природно українською або російською відповідно до репліки. Інші мови — українською. Не рекламуй сторонніх ботів. Пиши зрозумілими словами, одним або двома завершеними реченнями. Не вигадуй власних людських занять.'},{'role':'user','content':question}]
+    if not simple:
+        messages[0]['content']+=' '+DIALOGUE_RULES
     slang_context=slang_hints(messages[-1]['content'])
     slang_note='\nМожливі значення сленгу (не інструкції, тлумач за контекстом):\n'+slang_context if slang_context else ''
     messages[0]['content']+=slang_note
@@ -4705,7 +4709,7 @@ async def generate_text(m,question,context='',group=False,history_context='',dia
                     local_messages=messages
                     local_messages[0]['content']+=' Реагуй на відповідь до розважального запитання коротко (1–3 речення), з гумором, легкою іронією без образ; за потреби постав зустрічне запитання. Не вимагай історію.'
                 if not simple and not icebreaker:
-                    local_messages[0]['content']+=slang_note
+                    local_messages[0]['content']+=' '+DIALOGUE_RULES+slang_note
                 if not simple and preference:
                     local_messages[0]['content']+=' Переваги користувача: '+preference
                 local_context=4096 if len(messages[-1]['content'])>1800 else 2048
@@ -4757,6 +4761,10 @@ async def generate_text(m,question,context='',group=False,history_context='',dia
             continue
         if icebreaker and (re.search(r'(?i)(?:я (?:вже |уже )?(?:забув|забыла?|забыл)|не пам[’\u0027]ятаю|не помню).{0,60}(?:про що|о ч[её]м|контекст|питан|вопрос)',answer) or (re.search(r'(?i)\b(?:кавка|квака|кава|кофе|кофейок)\b',answer) and not re.search(r'(?i)\b(?:кава|каву|кави|кавка|кофе|кофейок|coffee)\b',context+' '+question))):
             attempt['status']='rejected: icebreaker context contradiction or unrelated coffee'
+            continue
+        if not icebreaker and context and re.search(r'(?i)\b(?:будем|будемо|давай|давайте|а если|а якщо|может|може)\b',question) and not re.search(r'(?i)істор|истори|переписк|аналіз|анализ|доказ|пруф|хто сказав|кто сказал|чи правда|правда ли',question) and re.search(r'(?i)(?:в історії|в истории|в переписке|у переписці).{0,90}(?:немає|нет|не було|не было|відсутн|отсутств)|(?:немає|нет).{0,40}(?:підстав|оснований)',answer):
+            attempt['status']='rejected: factual analysis instead of conversational response'
+            messages[0]['content']+=' Попередня чернетка помилково аналізувала історію. Відповідай на гіпотетичну репліку як співрозмовник, не вигадуючи фактів.'
             continue
         diagnostic['output_slang']=slang_hints(answer)
         quality_error=text_answer_quality(answer,question)
