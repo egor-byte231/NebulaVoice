@@ -4327,6 +4327,20 @@ async def icebreaker_monitor():
                     db.execute('DELETE FROM icebreaker_user_history WHERE chat=? AND id NOT IN (SELECT id FROM icebreaker_user_history WHERE chat=? ORDER BY id DESC LIMIT 10)',(chat,chat))
                     db.execute('DELETE FROM icebreaker_history WHERE chat=? AND id NOT IN (SELECT id FROM icebreaker_history WHERE chat=? ORDER BY id DESC LIMIT 10)',(chat,chat))
                     db.execute('INSERT OR REPLACE INTO icebreaker_posts VALUES (?,?,?,?)',(chat,sent.message_id,question,time.time()))
+                # Temporary owner-only notification; never retry the group question if DM fails.
+                if os.getenv('ICEBREAKER_OWNER_NOTIFY','1').lower() not in ('0','false','off'):
+                    try:
+                        title=sent.chat.title or str(chat)
+                        username=sent.chat.username
+                        link=('https://t.me/'+username+'/'+str(sent.message_id)) if username else ('https://t.me/c/'+str(chat)[4:]+'/'+str(sent.message_id)) if str(chat).startswith('-100') else None
+                        notice='💬 Надіслано автоматичне запитання\n\nГрупа: '+html.escape(title)+'\nID: '+str(chat)+'\nЗапитання: '+html.escape(question)
+                        if link:
+                            notice+='\n\n<a href="'+html.escape(link,quote=True)+'">Перейти до запитання</a>'
+                        else:
+                            notice+='\n\nПряме посилання недоступне для звичайної приватної групи. ID повідомлення: '+str(sent.message_id)
+                        await bot.send_message(OWNER,notice,parse_mode='HTML')
+                    except Exception:
+                        logging.exception('Owner question notification failed: chat=%s',chat)
             except Exception: logging.exception('Group question failed: chat=%s',chat)
         await asyncio.sleep(30)
 
