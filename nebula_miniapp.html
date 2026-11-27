@@ -130,7 +130,7 @@ function viewHome(root) {
 }
 function viewStats(root) {
   root.append(node('h2', 'Статистика'));
-  root.append(node('p', (data.chat === data.uid ? 'Особиста' : 'Поточна група') + ' · останні 30 днів'));
+  root.append(node('p', (data.chat === data.uid ? 'Особиста' : 'Поточна група') + ' · за весь збережений період'));
   const limits = card(data.chat !== data.uid ? 'Добовий ліміт групи' : 'Твій добовий ліміт', null,
     format.format(data.dailyUsed) + ' / ' + format.format(data.dailyLimit) + ' токенів · скидання о 00:00 UTC');
   const progress = node('progress');
@@ -143,19 +143,22 @@ function viewStats(root) {
   const text = data.stats.find(row => row.kind === 'text');
   const grid = node('div', null, 'grid');
   grid.append(card('Транскрипцій', format.format(audio?.count ?? 0)), card('Відповідей ШІ', format.format(text?.count ?? 0)));
-  root.append(grid, card('Витрачено токенів ШІ', format.format(text?.tokens ?? 0)));
-  root.append(node('p', 'Статистика збирається з моменту підключення Mini App.', 'caption'));
+  root.append(grid, card('Токени у збережених записах ШІ', format.format(text?.tokens ?? 0)));
 }
 function viewHistory(root) {
   root.append(node('h2', 'Історія транскрипцій'));
-  if (!data.history.length) root.append(card('Поки порожньо', null, 'Тут з’являться твої нові транскрипції з цього чату.'));
+  if (!data.history.length) root.append(card('Записів немає', null, 'Тут показуються збережені власні транскрипції з цього чату.'));
   for (const row of data.history) {
     const el = node('article', null, 'card');
-    el.append(node('small', new Date(row.at * 1000).toLocaleString('uk-UA')),
-      node('p', row.body, 'transcript'));
+    if (row.number != null) el.append(node('h3', 'Транскрипція №' + row.number));
+    if (row.at) el.append(node('small', new Date(row.at * 1000).toLocaleString('uk-UA')));
+    el.append(node('p', row.body ?? 'До запуску Mini App бот зберігав запис транскрипції без її тексту.', 'transcript'));
+    if (row.body == null) el.append(action('Відкрити чат із ботом', () => openTelegram(data.privateUrl)));
     root.append(el);
   }
+  if (data.chat !== data.uid) root.append(node('p', 'Старі записи групи без даних про автора враховано у статистиці.', 'caption'));
 }
+
 function selectRow(parent, label, values, selected) {
   const row = node('label', label);
   const select = node('select');
@@ -172,8 +175,8 @@ function selectRow(parent, label, values, selected) {
 function viewProfile(root) {
   root.append(node('h2', 'Профіль'));
   const settings = card('Налаштування ШІ та сповіщень');
-  const language = selectRow(settings, 'Мова відповіді', [['auto','Автоматично'],['uk','Українська'],['ru','Російська']], data.settings.language);
-  const style = selectRow(settings, 'Стиль відповіді', [['default','Стандартний'],['short','Стислий']], data.settings.style);
+  const language = selectRow(settings, 'Мова текстового ШІ', [['auto','Автоматично'],['uk','Українська'],['ru','Російська']], data.settings.language);
+  const style = selectRow(settings, 'Стиль текстового ШІ', [['default','Стандартний'],['short','Стислий']], data.settings.style);
   const row = node('label', 'Особисті сповіщення про ліміт');
   const checkbox = node('input');
   checkbox.type = 'checkbox';
@@ -196,7 +199,7 @@ function viewProfile(root) {
       event.target.disabled = false;
     }
   }, true));
-  const referral = card('Реферальна програма', format.format(data.referrals), 'Людей відкрили Mini App за твоїм запрошенням.');
+  const referral = card('Запрошення до Mini App', format.format(data.referrals), 'Людей відкрили Mini App за твоїм запрошенням.');
   referral.append(action('Поділитися запрошенням', () => openTelegram(
     'https://t.me/share/url?url=' + encodeURIComponent(data.referralUrl) + '&text=' + encodeURIComponent('Спробуй NebulaVoice')
   )));
