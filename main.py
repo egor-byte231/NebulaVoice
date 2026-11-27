@@ -4297,38 +4297,31 @@ async def icebreaker_monitor():
     db.execute('CREATE TABLE IF NOT EXISTS icebreaker_migrations (name TEXT PRIMARY KEY)')
     with db:
         if db.execute('INSERT OR IGNORE INTO icebreaker_migrations VALUES (?)',('immediate_question_v1',)).rowcount:
+            db.execute('UPDATE icebreaker_settings SET next_at=0 WHERE enabled=1')
+    while True:
+        now=time.time()
+        for chat,last_question in db.execute('SELECT chat,last_question FROM icebreaker_settings WHERE enabled=1 AND next_at<=?',(now,)).fetchall():
+            if not enabled() or not group_enabled(chat): continue
+            members={uid:entry for uid,entry in icebreaker_members.get(chat,{}).items() if now-entry[1]<=900}
+            recent_users={r[0] for r in db.execute('SELECT user_id FROM icebreaker_user_history WHERE chat=? ORDER BY id DESC LIMIT 10',(chat,))}
+            candidates=[(uid,entry) for uid,entry in members.items() if uid not in recent_users]
+            if not candidates:
+                candidates=[(uid,(name,last_seen)) for uid,name,last_seen in db.execute('SELECT user_id,name,last_seen FROM group_roster WHERE chat=? AND present=1 AND last_seen>=?',(chat,now-86400)).fetchall() if uid not in recent_users]
+            if not candidates: continue
+            recent={r[0] for r in db.execute('SELECT question FROM icebreaker_history WHERE chat=? ORDER BY id DESC LIMIT 10',(chat,))}
+            if last_question: recent.add(last_question)
+            question=random.choice([q for q in icebreaker_questions if q not in recent])
+            uid,(name,_)=random.choice(candidates)
             try:
                 sent=await bot.send_message(chat,f'<a href="tg://user?id={uid}">{html.escape(name)}</a>, {html.escape(question)}',parse_mode='HTML')
-                db.execute('UPDATE icebreaker_settings SET next_at=0 WHERE enabled=1')
-        while True:
-            now=time.time()
-            for chat, in db.execute('SELECT chat FROM icebreaker_settings WHERE enabled=1 AND next_at<=?',(now,)).fetchall():
-                members=icebreaker_members.get(chat,{})
-                for uid,entry in list(members.items()):
-                    if now-entry[1]>900: members.pop(uid,None)
-                if not enabled() or not group_enabled(chat): continue
-                if len(members)<3:
-                    members={uid:(name,last_seen) for uid,name,last_seen in db.execute('SELECT user_id,name,last_seen FROM group_roster WHERE chat=? AND present=1 AND last_seen>=?',(chat,now-86400)).fetchall()}
-                if not members: continue
-                row=db.execute('SELECT enabled,next_at,last_question FROM icebreaker_settings WHERE chat=?',(chat,)).fetchone()
-                if row is None:
-                    db.execute('INSERT OR IGNORE INTO icebreaker_settings VALUES (?,?,?,NULL)',(chat,0,time.time()+random.randint(1800,5400)))
-                        continue
-                if not row[0] or row[1]>now: continue
-                recent={r[0] for r in db.execute('SELECT question FROM icebreaker_history WHERE chat=? ORDER BY id DESC LIMIT 10',(chat,))}
-                if row[2]: recent.add(row[2])
-                question=random.choice([q for q in icebreaker_questions if q not in recent])
-                recent_users={r[0] for r in db.execute('SELECT user_id FROM icebreaker_user_history WHERE chat=? ORDER BY id DESC LIMIT 10',(chat,))}
-                candidates=[(uid,entry) for uid,entry in members.items() if uid not in recent_users]
-                if not candidates: continue
-                uid,(name,_)=random.choice(candidates)
-                db.execute('UPDATE icebreaker_settings SET next_at=?,last_question=? WHERE chat=?',(now+random.randint(1800,5400),question,chat))
-                db.execute('INSERT INTO icebreaker_history(chat,question) VALUES (?,?)',(chat,question))
-                db.execute('INSERT INTO icebreaker_user_history(chat,user_id) VALUES (?,?)',(chat,uid))
-                db.execute('DELETE FROM icebreaker_user_history WHERE chat=? AND id NOT IN (SELECT id FROM icebreaker_user_history WHERE chat=? ORDER BY id DESC LIMIT 10)',(chat,chat))
-                db.execute('DELETE FROM icebreaker_history WHERE chat=? AND id NOT IN (SELECT id FROM icebreaker_history WHERE chat=? ORDER BY id DESC LIMIT 10)',(chat,chat))
-                db.execute('INSERT OR REPLACE INTO icebreaker_posts VALUES (?,?,?,?)',(chat,sent.message_id,question,time.time()))
-                db.commit()
+                at=time.time()
+                with db:
+                    db.execute('UPDATE icebreaker_settings SET next_at=?,last_question=? WHERE chat=?',(at+random.randint(1800,5400),question,chat))
+                    db.execute('INSERT INTO icebreaker_history(chat,question) VALUES (?,?)',(chat,question))
+                    db.execute('INSERT INTO icebreaker_user_history(chat,user_id) VALUES (?,?)',(chat,uid))
+                    db.execute('DELETE FROM icebreaker_user_history WHERE chat=? AND id NOT IN (SELECT id FROM icebreaker_user_history WHERE chat=? ORDER BY id DESC LIMIT 10)',(chat,chat))
+                    db.execute('DELETE FROM icebreaker_history WHERE chat=? AND id NOT IN (SELECT id FROM icebreaker_history WHERE chat=? ORDER BY id DESC LIMIT 10)',(chat,chat))
+                    db.execute('INSERT OR REPLACE INTO icebreaker_posts VALUES (?,?,?,?)',(chat,sent.message_id,question,at))
             except Exception as e: logging.warning('Group question failed: %s',type(e).__name__)
         await asyncio.sleep(30)
 
