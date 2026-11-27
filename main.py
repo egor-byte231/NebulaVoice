@@ -353,7 +353,7 @@ HELP_PAGES={
 'owner_reports':('📈 Звіти','/daily_now — сформувати звіт.\n/daily_recover — відновити звіт. Публікація в групах через кнопки підтвердження. У /start доступна загальна статистика.'),
 'quiet':('🤫 Тихе додавання','Для дозволених акаунтів: перемикач привітання бота при додаванні до групи.')
 }
-HELP_CHILDREN={'root':[('🎙 Транскрипція','audio'),('💬 Текстовий ШІ','text'),('🎲 Активність груп','activity'),('📊 Ліміти та статистика','limits'),('⭐ Premium','premium'),('📱 Mini App','mini'),('🔒 Приватність','privacy'),('📋 Команди','commands')],
+HELP_CHILDREN={'root':[('🎙 Транскрипція','audio'),('💬 Текстовий ШІ','text'),('🎲 Активність груп','activity'),('📊 Ліміти та статистика','limits'),('⭐ Premium','premium'),('📱 Mini App','mini'),('📋 Команди','commands')],
 'admin':[('🤖 Керування ШІ','admin_ai'),('🎲 Запитання','admin_activity'),('⭐ Premium групи','admin_pay')],
 'owner':[('🖥 Сервери та моделі','owner_servers'),('⚙️ Керування','owner_control'),('🧪 Тестування','owner_tests'),('🌙 Графік запитань','owner_questions'),('📈 Звіти','owner_reports')]}
 
