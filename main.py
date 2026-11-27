@@ -4690,7 +4690,7 @@ async def generate_text(m,question,context='',group=False,history_context='',dia
         messages[0]['content']+=' Переваги користувача: '+preference
     output_limit=180 if icebreaker else 64 if simple else (750 if 'Історія надана' in context else 500)
     # Group rollout excludes routes whose free terms or reliability are not established.
-    routes=[r for r in TEXT_ROUTES if (not group and m.from_user.id==OWNER) or r[0] in ('Groq 1','Groq 1 20B','Groq 2','Groq 2 20B','Groq 1 Qwen','Groq 2 Qwen','Groq 1 ALLAM','Groq 2 ALLAM','OpenRouter')]
+    routes=list(TEXT_ROUTES)
     ordered=text_api_order(routes,m.message_id)
     if simple:
         ordered=sorted(ordered,key=lambda r: 0 if r[0] in ('Groq 1','Groq 2','Groq 1 20B','Groq 2 20B') else 1)
