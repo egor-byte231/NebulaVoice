@@ -338,7 +338,7 @@ HELP_PAGES={
 'activity':('🎲 Активність груп','У групах, де адміністратор увімкнув функцію, бот ставить випадкові запитання активним учасникам і підтримує діалог через Reply. Останні 10 запитань і учасників не повторюються. Діє нічний режим за Києвом.'),
 'limits':('📊 Ліміти та статистика','/limit — використані та доступні токени. У ЛС /ai_stats — особиста статистика. Free: 10 000 у ЛС, 40 000 у групі. Premium: 40 000 у ЛС, 100 000 у групі. Скидання о 00:00 UTC. Переданий контекст враховується в обліку.'),
 'premium':('⭐ Premium','/premium — придбати Premium у ЛС. Груповий Premium оформлює адміністратор. Ціна за 30 днів: 150 ⭐ у ЛС, 200 ⭐ у групі. Без автоматичного продовження. /paysupport — підтримка платежів у ЛС.'),
-'mini':('📱 Mini App','Відкривай Mini App кнопкою під повідомленнями бота, коли вона доступна. Там можна переглядати статистику, ліміти, доступні налаштування та бонуси.'),
+'mini':('📱 Mini App','Відкривай Mini App кнопкою нижче або під повідомленнями бота. Там можна переглядати статистику, ліміти, доступні налаштування та бонуси.'),
 'privacy':('🔒 Приватність','Для роботи ШІ контекст може передаватися зовнішнім API. Не публікуй конфіденційні дані. Бот може обліковувати активність, вступ і вихід учасників групи та зберігати контекст діалогів.'),
 'commands':('📋 Основні команди','/start — початок роботи.\n/help — це меню.\n/limit — ліміти.\n/ai_stats — особиста статистика у ЛС.\n/premium — особистий Premium.\n/paysupport — підтримка платежів у ЛС.'),
 'admin':('🛡 Адміністрація групи','Команди діють у поточній групі. Обери підрозділ.'),
@@ -371,7 +371,7 @@ def help_allowed(page,access):
     owner,admin,quiet=access
     return page in HELP_PAGES and (not page.startswith('owner') or owner) and (not page.startswith('admin') or admin) and (page!='quiet' or quiet)
 
-def help_view(page,access,user_id,admin_chat=None):
+def help_view(page,access,user_id,admin_chat=None,chat_id=None):
     title,body=HELP_PAGES[page]
     children=list(HELP_CHILDREN.get(page,[]))
     owner,admin,quiet=access
@@ -380,6 +380,9 @@ def help_view(page,access,user_id,admin_chat=None):
         if owner: children.append(('🔐 Власник бота','owner'))
         if quiet: children.append(('🤫 Тихе додавання','quiet'))
     rows=[[InlineKeyboardButton(text=label,callback_data='helpnav:'+key+(':'+str(admin_chat) if admin_chat is not None else ''))] for label,key in children]
+    if page=='mini' and miniapp.username:
+        context=f'g{abs(chat_id)}' if chat_id is not None and chat_id<0 else 'private'
+        rows.append([InlineKeyboardButton(text='🚀 Відкрити Mini App',url=miniapp.link(context))])
     if page=='quiet':
         active=silent_add_enabled(user_id)
         rows.append([InlineKeyboardButton(text='Вимкнути' if active else 'Увімкнути',callback_data='helpnav:quiet_toggle')])
@@ -419,7 +422,7 @@ async def help_navigation(c:CallbackQuery):
         try: await bot.send_message(c.from_user.id,body,parse_mode=None,reply_markup=keyboard)
         except TelegramBadRequest: return await c.answer('Спочатку відкрий @Nebulavcbot у ЛС та натисни /start.',show_alert=True)
         return await c.answer('Розділ надіслано в ЛС.')
-    body,keyboard=help_view(page,access,c.from_user.id,admin_chat)
+    body,keyboard=help_view(page,access,c.from_user.id,admin_chat,chat_id=c.message.chat.id)
     await c.answer()
     if True:
         try: await c.message.edit_text(body,parse_mode=None,reply_markup=keyboard)
