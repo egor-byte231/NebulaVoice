@@ -89,16 +89,29 @@ async def run_process(*args, data=None):
         raise RuntimeError("TTS subprocess failed")
 
 def normalize_ukrainian_tts(text):
-    """Expand common Ukrainian numeric compounds before speech synthesis."""
-    # 20-словний / 20 словний / 20словний -> двадцятисловний.
-    # Preserve grammatical gender/number endings already present in the source.
+    """Prepare Ukrainian text for speech without altering the visible AI answer."""
+    import html
+    text = html.unescape(text)
+    # Remove markup delimiters while keeping their spoken content.
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = re.sub(r"\[([^\]]+)\]\(https?://[^)\s]+\)", r"\1", text)
+    text = re.sub(r"https?://\S+", " ", text)
+    text = re.sub(r"(?m)^\s{0,3}#{1,6}\s+", "", text)
+    text = re.sub(r"(?m)^\s*[-*]\s+", "", text)
+    text = re.sub(r"(?m)^\s*>\s*", "", text)
+    text = re.sub(r"[*_~\`]+", "", text)
+    # Quotes and decorative symbols should not be read aloud.
+    text = re.sub(r"[«»„“”‟\"'‘’‚‹›]", "", text)
+    text = re.sub(r"[#@©®™•▪●★☆✓✔✅❌🔊🎙️]", " ", text)
+    # Preserve ordinary punctuation for natural pauses.
     text = re.sub(
-        r"(?<!\\w)20[\\s\\-]*словн(ий|ого|ому|им|ім|а|ої|ій|у|ою|е|ого|і|их|ими|им)(?!\\w)",
+        r"(?<!\w)20[\s\-–‑]*словн(ого|ому|ими|их|им|ім|ий|ої|ій|ою|а|у|е|і)(?!\w)",
         lambda match: "двадцятисловн" + match.group(1),
         text, flags=re.IGNORECASE,
     )
-    return text
-
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
 
 async def speak(message, text, preference='mykyta'):
     global pending
