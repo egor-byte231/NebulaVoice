@@ -27,6 +27,8 @@ ORDER=['groq1','groq2','groq1t','groq2t','cf1','cf2','ovh']
 db=sqlite3.connect('state.db')
 db.execute('CREATE TABLE IF NOT EXISTS tts_preferences (user_id INTEGER PRIMARY KEY, voice TEXT NOT NULL)')
 db.commit()
+db.execute('CREATE TABLE IF NOT EXISTS tts_usage (day TEXT NOT NULL, scope TEXT NOT NULL, voice TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, successes INTEGER NOT NULL DEFAULT 0, failures INTEGER NOT NULL DEFAULT 0, words INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(day,scope,voice))')
+db.commit()
 db.execute('CREATE TABLE IF NOT EXISTS tts_answers (chat INTEGER NOT NULL, answer_id INTEGER NOT NULL, request_id INTEGER NOT NULL, answer TEXT NOT NULL, created INTEGER NOT NULL, PRIMARY KEY(chat,answer_id))')
 db.commit()
 from azure_runtime import RuntimeSettings, SlotGate
@@ -3063,14 +3065,18 @@ def test_menu(kind):
     names=list(dict.fromkeys(names))
     return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=('✓ ' if test_selection[kind]==name else '')+(NAMES.get(name,name) if kind=='audio' else name),callback_data='owner:testpick:'+kind+':'+name)] for name in names]+[[InlineKeyboardButton(text='Автоматично',callback_data='owner:testpick:'+kind+':')],[InlineKeyboardButton(text='Назад',callback_data='owner:back')]])
 
-load_config={'count':20,'mode':'auto','routes':set(),'kind':'text'}
+load_config={'count':20,'mode':'auto','routes':set(),'kind':'text','tts_words':50}
 load_task=None
 def load_names():
+    if load_config['kind']=='tts': return list(TTS_VOICES)
     if load_config['kind']=='audio': return list(ORDER)
     return list(dict.fromkeys([r[0] for r in TEXT_ROUTES]+['Requesty 2','Airforce 2']))
 def load_menu():
     rows=[[InlineKeyboardButton(text=('✓ ' if load_config['count']==n else '')+str(n),callback_data='owner:load:n:'+str(n)) for n in (5,10,20,30,50,100)]]
-    rows.append([InlineKeyboardButton(text='Тип: '+load_config['kind'],callback_data='owner:load:kind'),InlineKeyboardButton(text='Своя кількість',callback_data='owner:load:custom')])
+    rows.append([InlineKeyboardButton(text='Тип: '+{'text':'💬 Текст','audio':'🎙 Транскрипція','tts':'🔊 Озвучування'}[load_config['kind']],callback_data='owner:load:kind'),InlineKeyboardButton(text='Своя кількість',callback_data='owner:load:custom')])
+    if load_config['kind']=='tts':
+        rows.append([InlineKeyboardButton(text=('✓ ' if load_config['tts_words']==n else '')+str(n)+' слів',callback_data='owner:load:w:'+str(n)) for n in (20,50,100,200)])
+        rows.append([InlineKeyboardButton(text='✏️ Своя кількість слів',callback_data='owner:load:words')])
     for mode,label in [('auto','Автоматично'),('selected','Вибрані API'),('all','Усі API')]:
         rows.append([InlineKeyboardButton(text=('✓ ' if load_config['mode']==mode else '')+label,callback_data='owner:load:m:'+mode)])
     if load_config['mode']=='selected':
@@ -3308,10 +3314,14 @@ async def load_action(c):
             return await c.message.answer('Скасування тесту…')
         return await c.message.answer('Активного тесту немає.')
     if action=='kind':
-        load_config['kind']='audio' if load_config['kind']=='text' else 'text'
+        load_config['kind']={'text':'audio','audio':'tts','tts':'text'}[load_config['kind']]
         load_config['routes'].clear()
+    if action=='words' and load_config['kind']=='tts':
+        load_count_wait='words'
+        return await c.message.answer('Введи кількість слів для одного озвучування (1–500).')
+    if action=='w' and load_config['kind']=='tts' and parts[3] in ('20','50','100','200'): load_config['tts_words']=int(parts[3])
     if action=='custom':
-        load_count_wait=True
+        load_count_wait='count'
         return await c.message.answer('Введи кількість від 1 до 1000.')
     if action=='n' and parts[3] in ('5','10','20','30','50','100'): load_config['count']=int(parts[3])
     if action=='m' and parts[3] in ('auto','selected','all'): load_config['mode']=parts[3]
@@ -3320,14 +3330,18 @@ async def load_action(c):
         load_config['routes'].symmetric_difference_update({name})
     if action=='run':
         if load_task and not load_task.done(): return await c.message.answer('Тест уже триває.')
-        if load_config['mode']=='selected' and not load_config['routes']: return await c.message.answer('Вибери API.')
+        if load_config['mode']=='selected' and not load_config['routes']: return await c.message.answer('Вибери модель.')
         config={**load_config,'routes':sorted(load_config['routes'])}
+        if config['kind']=='tts':
+            if config['count']>100: return await c.message.answer('Для тесту озвучування максимум 100 генерацій за запуск.')
+            load_task=asyncio.create_task(run_tts_load_test(c.message,config))
+            return await c.message.answer('🔊 Тест Piper запущено. Генеруються справжні аудіофайли без надсилання в чат.')
         if config['kind']=='audio':
             audio_load_wait=config
             return await c.message.answer('Надішли голосове або кружечок для тесту.')
         load_task=asyncio.create_task(run_load_test(c.message,config))
         return await c.message.answer('Тест запущено. Реальні квоти API витрачаються.')
-    try: await c.message.edit_text('⚡ Тест навантаження ('+('аудіо' if load_config['kind']=='audio' else 'текст')+'). Реальні API-запити.',reply_markup=load_menu())
+    try: await c.message.edit_text('⚡ Тест навантаження ('+({'audio':'транскрипція','text':'текст','tts':'озвучування'}[load_config['kind']])+'). Реальні API-запити.',reply_markup=load_menu())
     except Exception as e:
         if 'message is not modified' not in str(e).lower(): raise
 
@@ -3380,7 +3394,7 @@ async def audio_settings_action(c):
     return await azure_slots_action(c,'audio')
 
 def owner_menu():
-    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='⏸ Вимкнути' if enabled() else '▶️ Увімкнути',callback_data='owner:toggle')],[InlineKeyboardButton(text='🖥 Стан серверів',callback_data='owner:server')],[InlineKeyboardButton(text='📊 Статистика',callback_data='owner:stats')],[InlineKeyboardButton(text='🤖 Статистика текстового ШІ',callback_data='owner:ai')],[InlineKeyboardButton(text='⚙️ Слоти тексту VPS',callback_data='owner:slots')],[InlineKeyboardButton(text='🎙 Слоти аудіо VPS',callback_data='owner:audiohost')],[InlineKeyboardButton(text='📈 Загальна статистика',callback_data='owner:overview')],[InlineKeyboardButton(text='🟢 Режим розробки: ON' if development_enabled() else '🔴 Режим розробки: OFF',callback_data='owner:development')],[InlineKeyboardButton(text='🧪 Режим тестування: ON' if testing_enabled() else '🧪 Режим тестування: OFF',callback_data='owner:testing')],[InlineKeyboardButton(text='🔄 Обнулити мій ліміт',callback_data='owner:reset_limit')]]+([[InlineKeyboardButton(text='🎙 Тест аудіо',callback_data='owner:testmenu:audio')],[InlineKeyboardButton(text='💬 Тест тексту',callback_data='owner:testmenu:text')],[InlineKeyboardButton(text='⚡ Тест навантаження',callback_data='owner:load')]] if testing_enabled() else []))
+    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='⏸ Вимкнути' if enabled() else '▶️ Увімкнути',callback_data='owner:toggle')],[InlineKeyboardButton(text='🖥 Стан серверів',callback_data='owner:server')],[InlineKeyboardButton(text='📊 Статистика',callback_data='owner:stats')],[InlineKeyboardButton(text='🤖 Статистика текстового ШІ',callback_data='owner:ai')],[InlineKeyboardButton(text='🔊 Статистика озвучування',callback_data='owner:tts')],[InlineKeyboardButton(text='⚙️ Слоти тексту VPS',callback_data='owner:slots')],[InlineKeyboardButton(text='🎙 Слоти аудіо VPS',callback_data='owner:audiohost')],[InlineKeyboardButton(text='📈 Загальна статистика',callback_data='owner:overview')],[InlineKeyboardButton(text='🟢 Режим розробки: ON' if development_enabled() else '🔴 Режим розробки: OFF',callback_data='owner:development')],[InlineKeyboardButton(text='🧪 Режим тестування: ON' if testing_enabled() else '🧪 Режим тестування: OFF',callback_data='owner:testing')],[InlineKeyboardButton(text='🔄 Обнулити мій ліміт',callback_data='owner:reset_limit')]]+([[InlineKeyboardButton(text='🎙 Тест аудіо',callback_data='owner:testmenu:audio')],[InlineKeyboardButton(text='💬 Тест тексту',callback_data='owner:testmenu:text')],[InlineKeyboardButton(text='⚡ Тест навантаження',callback_data='owner:load')]] if testing_enabled() else []))
 error_alert_times={}
 def error_message_source(m):
     chat=m.chat
@@ -3489,6 +3503,8 @@ async def owner_action(c:CallbackQuery):
                 logging.exception('Owner text statistics failed')
                 await c.message.answer('⚠️ Не вдалося відкрити статистику: '+type(e).__name__,parse_mode=None,reply_markup=text_stats_menu())
         return
+    if c.data=='owner:tts':
+        return await c.message.edit_text(tts_stats_report(),parse_mode='HTML',reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='🔄 Оновити',callback_data='owner:tts')],[InlineKeyboardButton(text='⬅️ Назад',callback_data='owner:back')]]))
     if c.data=='owner:stats':
         try: await c.message.edit_text(report(),parse_mode='HTML',reply_markup=stats_menu())
         except Exception as e:
@@ -4518,6 +4534,90 @@ async def cloud_text_probe():
         logging.warning('Cloud probe failed: %s',type(e).__name__)
         return False
 
+
+def tts_usage_record(chat_type,voice,text,success):
+    day=datetime.datetime.now(datetime.timezone.utc).date().isoformat()
+    scope='private' if chat_type=='private' else 'groups'
+    words=len(text.split())
+    with db:
+        db.execute("""INSERT INTO tts_usage(day,scope,voice,attempts,successes,failures,words)
+            VALUES(?,?,?,?,?,?,?) ON CONFLICT(day,scope,voice) DO UPDATE SET
+            attempts=attempts+1,successes=successes+excluded.successes,
+            failures=failures+excluded.failures,words=words+excluded.words""",
+            (day,scope,voice,1,int(success),int(not success),words))
+
+def tts_stats_report():
+    today=datetime.datetime.now(datetime.timezone.utc).date()
+    one=datetime.timedelta(days=1)
+    month=today.replace(day=1)
+    prev=month-one
+    periods=[('Сьогодні',today,today),('Вчора',today-one,today-one),
+        ('Минулий тиждень',today-one* (today.weekday()+7),today-one*(today.weekday()+1)),
+        ('Минулий місяць',prev.replace(day=1),prev),
+        ('За весь час',datetime.date(1970,1,1),today)]
+    lines=['<b>🔊 Статистика генерацій Piper</b>','Періоди за UTC. Тести навантаження не враховуються.']
+    for label,start,end in periods:
+        lines.append('\n<b>'+label+'</b>')
+        for scope,name in [('private','ЛС'),('groups','Групи'),(None,'Усього')]:
+            q='SELECT COALESCE(SUM(attempts),0),COALESCE(SUM(successes),0),COALESCE(SUM(failures),0),COALESCE(SUM(words),0) FROM tts_usage WHERE day BETWEEN ? AND ?'
+            args=[start.isoformat(),end.isoformat()]
+            if scope: q+=' AND scope=?'; args.append(scope)
+            attempts,ok,failed,words=db.execute(q,args).fetchone()
+            lines.append(f'{name}: {attempts} спроб · {ok} успішних · {failed} помилок · {words} слів')
+    voices=db.execute('SELECT voice,SUM(successes) FROM tts_usage GROUP BY voice ORDER BY SUM(successes) DESC').fetchall()
+    if voices: lines.extend(['','<b>Голоси (успішні генерації)</b>']+[html.escape(TTS_VOICES.get(v,v))+': '+str(n) for v,n in voices])
+    from azure_tts import pending
+    lines.append(f'\nЧерга TTS: {pending}/32 · паралельних слотів: 4')
+    return '\n'.join(lines)
+
+def tts_benchmark_text(word_count):
+    # Deterministic Ukrainian sentences; exact requested whitespace word count.
+    corpus=('Сьогодні ми перевіряємо швидкість синтезу українського мовлення. '
+        'Сервер створює голосове повідомлення та вимірює час обробки. '
+        'Цей тест допомагає оцінити навантаження на процесор і чергу завдань.').split()
+    return ' '.join(corpus[i%len(corpus)] for i in range(word_count))
+
+async def run_tts_load_test(message,config):
+    from azure_tts import benchmark_synthesis
+    count=config['count']
+    words=config['tts_words']
+    routes=config['routes'] if config['mode']=='selected' else ['serhiy']
+    if not routes: return await message.answer('Не вибрано голосів.')
+    start=time.monotonic()
+    active=peak=0
+    results=[]
+    async def job(i):
+        nonlocal active,peak
+        if not testing_enabled(): return (False,'Режим тестування вимкнено',0)
+        voice=routes[i%len(routes)]
+        active+=1
+        peak=max(peak,active)
+        try:
+            result=await benchmark_synthesis(tts_benchmark_text(words),voice)
+            return (True,f'#{i+1} {voice}: OK · черга {result["wait"]:.2f} с · синтез {result["elapsed"]:.2f} с · аудіо {result["seconds"]:.1f} с · {result["bytes"]} байт',result['elapsed'])
+        except Exception as e:
+            return (False,f'#{i+1} {voice}: {type(e).__name__}',0)
+        finally:
+            active-=1
+    tasks=[asyncio.create_task(job(i)) for i in range(count)]
+    try:
+        done,pending=await asyncio.wait(tasks,timeout=300)
+        results=[t.result() for t in done if not t.cancelled() and t.exception() is None]
+    finally:
+        for t in tasks:
+            if not t.done(): t.cancel()
+        await asyncio.gather(*tasks,return_exceptions=True)
+    lines=[f'🔊 Piper: {sum(r[0] for r in results)}/{count} успішно · {words} слів на генерацію · час {time.monotonic()-start:.1f} с',
+        'Слоти синтезу: 4 · черга до 32 · без надсилання в Telegram',
+        f'Завершено: {len(results)} · без результату: {count-len(results)}']+[r[1] for r in results]
+    chunk=''
+    for line in lines:
+        if len(chunk)+len(line)>3500:
+            await message.answer(chunk,parse_mode=None)
+            chunk=''
+        chunk+=line+'\n'
+    if chunk: await message.answer(chunk,parse_mode=None)
+
 TTS_VOICES={'natural':'🌌 Nebula Natural','deep':'🌌 Nebula Deep','soft':'🌌 Nebula Soft','serhiy':'🎙 Сергій (High)','mykyta':'Микита (оригінал)','oleksa':'Олекса','lada':'Лада','tetiana':'Тетяна','ukrainian_tts':'Ukrainian TTS'}
 
 def tts_preference(user_id):
@@ -4563,8 +4663,10 @@ async def local_tts_answer(c:CallbackQuery):
     tts_inflight.add(key)
     try:
         await c.answer('Озвучую…')
-        await speak(c.message,row[1],tts_preference(c.from_user.id),reply_to_message_id=row[0])
+        ok=await speak(c.message,row[1],tts_preference(c.from_user.id),reply_to_message_id=row[0])
+        tts_usage_record(c.message.chat.type,tts_preference(c.from_user.id),row[1],bool(ok))
     except Exception as e:
+        tts_usage_record(c.message.chat.type,tts_preference(c.from_user.id),row[1],False)
         logging.exception('Local TTS failed')
         await c.message.reply('Озвучування тимчасово недоступне.')
     finally:
@@ -4574,10 +4676,12 @@ async def local_tts_answer(c:CallbackQuery):
 async def text_message(m:Message):
     global load_count_wait
     if testing_enabled() and m.from_user and m.from_user.id==OWNER and m.chat.type=='private' and load_count_wait:
-        if not (m.text or '').isdigit() or not 1<=int(m.text)<=1000: return await m.reply('Введи число від 1 до 1000.')
+        limit=500 if load_count_wait=='words' else 1000
+        if not (m.text or '').isdigit() or not 1<=int(m.text)<=limit: return await m.reply(f'Введи число від 1 до {limit}.')
+        field='tts_words' if load_count_wait=='words' else 'count'
         load_count_wait=False
-        load_config['count']=int(m.text)
-        return await m.reply('Кількість: '+str(load_config['count']),reply_markup=load_menu())
+        load_config[field]=int(m.text)
+        return await m.reply(('Слів на генерацію: ' if field=='tts_words' else 'Кількість: ')+str(load_config[field]),reply_markup=load_menu())
     if not m.from_user or m.from_user.is_bot: return
     group=m.chat.type!='private'
     chat=m.chat.id
