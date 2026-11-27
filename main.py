@@ -4563,8 +4563,12 @@ async def generate_text(m,question,context='',group=False,history_context='',dia
         visible_tokens=0
         notify_limit=False
         if True:
-            # User allowance covers visible input and output, including local fallback.
-            visible_tokens=max(1,(len(question.encode('utf-8'))+3)//4)+max(1,(len(answer.encode('utf-8'))+3)//4)
+            # Bill the actual user payload, including any transmitted conversation history, once per delivered answer.
+            transmitted_input=(local_messages if local else messages)[-1]['content']
+            input_tokens=max(1,(len(transmitted_input.encode('utf-8'))+3)//4)
+            visible_tokens=input_tokens+max(1,(len(answer.encode('utf-8'))+3)//4)
+            diagnostic['input_tokens_estimate']=input_tokens
+            diagnostic['context_tokens_estimate']=max(0,input_tokens-(len(question[:4000].encode('utf-8'))+3)//4)
             async with mini_billing_locks[chat % len(mini_billing_locks)]:
                 left=max(0,mini_daily_limit(chat)-group_used(chat,day))
                 bonus_before=await miniapp.balance(chat) if miniapp.username else 0
