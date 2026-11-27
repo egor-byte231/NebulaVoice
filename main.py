@@ -3221,6 +3221,9 @@ async def run_load_test(message,config):
     ]])
     active=peak=0
     results={}
+    reasons={i:"черга" for i in range(total)}
+    watchdog_hits=0
+    last_progress=time.monotonic()
     stats={r[0]:{'ok':0,'seconds':0.0,'429':0,'403':0,'timeout':0,'errors':0} for r in routes}
 
     def summary():
@@ -3240,6 +3243,14 @@ async def run_load_test(message,config):
               f'помилки: {len(results)-ok}\n'
               f'Активні: {active} · очікують: {total-len(results)-active if markup else 0} · '
               f'час: {time.monotonic()-start:.0f} с\n\n{summary()}')
+        if markup:
+            groups={}
+            for i,reason in reasons.items():
+                if i not in results and not reason.startswith("API "): groups.setdefault(reason,[]).append(str(i+1))
+            text+=f"\n\nWatchdog: {watchdog_hits}"
+            for reason,ids in groups.items():
+                text+="\n"+reason+": #"+", #".join(ids)
+            if len(text)>3900: text=text[:3850]+"\nПовні причини — у фінальному звіті."
         try:
             await asyncio.wait_for(progress.edit_text(text,reply_markup=markup,parse_mode=None),3)
         except Exception as e:
@@ -3253,8 +3264,12 @@ async def run_load_test(message,config):
         winner=''
         began=None
         processing=0
-        order=routes if config['mode']=='auto' else [routes[i%len(routes)]]
-        for cycle in range(3):
+        order=routes
+        job_deadline=time.monotonic()+120
+        cycle=0
+        while time.monotonic()<job_deadline:
+            cycle+=1
+            reasons[i]='очікування слота'
             if not testing_enabled(): break
             async with azure_text_gate.slot():
                 entered=time.monotonic()
@@ -3266,8 +3281,11 @@ async def run_load_test(message,config):
                         if not testing_enabled(): break
                         name=route[0]
                         key,url,model=text_config(route)
-                        if not key or not url or not model or not url.startswith('https://') or blocked('text:'+name)>time.time(): continue
+                        if not key or not url or not model or not url.startswith('https://'): continue
+                        if blocked('text:'+name)>time.time(): continue
+                        if text_api_next.get(name,0)>time.monotonic(): continue
                         if not await text_api_pace(name): continue
+                        reasons[i]='API '+name
                         day=text_day()
                         reserve=984
                         text_charge(day,name,reserve,1)
@@ -3307,11 +3325,14 @@ async def run_load_test(message,config):
                     active-=1
                     processing+=time.monotonic()-entered
             if winner: break
-            if cycle<2:
-                waits=[max(0,blocked('text:'+r[0])-time.time()) for r in order if all(text_config(r))]
-                delay=max(2**(cycle+1),min(waits,default=0))
-                if delay>120: break
-                await asyncio.sleep(delay)
+            configured=[r for r in order if all(text_config(r)) and text_config(r)[1].startswith('https://')]
+            if not configured: reasons[i]='немає налаштованих API'; break
+            waits=[max(0,blocked('text:'+r[0])-time.time()) for r in configured]
+            reasons[i]=('cooldown усіх API' if all(w>0 for w in waits) else 'повтор / ліміт частоти API')
+            await asyncio.sleep(min(2,max(0.25,min(waits,default=0))))
+        final_reason=reasons[i]
+        reasons[i]='завершено'
+        if not winner: attempts.append(final_reason)
         return bool(winner),tokens,f'#{i+1} {winner or "Помилка"} | черга {(began or time.monotonic())-start:.2f} с | обробка {processing:.2f} с | '+', '.join(attempts)
     cancelled=False
     try:
@@ -3336,6 +3357,11 @@ async def run_load_test(message,config):
                     except Exception as e:
                         logging.exception('Text load test request failed')
                         results[index]=(False,0,f'#{index+1} Помилка: {type(e).__name__}')
+                if done: last_progress=time.monotonic()
+                if pending and active==0 and time.monotonic()-last_progress>=10:
+                    watchdog_hits+=1
+                    last_progress=time.monotonic()
+                    logging.warning('Text load watchdog: %s pending; reasons=%s',len(pending),{tasks[p]:reasons[tasks[p]] for p in pending})
                 if pending and time.monotonic()>=next_update:
                     next_update+=5
                     await update_progress('⏳ Azure VPS. Текстовий тест триває.',cancel_markup)
@@ -3346,6 +3372,9 @@ async def run_load_test(message,config):
                 if not task.done():
                     task.cancel()
             await asyncio.gather(*tasks,return_exceptions=True)
+            for task in pending:
+                index=tasks[task]
+                results.setdefault(index,(False,0,f'#{index+1} Без результату: {reasons[index]}'))
 
     complete=[result for _,result in sorted(results.items())]
     outcome='Тест скасовано.' if cancelled else ('Вичерпано час тесту.' if pending else 'Тест завершено.')
