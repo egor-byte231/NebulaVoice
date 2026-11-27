@@ -81,10 +81,15 @@ function action(label, handler, primary = false) {
 function openTelegram(url) { tg.openTelegramLink(url); }
 function balance(key, label) {
   const quota = key == null ? null : data.quotas?.[key];
-  const el = card(label, quota ? format.format(quota.remaining) : '–',
-    quota ? 'із ' + format.format(quota.limit) + ' токенів на день' : 'Відкрий Mini App у групі');
+  const bonus = key == null ? 0 : data.bonus[key] ?? 0;
+  const el = card(label, quota ? format.format(quota.remaining + bonus) : '–',
+    quota ? 'Добові · ' + format.format(quota.remaining) + ' із ' + format.format(quota.limit)
+      : 'Відкрий Mini App у групі');
   el.classList.add('balance');
-  if (quota) el.append(node('p', 'Підписка ' + quota.plan, 'caption'));
+  if (quota) {
+    el.append(node('p', 'Бонусні · ' + format.format(bonus)));
+    el.append(node('p', 'Підписка ' + quota.plan, 'caption'));
+  }
   return el;
 }
 function changeSection(index) {
