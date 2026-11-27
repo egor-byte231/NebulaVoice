@@ -4268,12 +4268,65 @@ def icebreaker_schema():
     db.execute('CREATE TABLE IF NOT EXISTS icebreaker_turns (chat INTEGER NOT NULL,message_id INTEGER NOT NULL,parent_id INTEGER NOT NULL,participant TEXT NOT NULL,utterance TEXT NOT NULL,answer TEXT NOT NULL,PRIMARY KEY(chat,message_id))')
     db.commit()
 
+def question_schedule():
+    db.execute('CREATE TABLE IF NOT EXISTS question_schedule (id INTEGER PRIMARY KEY, night_start INTEGER NOT NULL, night_end INTEGER NOT NULL, night_limit INTEGER NOT NULL, min_interval INTEGER NOT NULL, max_interval INTEGER NOT NULL)')
+    db.execute('INSERT OR IGNORE INTO question_schedule VALUES (1,0,420,2,30,90)')
+    db.commit()
+    return db.execute('SELECT night_start,night_end,night_limit,min_interval,max_interval FROM question_schedule WHERE id=1').fetchone()
+
+def question_delay():
+    _,_,_,lo,hi=question_schedule()
+    return random.randint(lo*60,hi*60)
+
+def question_night_bounds(local_now,start,end):
+    minute=local_now.hour*60+local_now.minute
+    if start==end or not (start<=minute<end if start<end else minute>=start or minute<end):
+        return None
+    day=local_now.date()
+    first=day-datetime.timedelta(days=1) if start>end and minute<end else day
+    last=first+datetime.timedelta(days=1) if start>end else first
+    def at(d,m):
+        return datetime.datetime.combine(d,datetime.time(m//60,m%60),tzinfo=local_now.tzinfo).timestamp()
+    return at(first,start),at(last,end)
+
+@dp.message(Command('questions_settings','questions_night','questions_night_limit','questions_interval'),F.chat.type=='private',F.from_user.id==OWNER)
+async def question_owner_settings(m:Message):
+    icebreaker_schema()
+    start,end,limit,lo,hi=question_schedule()
+    parts=m.text.split()
+    cmd=parts[0].split('@')[0]
+    try:
+        if cmd=='/questions_night':
+            if len(parts)!=3: raise ValueError()
+            def parse(v):
+                if not re.fullmatch(r'(?:[01][0-9]|2[0-3]):[0-5][0-9]',v): raise ValueError()
+                h,mi=map(int,v.split(':'))
+                return h*60+mi
+            start,end=map(parse,parts[1:])
+        elif cmd=='/questions_night_limit':
+            if len(parts)!=2: raise ValueError()
+            limit=int(parts[1])
+            if not 0<=limit<=1440: raise ValueError()
+        elif cmd=='/questions_interval':
+            if len(parts)!=3: raise ValueError()
+            lo,hi=map(int,parts[1:])
+            if not 1<=lo<=hi<=1440: raise ValueError()
+    except ValueError:
+        return await m.answer('Формат: /questions_night 00:00 07:00; /questions_night_limit 2 (0–1440); /questions_interval 30 90 (1–1440 хв, мінімум ≤ максимум).')
+    if cmd!='/questions_settings':
+        with db:
+            db.execute('UPDATE question_schedule SET night_start=?,night_end=?,night_limit=?,min_interval=?,max_interval=? WHERE id=1',(start,end,limit,lo,hi))
+            for (chat,) in db.execute('SELECT chat FROM icebreaker_settings WHERE enabled=1').fetchall():
+                db.execute('UPDATE icebreaker_settings SET next_at=? WHERE chat=?',(time.time()+random.randint(lo*60,hi*60),chat))
+    fmt=lambda v:f'{v//60:02d}:{v%60:02d}'
+    await m.answer('⚙️ Автоматичні запитання (Europe/Kyiv)\nНіч: '+(fmt(start)+'–'+fmt(end) if start!=end else 'вимкнено')+f'\nЛіміт за ніч на групу: {limit}\nІнтервал: {lo}–{hi} хв\n/questions_night 00:00 07:00\n/questions_night_limit 2\n/questions_interval 30 90')
+
 @dp.message(Command('questions_on','questions_off'),F.chat.type.in_({'group','supergroup'}))
 async def icebreaker_control(m:Message):
     if not await group_admin(m): return
     icebreaker_schema()
     on=int(m.text.split()[0].split('@')[0]=='/questions_on')
-    db.execute('INSERT INTO icebreaker_settings VALUES (?,?,?,NULL) ON CONFLICT(chat) DO UPDATE SET enabled=excluded.enabled,next_at=excluded.next_at',(m.chat.id,on,time.time()+random.randint(1800,5400)))
+    db.execute('INSERT INTO icebreaker_settings VALUES (?,?,?,NULL) ON CONFLICT(chat) DO UPDATE SET enabled=excluded.enabled,next_at=excluded.next_at',(m.chat.id,on,time.time()+question_delay()))
     db.commit()
     await m.reply('💬 Питання для активності увімкнено.' if on else '💬 Питання для активності вимкнено.')
 
@@ -4311,14 +4364,15 @@ async def icebreaker_monitor():
                 logging.info('Group question skipped: chat=%s bot or AI disabled',chat)
                 continue
             local_now=datetime.datetime.now(kyiv)
-            if local_now.hour<7:
-                night_start=local_now.replace(hour=0,minute=0,second=0,microsecond=0).timestamp()
-                night_end=local_now.replace(hour=7,minute=0,second=0,microsecond=0).timestamp()
+            start,end,night_limit,_,_=question_schedule()
+            bounds=question_night_bounds(local_now,start,end)
+            if bounds:
+                night_start,night_end=bounds
                 # Reply-chain entries also exist in icebreaker_posts; only original questions count.
                 night_count=db.execute('SELECT COUNT(*) FROM icebreaker_posts p WHERE p.chat=? AND p.sent_at>=? AND p.sent_at<? AND NOT EXISTS (SELECT 1 FROM icebreaker_turns t WHERE t.chat=p.chat AND t.message_id=p.message_id)',(chat,night_start,night_end)).fetchone()[0]
-                if night_count>=2:
+                if night_count>=night_limit:
                     with db:
-                        db.execute('UPDATE icebreaker_settings SET next_at=? WHERE chat=?',(night_end+random.randint(0,1800),chat))
+                        db.execute('UPDATE icebreaker_settings SET next_at=? WHERE chat=?',(night_end+question_delay(),chat))
                     continue
             members={uid:entry for uid,entry in icebreaker_members.get(chat,{}).items() if now-entry[1]<=900}
             recent_users={r[0] for r in db.execute('SELECT user_id FROM icebreaker_user_history WHERE chat=? ORDER BY id DESC LIMIT 10',(chat,))}
@@ -4336,7 +4390,7 @@ async def icebreaker_monitor():
             try:
                 sent=await bot.send_message(chat,f'<a href="tg://user?id={uid}">{html.escape(name)}</a>, {html.escape(question)}',parse_mode='HTML')
                 with db:
-                    db.execute('UPDATE icebreaker_settings SET next_at=?,last_question=? WHERE chat=?',(time.time()+random.randint(1800,5400),question,chat))
+                    db.execute('UPDATE icebreaker_settings SET next_at=?,last_question=? WHERE chat=?',(time.time()+question_delay(),question,chat))
                     db.execute('INSERT INTO icebreaker_history(chat,question) VALUES (?,?)',(chat,question))
                     db.execute('INSERT INTO icebreaker_user_history(chat,user_id) VALUES (?,?)',(chat,uid))
                     db.execute('DELETE FROM icebreaker_user_history WHERE chat=? AND id NOT IN (SELECT id FROM icebreaker_user_history WHERE chat=? ORDER BY id DESC LIMIT 10)',(chat,chat))
