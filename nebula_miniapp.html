@@ -108,20 +108,26 @@ function viewHome(root) {
   balances.append(balance(data.uid, 'Особистий залишок'), balance(group ? data.chat : null, 'Залишок групи'));
   root.append(balances);
 
-  const claimed = Object.prototype.hasOwnProperty.call(data.bonus, data.chat);
   const bonusStatus = node('div', null, 'card bonus-status');
-  const mark = node('span', claimed ? '✓' : '✧', 'bonus-mark');
+  const mark = node('span', data.bonusStartUrl ? '✧' : '✓', 'bonus-mark');
   mark.setAttribute('aria-hidden', 'true');
   const copy = node('div');
-  const bonusAmount = group ? 2000 : 10000;
-  copy.append(node('h3', claimed ? 'Бонус нараховано' : 'Одноразовий бонус'),
-    node('p', claimed ? 'Залишок бонусу · ' + format.format(data.bonus[data.chat]) + ' токенів'
-      : '+' + format.format(bonusAmount) + ' токенів без терміну дії'));
+  copy.append(node('h3', 'Одноразові бонуси'));
+  for (const [key, amount, label] of [
+    [data.uid, data.bonusOffer?.personal, 'Особистий бонус'],
+    [group ? data.chat : null, data.bonusOffer?.group, 'Бонус групи']
+  ]) {
+    if (key == null) continue;
+    if (amount) copy.append(node('p', label + ' · +' + format.format(amount) + ' токенів'));
+    else if (Object.prototype.hasOwnProperty.call(data.bonus, key)) {
+      copy.append(node('p', label + ' · залишок ' + format.format(data.bonus[key]) + ' токенів'));
+    } else if (key !== data.uid) copy.append(node('p', 'Бонус групи може отримати лише її власник.'));
+  }
   bonusStatus.append(mark, copy);
-  if (!claimed && data.bonusStartUrl) {
+  if (data.bonusStartUrl) {
     copy.append(action('Написати боту', () => openTelegram(data.bonusStartUrl)));
-  } else if (!claimed) {
-    copy.append(node('p', 'Відкрий Mini App під відповіддю бота в потрібному чаті.'));
+  } else if (!Object.prototype.hasOwnProperty.call(data.bonus, data.uid)) {
+    copy.append(node('p', 'Відкрий Mini App під відповіддю бота, щоб забрати особистий бонус.'));
   }
   root.append(bonusStatus, action('Додати бота в групу', () => openTelegram(data.addUrl), true));
 
