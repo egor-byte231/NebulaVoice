@@ -38,6 +38,10 @@ async def select_model(text, preference='mykyta'):
     lang = lang.split("-")[0]
     directory = Path(os.environ["PIPER_MODELS_DIR"]).resolve()
     directory.mkdir(parents=True, exist_ok=True)
+    # Third-party Serhiy is installed separately, not listed in Piper's catalog.
+    if preference == "serhiy":
+        model = directory / "uk_UA-serhiy-high.onnx"
+        return str(model) if model.is_file() and Path(str(model) + ".json").is_file() else None
     async with download_lock:
         preferred = {"uk":"uk_UA-"+preference+"-high", "ru":"ru_RU-dmitri-medium", "en":"en_US-ryan-high"}
         voice = preferred.get(lang)
@@ -93,6 +97,8 @@ async def speak(message, text, preference='mykyta'):
         async with slots:
             model = await select_model(text, preference)
             if not model:
+                if preference == 'serhiy':
+                    return await message.reply('Голос Сергій ще не встановлений на VPS. Завантаж модель командою встановлення.')
                 return await message.reply('Для цієї мови немає доступної голосової моделі Piper.')
             with tempfile.TemporaryDirectory(prefix="nebula-tts-") as directory:
                 wav = str(Path(directory) / "speech.wav")
