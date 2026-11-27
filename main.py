@@ -4292,6 +4292,7 @@ async def icebreaker_observe(handler,event,data):
     return await handler(event,data)
 
 async def icebreaker_monitor():
+    import html
     icebreaker_schema()
     group_roster_schema()
     db.execute('CREATE TABLE IF NOT EXISTS icebreaker_migrations (name TEXT PRIMARY KEY)')
@@ -4301,13 +4302,17 @@ async def icebreaker_monitor():
     while True:
         now=time.time()
         for chat,last_question in db.execute('SELECT chat,last_question FROM icebreaker_settings WHERE enabled=1 AND next_at<=?',(now,)).fetchall():
-            if not enabled() or not group_enabled(chat): continue
+            if not enabled() or not group_enabled(chat):
+                logging.info('Group question skipped: chat=%s bot or AI disabled',chat)
+                continue
             members={uid:entry for uid,entry in icebreaker_members.get(chat,{}).items() if now-entry[1]<=900}
             recent_users={r[0] for r in db.execute('SELECT user_id FROM icebreaker_user_history WHERE chat=? ORDER BY id DESC LIMIT 10',(chat,))}
             candidates=[(uid,entry) for uid,entry in members.items() if uid not in recent_users]
             if not candidates and db.execute('SELECT next_at FROM icebreaker_settings WHERE chat=?',(chat,)).fetchone()[0]==0:
                 candidates=[(uid,(name,last_seen)) for uid,name,last_seen in db.execute('SELECT user_id,name,last_seen FROM group_roster WHERE chat=? AND present=1 AND last_seen>=?',(chat,now-86400)).fetchall() if uid not in recent_users]
-            if not candidates: continue
+            if not candidates:
+                logging.info('Group question waiting: chat=%s no eligible participant',chat)
+                continue
             recent={r[0] for r in db.execute('SELECT question FROM icebreaker_history WHERE chat=? ORDER BY id DESC LIMIT 10',(chat,))}
             if last_question: recent.add(last_question)
             question=random.choice([q for q in icebreaker_questions if q not in recent])
@@ -4321,7 +4326,7 @@ async def icebreaker_monitor():
                     db.execute('DELETE FROM icebreaker_user_history WHERE chat=? AND id NOT IN (SELECT id FROM icebreaker_user_history WHERE chat=? ORDER BY id DESC LIMIT 10)',(chat,chat))
                     db.execute('DELETE FROM icebreaker_history WHERE chat=? AND id NOT IN (SELECT id FROM icebreaker_history WHERE chat=? ORDER BY id DESC LIMIT 10)',(chat,chat))
                     db.execute('INSERT OR REPLACE INTO icebreaker_posts VALUES (?,?,?,?)',(chat,sent.message_id,question,time.time()))
-            except Exception as e: logging.warning('Group question failed: %s',type(e).__name__)
+            except Exception: logging.exception('Group question failed: chat=%s',chat)
         await asyncio.sleep(30)
 
 @dp.message(Command('ai_on','ai_off','ai_stats'),F.chat.type.in_({'group','supergroup'}))
