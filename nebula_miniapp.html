@@ -184,14 +184,68 @@ function viewProfile(root) {
   referral.append(action('Поділитися запрошенням', () => openTelegram(
     'https://t.me/share/url?url=' + encodeURIComponent(data.referralUrl) + '&text=' + encodeURIComponent('Спробуй NebulaVoice')
   )));
+  if (data.isOwner) root.append(action('Адмінпанель · бонуси', () => changeSection(4), true));
   root.append(referral, action('Відкрити чат із ботом', () => openTelegram(data.privateUrl)));
+}
+function viewAdmin(root) {
+  root.append(node('h2', 'Адмінпанель · бонуси'));
+  const list = node('div');
+  const initial = node('p', 'Завантаження…');
+  const more = action('Показати ще', () => loadPage());
+  let offset = 0;
+  more.hidden = true;
+  root.append(list, initial, more);
+
+  function quota(label, value) {
+    return node('p', label + ' · ' + format.format(value.total) + ' токенів (' +
+      format.format(value.remaining) + ' добових + ' + format.format(value.bonus) +
+      ' бонусних) · Підписка ' + value.plan);
+  }
+  async function loadPage() {
+    more.disabled = true;
+    try {
+      const result = await requestData({adminBonusOffset:offset});
+      initial.hidden = true;
+      if (!offset && !result.claims.length) list.append(card('Бонусів ще не отримували'));
+      for (const row of result.claims) {
+        const entry = card(row.group ? 'Бонус для групи' : 'Особистий бонус у ЛС');
+        if (row.at) entry.append(node('small', new Date(row.at * 1000).toLocaleString('uk-UA')));
+        if (row.uid) {
+          entry.append(node('p', [row.name, row.username ? '@' + row.username : null].filter(Boolean).join(' · ') || 'Користувач Telegram'));
+          entry.append(node('p', 'ID ' + row.uid));
+          const profile = node('a', 'Відкрити профіль', 'action');
+          profile.href = 'tg://user?id=' + encodeURIComponent(row.uid);
+          if (row.username && /^[a-zA-Z0-9_]+$/.test(row.username)) {
+            profile.href = 'https://t.me/' + row.username;
+            profile.onclick = event => { event.preventDefault(); openTelegram(profile.href); };
+          }
+          entry.append(profile, quota('Особистий баланс', row.personal));
+        } else {
+          entry.append(node('p', 'Одержувача не було записано під час нарахування.'));
+        }
+        if (row.group) entry.append(node('p', 'ID групи ' + row.groupId), quota('Баланс групи', row.group));
+        list.append(entry);
+      }
+      offset = result.nextOffset;
+      more.hidden = offset == null;
+    } catch (err) {
+      initial.textContent = err.message;
+      initial.hidden = false;
+      more.hidden = false;
+      more.textContent = 'Спробувати знову';
+    } finally {
+      more.disabled = false;
+    }
+  }
+
+  loadPage();
 }
 function render() {
   content.replaceChildren();
   const root = node('section', null, 'view');
-  [viewHome, viewStats, viewHistory, viewProfile][section](root);
+  [viewHome, viewStats, viewHistory, viewProfile, viewAdmin][section](root);
   content.append(root);
-  for (const [index, tab] of [...nav.children].entries()) tab.setAttribute('aria-selected', String(index === section));
+  for (const [index, tab] of [...nav.children].entries()) tab.setAttribute('aria-selected', String(index === (section === 4 ? 3 : section)));
 }
 function notice(text, error = false) {
   status.className = error ? 'error' : 'caption';
