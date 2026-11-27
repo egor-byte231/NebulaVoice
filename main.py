@@ -4296,6 +4296,8 @@ async def icebreaker_observe(handler,event,data):
 
 async def icebreaker_monitor():
     import html
+    from zoneinfo import ZoneInfo
+    kyiv=ZoneInfo('Europe/Kyiv')
     icebreaker_schema()
     group_roster_schema()
     db.execute('CREATE TABLE IF NOT EXISTS icebreaker_migrations (name TEXT PRIMARY KEY)')
@@ -4308,6 +4310,16 @@ async def icebreaker_monitor():
             if not enabled() or not group_enabled(chat):
                 logging.info('Group question skipped: chat=%s bot or AI disabled',chat)
                 continue
+            local_now=datetime.datetime.now(kyiv)
+            if local_now.hour<7:
+                night_start=local_now.replace(hour=0,minute=0,second=0,microsecond=0).timestamp()
+                night_end=local_now.replace(hour=7,minute=0,second=0,microsecond=0).timestamp()
+                # Reply-chain entries also exist in icebreaker_posts; only original questions count.
+                night_count=db.execute('SELECT COUNT(*) FROM icebreaker_posts p WHERE p.chat=? AND p.sent_at>=? AND p.sent_at<? AND NOT EXISTS (SELECT 1 FROM icebreaker_turns t WHERE t.chat=p.chat AND t.message_id=p.message_id)',(chat,night_start,night_end)).fetchone()[0]
+                if night_count>=2:
+                    with db:
+                        db.execute('UPDATE icebreaker_settings SET next_at=? WHERE chat=?',(night_end+random.randint(0,1800),chat))
+                    continue
             members={uid:entry for uid,entry in icebreaker_members.get(chat,{}).items() if now-entry[1]<=900}
             recent_users={r[0] for r in db.execute('SELECT user_id FROM icebreaker_user_history WHERE chat=? ORDER BY id DESC LIMIT 10',(chat,))}
             candidates=[(uid,entry) for uid,entry in members.items() if uid not in recent_users]
