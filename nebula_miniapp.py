@@ -24,6 +24,7 @@ class MiniApp:
         self.query = query
         self.daily_usage = daily_usage
         self.daily_limit = daily_limit
+        self.owner_id = int(os.getenv('OWNER_ID') or '0')
         self.url = os.getenv('NEBULA_MINIAPP_URL', '').rstrip('/')
         self.name = os.getenv('NEBULA_MINIAPP_SHORT_NAME', 'nebula')
         self.secret = hmac.digest(bot.token.encode(), b'nebula-miniapp-context-v1', 'sha256')
@@ -55,6 +56,14 @@ class MiniApp:
             'CREATE INDEX IF NOT EXISTS mini_users_referrer ON mini_users(referred_by)',
         ):
             await self.query(statement)
+        columns = await self.query('PRAGMA table_info(mini_bonus_v2)')
+        if not any(column['name'] == 'claim_details' for column in columns):
+            try:
+                await self.query('ALTER TABLE mini_bonus_v2 ADD COLUMN claim_details TEXT')
+            except RuntimeError:
+                columns = await self.query('PRAGMA table_info(mini_bonus_v2)')
+                if not any(column['name'] == 'claim_details' for column in columns):
+                    raise
         username = (await self.bot.get_me()).username
         app = web.Application(client_max_size=32 * 1024)
         app.router.add_get('/', self.page)
@@ -159,10 +168,16 @@ class MiniApp:
         grants = [(user_id, PERSONAL_BONUS)]
         if chat < 0 and await self.is_group_owner(chat, user_id):
             grants.append((chat, GROUP_BONUS))
-        values = ','.join('(?,?)' for _ in grants)
+        details = json.dumps({
+            'uid': user_id, 'username': getattr(message.from_user, 'username', None),
+            'name': getattr(message.from_user, 'full_name', None),
+            'at': int(time.time()),
+        }, ensure_ascii=False)
+        values = ','.join('(?,?,?)' for _ in grants)
+        params = tuple(value for target, amount in grants for value in (target, amount, details))
         rows = await self.query(
-            f'INSERT OR IGNORE INTO mini_bonus_v2(chat,balance) VALUES {values} RETURNING chat,balance',
-            tuple(value for grant in grants for value in grant),
+            f'INSERT OR IGNORE INTO mini_bonus_v2(chat,balance,claim_details) VALUES {values} RETURNING chat,balance',
+            params,
         )
         credited = {row['chat']: row['balance'] for row in rows}
         lines = []
@@ -251,6 +266,48 @@ class MiniApp:
         return web.FileResponse(Path(__file__).with_name('nebula_miniapp.html'),
                                 headers={'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer'})
 
+    def account_quota(self, scope):
+        limit = self.daily_limit(scope)
+        free_limit = 10000 if scope > 0 else 40000
+        return {'limit': limit, 'remaining': max(0, limit - self.daily_usage(scope)),
+                'plan': 'Premium' if limit > free_limit else 'Free'}
+
+    async def admin_bonus_claims(self, uid, offset):
+        if uid != self.owner_id:
+            raise web.HTTPForbidden()
+        if type(offset) is not int or offset < 0:
+            raise web.HTTPBadRequest()
+        rows = await self.query(
+            """WITH claims AS (
+                SELECT chat,balance,claim_details,
+                    COALESCE(json_extract(claim_details,'$.uid'),CASE WHEN chat>0 THEN chat END) AS claimant
+                FROM mini_bonus_v2
+            )
+            SELECT claims.*,COALESCE(personal.balance,0) AS personal_bonus
+            FROM claims LEFT JOIN mini_bonus_v2 personal ON personal.chat=claims.claimant
+            ORDER BY COALESCE(json_extract(claims.claim_details,'$.at'),0) DESC, claims.chat DESC
+            LIMIT 51 OFFSET ?""", (offset,),
+        )
+        entries = []
+        for row in rows[:50]:
+            details = json.loads(row['claim_details']) if row['claim_details'] else {}
+            claimant = row['claimant']
+            personal = self.account_quota(claimant) if claimant is not None else None
+            if personal is not None:
+                personal['bonus'] = row['personal_bonus']
+                personal['total'] = personal['remaining'] + personal['bonus']
+            group = self.account_quota(row['chat']) if row['chat'] < 0 else None
+            if group is not None:
+                group['bonus'] = row['balance']
+                group['total'] = group['remaining'] + group['bonus']
+            entries.append({
+                'uid': str(claimant) if claimant is not None else None,
+                'username': details.get('username'), 'name': details.get('name'), 'at': details.get('at'),
+                'groupId': str(row['chat']) if group else None, 'group': group, 'personal': personal,
+            })
+        return web.json_response({'claims': entries, 'nextOffset': offset + 50 if len(rows) > 50 else None},
+                                 headers={'Cache-Control': 'no-store'})
+
     async def api(self, request):
         try:
             payload = await request.json()
@@ -258,6 +315,8 @@ class MiniApp:
         except (AttributeError, KeyError, ValueError, TypeError, OverflowError):
             raise web.HTTPUnauthorized() from None
         uid = user['id']
+        if 'adminBonusOffset' in payload:
+            return await self.admin_bonus_claims(uid, payload['adminBonusOffset'])
         chat, claim, referral = await self.scope(uid, fields)
         await self.query(
             'INSERT OR IGNORE INTO mini_users(id,referred_by,write_allowed) VALUES (?,(SELECT id FROM mini_users WHERE id=?),?)',
@@ -291,16 +350,7 @@ class MiniApp:
             prompt_write_access = not await self.query(
                 'SELECT 1 FROM mini_write_prompt_results WHERE user_id=?', (uid,)
             )
-        quotas = {}
-        for scope in (uid, chat):
-            limit = self.daily_limit(scope)
-            used = self.daily_usage(scope)
-            free_limit = 10000 if scope > 0 else 40000
-            quotas[str(scope)] = {
-                'limit': limit, 'remaining': max(0, limit - used),
-                'plan': 'Premium' if limit > free_limit else 'Free',
-            }
-
+        quotas = {str(scope): self.account_quota(scope) for scope in {uid, chat}}
         history = await self.query(
             """WITH entries AS (
                 SELECT message,at,body FROM mini_events
@@ -344,6 +394,7 @@ class MiniApp:
         )
         referrals = await self.query('SELECT COUNT(*) AS count FROM mini_users WHERE referred_by=?', (uid,))
         return web.json_response({
+            'isOwner': uid == self.owner_id,
             'name': user.get('first_name') or 'друже',
             'settings': profile, 'bonus': balances,
             'uid': str(uid), 'chat': str(chat), 'history': history, 'stats': stats,
