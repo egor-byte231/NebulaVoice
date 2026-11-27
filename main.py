@@ -4557,17 +4557,16 @@ async def local_tts_answer(c:CallbackQuery):
         return await c.answer('Відповідь недоступна для озвучування.',show_alert=True)
     if key in tts_inflight:
         return await c.answer('Вже озвучую.')
-    request=c.message.reply_to_message
-    if not request or request.message_id!=row[0]:
-        return await c.answer('Початковий запит недоступний.',show_alert=True)
+    # Reply to the original request by its persisted ID, even if Telegram
+    # omits reply_to_message from the callback payload.
     from azure_tts import speak
     tts_inflight.add(key)
     try:
         await c.answer('Озвучую…')
-        await speak(request,row[1],tts_preference(c.from_user.id))
+        await speak(c.message,row[1],tts_preference(c.from_user.id),reply_to_message_id=row[0])
     except Exception as e:
         logging.exception('Local TTS failed')
-        await request.reply('Озвучування тимчасово недоступне.')
+        await c.message.reply('Озвучування тимчасово недоступне.')
     finally:
         tts_inflight.discard(key)
 
