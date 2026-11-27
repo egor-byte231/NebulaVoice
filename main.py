@@ -3215,8 +3215,37 @@ def text_api_order(routes,offset=0):
 async def run_load_test(message,config):
     routes=[r for r in TEXT_ROUTES if config['mode']!='selected' or r[0] in config['routes']]
     if not routes: return await message.answer('Немає локально налаштованих моделей.')
-    start=time.monotonic()
+    total=config['count']
+    cancel_markup=InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text='Скасувати тест',callback_data='owner:load:cancel')
+    ]])
     active=peak=0
+    results={}
+    stats={r[0]:{'ok':0,'seconds':0.0,'429':0,'403':0,'timeout':0,'errors':0} for r in routes}
+
+    def summary():
+        return '\n'.join(
+            f'{name}: ✓ {row["ok"]} · 429: {row["429"]} · 403: {row["403"]} · '
+            f'таймаути: {row["timeout"]} · інші помилки: {row["errors"]} · '
+            + (f'сер. {row["seconds"]/row["ok"]:.2f} с' if row['ok'] else 'сер. —')
+            for name,row in stats.items()
+        )
+
+    progress=None
+
+    async def update_progress(heading, markup=None):
+        if progress is None: return
+        ok=sum(result[0] for result in results.values())
+        text=(f'{heading}\nГотово: {len(results)}/{total} · успішно: {ok} · '
+              f'помилки: {len(results)-ok}\n'
+              f'Активні: {active} · очікують: {total-len(results)-active if markup else 0} · '
+              f'час: {time.monotonic()-start:.0f} с\n\n{summary()}')
+        try:
+            await asyncio.wait_for(progress.edit_text(text,reply_markup=markup,parse_mode=None),3)
+        except Exception as e:
+            logging.warning('Text load test progress update failed: %s',type(e).__name__)
+
+    start=time.monotonic()
     async def job(i,session):
         nonlocal active,peak
         attempts=[]
@@ -3243,9 +3272,13 @@ async def run_load_test(message,config):
                         reserve=984
                         text_charge(day,name,reserve,1)
                         tokens+=reserve
+                        row=stats[name]
+                        sent=time.monotonic()
                         try:
                             async with session.post(url,headers={'Authorization':'Bearer '+key},json={'model':model,'messages':[{'role':'user','content':'Відповідай українською: скільки буде 2+2?'}],'max_tokens':512},allow_redirects=False) as response:
                                 if response.status!=200:
+                                    status_code=str(response.status)
+                                    row[status_code if status_code in ('429','403') else 'errors']+=1
                                     attempts.append(name+': HTTP '+str(response.status))
                                     text_api_failure(name,response.status,response.headers)
                                     continue
@@ -3257,13 +3290,17 @@ async def run_load_test(message,config):
                             choice=data['choices'][0]
                             answer=choice['message'].get('content')
                             if not isinstance(answer,str) or not answer.strip():
+                                row['errors']+=1
                                 attempts.append(name+': empty content; finish='+str(choice.get('finish_reason')))
                                 continue
                             text_api_health[name]=0
                             winner=name
+                            row['ok']+=1
+                            row['seconds']+=time.monotonic()-sent
                             attempts.append(name+': OK')
                             break
                         except Exception as e:
+                            row['timeout' if isinstance(e,asyncio.TimeoutError) else 'errors']+=1
                             attempts.append(name+': '+type(e).__name__)
                             text_api_failure(name,503)
                 finally:
@@ -3276,16 +3313,46 @@ async def run_load_test(message,config):
                 if delay>120: break
                 await asyncio.sleep(delay)
         return bool(winner),tokens,f'#{i+1} {winner or "Помилка"} | черга {(began or time.monotonic())-start:.2f} с | обробка {processing:.2f} с | '+', '.join(attempts)
+    cancelled=False
+    try:
+        progress=await asyncio.wait_for(message.answer(
+            f'⏳ Azure VPS. Текстовий тест запущено (0/{total}). Реальні квоти API витрачаються.',
+            reply_markup=cancel_markup,parse_mode=None),10)
+    except Exception as e:
+        logging.warning('Text load test start message failed: %s',type(e).__name__)
+
+    deadline=time.monotonic()+300
+    next_update=time.monotonic()+5
     async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=20)) as session:
-        tasks=[asyncio.create_task(job(i,session)) for i in range(config['count'])]
+        tasks={asyncio.create_task(job(i,session)):i for i in range(total)}
+        pending=set(tasks)
         try:
-            done,pending=await asyncio.wait(tasks,timeout=300)
-            results=[t.result() for t in done if not t.cancelled() and t.exception() is None]
+            while pending and time.monotonic()<deadline:
+                done,pending=await asyncio.wait(pending,timeout=max(0,min(deadline,next_update)-time.monotonic()))
+                for task in done:
+                    index=tasks[task]
+                    try:
+                        results[index]=task.result()
+                    except Exception as e:
+                        logging.exception('Text load test request failed')
+                        results[index]=(False,0,f'#{index+1} Помилка: {type(e).__name__}')
+                if pending and time.monotonic()>=next_update:
+                    next_update+=5
+                    await update_progress('⏳ Azure VPS. Текстовий тест триває.',cancel_markup)
+        except asyncio.CancelledError:
+            cancelled=True
         finally:
-            for t in tasks:
-                if not t.done(): t.cancel()
+            for task in pending:
+                if not task.done():
+                    task.cancel()
             await asyncio.gather(*tasks,return_exceptions=True)
-    lines=[f'Azure VPS: {sum(r[0] for r in results)}/{config["count"]} успішно; пік {peak}; токени (фактичні + оцінені): {sum(r[1] for r in results)}; час {time.monotonic()-start:.1f} с',f'Без результату: {config["count"]-len(results)}']+[r[2] for r in results]
+
+    complete=[result for _,result in sorted(results.items())]
+    outcome='Тест скасовано.' if cancelled else ('Вичерпано час тесту.' if pending else 'Тест завершено.')
+    await update_progress(outcome)
+    lines=[f'Azure VPS. {outcome} {sum(r[0] for r in complete)}/{total} успішно; пік {peak}; '
+           f'токени (фактичні + оцінені): {sum(r[1] for r in complete)}; час {time.monotonic()-start:.1f} с',
+           f'Без результату: {total-len(complete)}',summary(),*[r[2] for r in complete]]
     chunk=''
     for line in lines:
         line=line[:3400]
@@ -3429,7 +3496,7 @@ async def load_action(c):
             audio_load_wait=config
             return await c.message.answer('Надішли голосове або кружечок для тесту.')
         load_task=asyncio.create_task(run_load_test(c.message,config))
-        return await c.message.answer('Тест запущено. Реальні квоти API витрачаються.')
+        return
     try: await c.message.edit_text('⚡ Тест навантаження ('+({'audio':'транскрипція','text':'текст'}[load_config['kind']])+'). Реальні API-запити.',reply_markup=load_menu())
     except Exception as e:
         if 'message is not modified' not in str(e).lower(): raise
