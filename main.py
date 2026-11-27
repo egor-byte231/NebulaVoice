@@ -299,6 +299,14 @@ async def help_command(m:Message):
 @dp.message(Command('start'))
 async def start(m:Message):
     overview_user(m)
+    parts=(m.text or '').split(maxsplit=1)
+    if m.chat.type=='private' and len(parts)==2 and re.fullmatch(r'b[0-9]+_g[0-9]+_[0-9a-f]+',parts[1]):
+        try:
+            result=await miniapp.redeem_start(m,parts[1])
+        except Exception:
+            logging.exception('Mini App bonus redemption failed')
+            result='Не вдалося нарахувати бонус. Повтори відкриття чату з Mini App.'
+        return await m.answer(result)
     await m.answer(WELCOME,parse_mode='HTML')
     if m.chat.type=='private' and m.from_user and m.from_user.id==OWNER: await m.answer('Панель власника',reply_markup=owner_menu())
 @dp.my_chat_member()
