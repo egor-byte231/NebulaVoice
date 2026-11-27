@@ -36,7 +36,7 @@ class MiniApp:
             'CREATE TABLE IF NOT EXISTS transcript_diagnostics (number INTEGER PRIMARY KEY, data TEXT NOT NULL)',
             'CREATE TABLE IF NOT EXISTS runtime_results (chat INTEGER, message_id INTEGER, kind TEXT, role TEXT, completed INTEGER, PRIMARY KEY(chat,message_id,kind))',
             'CREATE TABLE IF NOT EXISTS text_diagnostics (number INTEGER PRIMARY KEY AUTOINCREMENT, chat INTEGER, message_id INTEGER, data TEXT NOT NULL, UNIQUE(chat,message_id))',
-            'CREATE TABLE IF NOT EXISTS mini_write_prompts (user_id INTEGER PRIMARY KEY)',
+            'CREATE TABLE IF NOT EXISTS mini_write_prompt_results (user_id INTEGER PRIMARY KEY)',
             'CREATE TABLE IF NOT EXISTS mini_bonus (chat INTEGER PRIMARY KEY, balance INTEGER NOT NULL CHECK(balance>=0))',
             """CREATE TABLE IF NOT EXISTS mini_users (
                 id INTEGER PRIMARY KEY, language TEXT NOT NULL DEFAULT 'auto',
@@ -232,11 +232,13 @@ class MiniApp:
                              (language, style, int(notifications), uid))
         profile = (await self.query('SELECT language,style,notifications,write_allowed FROM mini_users WHERE id=?', (uid,)))[0]
         bonus = await self.query('SELECT chat,balance FROM mini_bonus WHERE chat IN (?,?)', (uid, chat))
+        if payload.get('writePromptFinished') is True:
+            await self.query('INSERT OR IGNORE INTO mini_write_prompt_results VALUES (?)', (uid,))
         prompt_write_access = False
-        if payload.get('checkWritePrompt') is True and not profile['write_allowed']:
-            prompt_write_access = bool(await self.query(
-                'INSERT OR IGNORE INTO mini_write_prompts VALUES (?) RETURNING user_id', (uid,)
-            ))
+        if payload.get('checkWritePrompt') is True and user.get('allows_write_to_pm') is not True:
+            prompt_write_access = not await self.query(
+                'SELECT 1 FROM mini_write_prompt_results WHERE user_id=?', (uid,)
+            )
         quotas = {}
         for scope in (uid, chat):
             limit = self.daily_limit(scope)
