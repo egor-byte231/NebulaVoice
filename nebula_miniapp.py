@@ -32,6 +32,10 @@ class MiniApp:
         if not self.url.startswith('https://') or not re.fullmatch(r'[A-Za-z0-9_]{3,30}', self.name):
             raise ValueError('Configure a public HTTPS Mini App URL and a valid BotFather short name')
         for statement in (
+            'CREATE TABLE IF NOT EXISTS transcript_numbers (id INTEGER PRIMARY KEY AUTOINCREMENT, chat INTEGER NOT NULL, message_id INTEGER NOT NULL, UNIQUE(chat,message_id))',
+            'CREATE TABLE IF NOT EXISTS transcript_diagnostics (number INTEGER PRIMARY KEY, data TEXT NOT NULL)',
+            'CREATE TABLE IF NOT EXISTS runtime_results (chat INTEGER, message_id INTEGER, kind TEXT, role TEXT, completed INTEGER, PRIMARY KEY(chat,message_id,kind))',
+            'CREATE TABLE IF NOT EXISTS text_diagnostics (number INTEGER PRIMARY KEY AUTOINCREMENT, chat INTEGER, message_id INTEGER, data TEXT NOT NULL, UNIQUE(chat,message_id))',
             'CREATE TABLE IF NOT EXISTS mini_bonus (chat INTEGER PRIMARY KEY, balance INTEGER NOT NULL CHECK(balance>=0))',
             """CREATE TABLE IF NOT EXISTS mini_users (
                 id INTEGER PRIMARY KEY, language TEXT NOT NULL DEFAULT 'auto',
@@ -226,12 +230,45 @@ class MiniApp:
         profile = (await self.query('SELECT language,style,notifications,write_allowed FROM mini_users WHERE id=?', (uid,)))[0]
         bonus = await self.query('SELECT chat,balance FROM mini_bonus WHERE chat IN (?,?)', (uid, chat))
         history = await self.query(
-            "SELECT at,body,chat FROM mini_events WHERE author=? AND chat=? AND kind='audio' ORDER BY at DESC LIMIT 50",
-            (uid, chat),
+            """WITH entries AS (
+                SELECT message,at,body FROM mini_events
+                WHERE author=? AND chat=? AND kind='audio'
+                UNION ALL
+                SELECT n.message_id,COALESCE(r.completed,
+                    CAST(CASE WHEN json_valid(d.data) THEN json_extract(d.data,'$.queued') END AS INTEGER)),NULL
+                FROM transcript_numbers n
+                LEFT JOIN transcript_diagnostics d ON d.number=n.id
+                LEFT JOIN (SELECT message_id,MAX(completed) AS completed FROM runtime_results
+                           WHERE chat=? AND kind IN ('audio','video') GROUP BY message_id) r
+                    ON r.message_id=n.message_id
+                WHERE n.chat=? AND n.chat>0 AND NOT EXISTS (
+                    SELECT 1 FROM mini_events e WHERE e.chat=n.chat AND e.message=n.message_id AND e.kind='audio')
+            )
+            SELECT entries.*,n.id AS number FROM entries
+            LEFT JOIN transcript_numbers n ON n.chat=? AND n.message_id=entries.message
+            ORDER BY entries.message DESC LIMIT 50""",
+            (uid, chat, chat, chat, chat),
         )
         stats = await self.query(
-            'SELECT kind,COUNT(*) AS count,SUM(tokens) AS tokens FROM mini_events WHERE chat=? AND at>=? GROUP BY kind',
-            (chat, int(time.time()) - 30 * 86400),
+            """WITH audio AS (
+                SELECT message_id FROM transcript_numbers WHERE chat=?
+                UNION SELECT message_id FROM runtime_results WHERE chat=? AND kind IN ('audio','video')
+                UNION SELECT message FROM mini_events WHERE chat=? AND kind='audio'
+            ), answers AS (
+                SELECT message_id FROM runtime_results WHERE chat=? AND kind='text'
+                UNION SELECT message_id FROM text_diagnostics WHERE chat=? AND
+                    CASE WHEN json_valid(data) THEN json_extract(data,'$.selected') END IS NOT NULL
+                UNION SELECT message FROM mini_events WHERE chat=? AND kind='text'
+            ), token_records AS (
+                SELECT message_id, CAST(CASE WHEN json_valid(data) THEN json_extract(data,'$.user_tokens') END AS INTEGER) AS tokens
+                FROM text_diagnostics WHERE chat=?
+                UNION ALL SELECT message,tokens FROM mini_events WHERE chat=? AND kind='text'
+            )
+            SELECT 'audio' AS kind,COUNT(*) AS count,0 AS tokens FROM audio
+            UNION ALL SELECT 'text',COUNT(*),COALESCE((
+                SELECT SUM(tokens) FROM (SELECT MAX(tokens) AS tokens FROM token_records GROUP BY message_id)
+            ),0) FROM answers""",
+            (chat,) * 8,
         )
         referrals = await self.query('SELECT COUNT(*) AS count FROM mini_users WHERE referred_by=?', (uid,))
         return web.json_response({
