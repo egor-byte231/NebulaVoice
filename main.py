@@ -99,7 +99,7 @@ def activity_report(kind):
             active=db.execute('SELECT COUNT(DISTINCT user_id) FROM overview_activity WHERE '+where+' AND day BETWEEN ? AND ?',kinds+(start,end)).fetchone()[0]
             new=db.execute('SELECT COUNT(*) FROM (SELECT MIN(day) AS first_day FROM overview_activity WHERE '+where+' GROUP BY user_id) WHERE first_day BETWEEN ? AND ?',kinds+(start,end)).fetchone()[0]
             lines.append(f'{label} ({days} дн.): {active} | нові: {new}')
-    lines.extend(['','UTC. Нові категорії рахуються з оновлення. Об’єднання без дублювання. Не офіційний MAU Telegram.'])
+    lines.extend(['','UTC. Враховано доступну історію ЛС та зафіксованих результатів. Історія відкриттів Web App до оновлення відсутня. Об’єднання без дублювання. Не офіційний MAU Telegram.'])
     return '\n'.join(lines)
 
 def overview_webapp(uid):
@@ -4677,6 +4677,18 @@ async def d1_snapshot(session):
     await d1_query(session,'INSERT INTO nebula_snapshot_head VALUES (1,?,?) ON CONFLICT(id) DO UPDATE SET generation=excluded.generation, chunks=excluded.chunks',(generation,i))
     await d1_query(session,'DELETE FROM nebula_snapshot_chunks WHERE generation<>?',(generation,))
 
+async def overview_backfill(session):
+    # Private interactions have an unambiguous scope in the legacy daily ledger.
+    with db:
+        db.execute("INSERT OR IGNORE INTO overview_activity SELECT day,'pm',user_id FROM overview_users WHERE scope='private'")
+    tables=await d1_query(session,"SELECT name FROM sqlite_master WHERE type='table' AND name='mini_events'")
+    if tables:
+        # Only recorded bot results, not ordinary group conversation.
+        rows=await d1_query(session,"SELECT DISTINCT date(at,'unixepoch') AS day, CASE WHEN chat>0 THEN 'pm' WHEN kind='text' THEN 'group_direct' ELSE 'automatic' END AS kind, author AS user_id FROM mini_events WHERE author>0 AND chat<>0 AND kind IN ('text','audio') AND date(at,'unixepoch') IS NOT NULL")
+        with db:
+            db.executemany('INSERT OR IGNORE INTO overview_activity VALUES (?,?,?)',[(r['day'],r['kind'],r['user_id']) for r in rows])
+    logging.info('Audience historical backfill complete')
+
 async def d1_initialize(session):
     await d1_query(session,'CREATE TABLE IF NOT EXISTS audio_queue_jobs (chat INTEGER,message_id INTEGER,source TEXT NOT NULL,status TEXT NOT NULL,queued REAL NOT NULL,PRIMARY KEY(chat,message_id))')
     await d1_query(session,'CREATE TABLE IF NOT EXISTS cloud_reservations (id TEXT PRIMARY KEY,chat INTEGER,day TEXT,budget INTEGER)')
@@ -4728,6 +4740,7 @@ async def d1_initialize(session):
         db.execute('CREATE TABLE IF NOT EXISTS overview_users (day TEXT, scope TEXT, user_id INTEGER, PRIMARY KEY(day,scope,user_id))')
         db.execute('CREATE TABLE IF NOT EXISTS overview_activity (day TEXT, kind TEXT, user_id INTEGER, PRIMARY KEY(day,kind,user_id))')
         db.commit()
+    await overview_backfill(session)
     await d1_snapshot(session)
     logging.info('Cloudflare D1 snapshot initialized')
 
