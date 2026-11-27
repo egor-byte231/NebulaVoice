@@ -4286,15 +4286,13 @@ async def generate_text(m,question,context='',group=False,history_context='',dia
             continue
         if group and not group_enabled(chat): return
         keyboard=miniapp.keyboard(m)
-        if m.from_user.id==OWNER:
-            rows=[[InlineKeyboardButton(text='🔊 Озвучити (/voice — змінити голос)',callback_data='tts:answer')]]
-            if keyboard: rows.extend(keyboard.inline_keyboard)
-            keyboard=InlineKeyboardMarkup(inline_keyboard=rows)
+        rows=[[InlineKeyboardButton(text='🔊 Озвучити (/voice — змінити голос)',callback_data='tts:answer')]]
+        if keyboard: rows.extend(keyboard.inline_keyboard)
+        keyboard=InlineKeyboardMarkup(inline_keyboard=rows)
         sent=await m.reply(html.escape(answer[:3700])+('\n\n<blockquote>'+html.escape(DISCLAIMER)+'</blockquote>' if development_enabled() else ''),parse_mode='HTML',reply_markup=keyboard)
-        if m.from_user.id==OWNER:
-            db.execute('INSERT OR REPLACE INTO tts_answers VALUES (?,?,?,?,?)',(chat,sent.message_id,m.message_id,answer[:3700],int(time.time())))
-            db.execute('DELETE FROM tts_answers WHERE created<?',(int(time.time())-7*86400,))
-            db.commit()
+        db.execute('INSERT OR REPLACE INTO tts_answers VALUES (?,?,?,?,?)',(chat,sent.message_id,m.message_id,answer[:3700],int(time.time())))
+        db.execute('DELETE FROM tts_answers WHERE created<?',(int(time.time())-7*86400,))
+        db.commit()
         visible_tokens=0
         notify_limit=False
         if not local:
@@ -4532,13 +4530,11 @@ def tts_voice_menu(user_id):
 
 @dp.message(Command('voice'))
 async def tts_voice_command(m:Message):
-    if not m.from_user or m.from_user.id!=OWNER: return
+    if not m.from_user or m.from_user.is_bot: return
     await m.reply('🎙 Обери український голос. Для інших мов голос визначається автоматично.',reply_markup=tts_voice_menu(m.from_user.id))
 
 @dp.callback_query(F.data.startswith('ttsvoice:'))
 async def tts_voice_choose(c:CallbackQuery):
-    if c.from_user.id!=OWNER:
-        return await c.answer('Доступно лише власнику.',show_alert=True)
     voice=c.data.split(':',1)[1]
     if voice not in TTS_VOICES: return await c.answer('Невідомий голос.')
     db.execute('INSERT OR REPLACE INTO tts_preferences VALUES (?,?)',(c.from_user.id,voice))
@@ -4546,15 +4542,13 @@ async def tts_voice_choose(c:CallbackQuery):
     await c.answer('Голос: '+TTS_VOICES[voice])
     if isinstance(c.message,Message):
         markup=tts_voice_menu(c.from_user.id)
-        if c.message.reply_markup!=markup:
+        if c.message.chat.type=='private' and c.message.reply_markup!=markup:
             await c.message.edit_reply_markup(reply_markup=markup)
 
 tts_inflight=set()
 
 @dp.callback_query(F.data=='tts:answer')
 async def local_tts_answer(c:CallbackQuery):
-    if c.from_user.id!=OWNER:
-        return await c.answer('Доступно лише власнику бота.',show_alert=True)
     if not isinstance(c.message,Message):
         return await c.answer('Повідомлення недоступне.',show_alert=True)
     key=(c.message.chat.id,c.message.message_id)
