@@ -118,17 +118,8 @@ function viewHome(root) {
     node('p', claimed ? 'Залишок бонусу · ' + format.format(data.bonus[data.chat]) + ' токенів'
       : '+' + format.format(bonusAmount) + ' токенів без терміну дії'));
   bonusStatus.append(mark, copy);
-  if (!claimed && data.canClaimBonus) {
-    copy.append(action('Отримати бонус', async event => {
-      const button = event.currentTarget;
-      button.disabled = true;
-      try {
-        await refresh({claimBonus:true});
-      } catch (err) {
-        notice(err.message, true);
-        button.disabled = false;
-      }
-    }));
+  if (!claimed && data.bonusStartUrl) {
+    copy.append(action('Написати боту', () => openTelegram(data.bonusStartUrl)));
   } else if (!claimed) {
     copy.append(node('p', 'Відкрий Mini App під відповіддю бота в потрібному чаті.'));
   }
