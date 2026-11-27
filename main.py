@@ -25,18 +25,10 @@ OWNER=int(os.environ['OWNER_ID']); bot=Bot(os.environ['BOT_TOKEN']); dp=Dispatch
 bot.session.middleware(telegram_retry)
 ORDER=['groq1','groq2','groq1t','groq2t','cf1','cf2','ovh']
 db=sqlite3.connect('state.db')
-db.execute('CREATE TABLE IF NOT EXISTS tts_preferences (user_id INTEGER PRIMARY KEY, voice TEXT NOT NULL)')
-db.commit()
-db.execute('CREATE TABLE IF NOT EXISTS tts_usage (day TEXT NOT NULL, scope TEXT NOT NULL, voice TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, successes INTEGER NOT NULL DEFAULT 0, failures INTEGER NOT NULL DEFAULT 0, words INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(day,scope,voice))')
-db.commit()
-db.execute('CREATE TABLE IF NOT EXISTS tts_answers (chat INTEGER NOT NULL, answer_id INTEGER NOT NULL, request_id INTEGER NOT NULL, answer TEXT NOT NULL, created INTEGER NOT NULL, PRIMARY KEY(chat,answer_id))')
-db.commit()
 from azure_runtime import RuntimeSettings, SlotGate
 from nebula_miniapp import MiniApp
 azure_settings=RuntimeSettings(db)
 azure_text_gate=SlotGate(azure_settings,'text')
-db.execute('CREATE TABLE IF NOT EXISTS tts_answers (chat INTEGER, answer_id INTEGER, request_id INTEGER, answer TEXT, created INTEGER, PRIMARY KEY(chat,answer_id))')
-db.commit()
 db.execute('CREATE TABLE IF NOT EXISTS cloud_completed (id TEXT PRIMARY KEY)')
 db.execute('CREATE TABLE IF NOT EXISTS cloud_pending (id TEXT PRIMARY KEY,chat INTEGER,day TEXT,budget INTEGER)')
 db.commit()
@@ -3065,18 +3057,14 @@ def test_menu(kind):
     names=list(dict.fromkeys(names))
     return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=('✓ ' if test_selection[kind]==name else '')+(NAMES.get(name,name) if kind=='audio' else name),callback_data='owner:testpick:'+kind+':'+name)] for name in names]+[[InlineKeyboardButton(text='Автоматично',callback_data='owner:testpick:'+kind+':')],[InlineKeyboardButton(text='Назад',callback_data='owner:back')]])
 
-load_config={'count':20,'mode':'auto','routes':set(),'kind':'text','tts_words':50}
+load_config={'count':20,'mode':'auto','routes':set(),'kind':'text'}
 load_task=None
 def load_names():
-    if load_config['kind']=='tts': return list(TTS_VOICES)
     if load_config['kind']=='audio': return list(ORDER)
     return list(dict.fromkeys([r[0] for r in TEXT_ROUTES]+['Requesty 2','Airforce 2']))
 def load_menu():
     rows=[[InlineKeyboardButton(text=('✓ ' if load_config['count']==n else '')+str(n),callback_data='owner:load:n:'+str(n)) for n in (5,10,20,30,50,100)]]
-    rows.append([InlineKeyboardButton(text='Тип: '+{'text':'💬 Текст','audio':'🎙 Транскрипція','tts':'🔊 Озвучування'}[load_config['kind']],callback_data='owner:load:kind'),InlineKeyboardButton(text='Своя кількість',callback_data='owner:load:custom')])
-    if load_config['kind']=='tts':
-        rows.append([InlineKeyboardButton(text=('✓ ' if load_config['tts_words']==n else '')+str(n)+' слів',callback_data='owner:load:w:'+str(n)) for n in (20,50,100,200)])
-        rows.append([InlineKeyboardButton(text='✏️ Своя кількість слів',callback_data='owner:load:words')])
+    rows.append([InlineKeyboardButton(text='Тип: '+{'text':'💬 Текст','audio':'🎙 Транскрипція'}[load_config['kind']],callback_data='owner:load:kind'),InlineKeyboardButton(text='Своя кількість',callback_data='owner:load:custom')])
     for mode,label in [('auto','Автоматично'),('selected','Вибрані API'),('all','Усі API')]:
         rows.append([InlineKeyboardButton(text=('✓ ' if load_config['mode']==mode else '')+label,callback_data='owner:load:m:'+mode)])
     if load_config['mode']=='selected':
@@ -3314,12 +3302,8 @@ async def load_action(c):
             return await c.message.answer('Скасування тесту…')
         return await c.message.answer('Активного тесту немає.')
     if action=='kind':
-        load_config['kind']={'text':'audio','audio':'tts','tts':'text'}[load_config['kind']]
+        load_config['kind']={'text':'audio','audio':'text'}[load_config['kind']]
         load_config['routes'].clear()
-    if action=='words' and load_config['kind']=='tts':
-        load_count_wait='words'
-        return await c.message.answer('Введи кількість слів для одного озвучування (1–500).')
-    if action=='w' and load_config['kind']=='tts' and parts[3] in ('20','50','100','200'): load_config['tts_words']=int(parts[3])
     if action=='custom':
         load_count_wait='count'
         return await c.message.answer('Введи кількість від 1 до 1000.')
@@ -3332,16 +3316,12 @@ async def load_action(c):
         if load_task and not load_task.done(): return await c.message.answer('Тест уже триває.')
         if load_config['mode']=='selected' and not load_config['routes']: return await c.message.answer('Вибери модель.')
         config={**load_config,'routes':sorted(load_config['routes'])}
-        if config['kind']=='tts':
-            if config['count']>100: return await c.message.answer('Для тесту озвучування максимум 100 генерацій за запуск.')
-            load_task=asyncio.create_task(run_tts_load_test(c.message,config))
-            return await c.message.answer('🔊 Тест Piper запущено. Генеруються справжні аудіофайли без надсилання в чат.')
         if config['kind']=='audio':
             audio_load_wait=config
             return await c.message.answer('Надішли голосове або кружечок для тесту.')
         load_task=asyncio.create_task(run_load_test(c.message,config))
         return await c.message.answer('Тест запущено. Реальні квоти API витрачаються.')
-    try: await c.message.edit_text('⚡ Тест навантаження ('+({'audio':'транскрипція','text':'текст','tts':'озвучування'}[load_config['kind']])+'). Реальні API-запити.',reply_markup=load_menu())
+    try: await c.message.edit_text('⚡ Тест навантаження ('+({'audio':'транскрипція','text':'текст'}[load_config['kind']])+'). Реальні API-запити.',reply_markup=load_menu())
     except Exception as e:
         if 'message is not modified' not in str(e).lower(): raise
 
@@ -3394,7 +3374,7 @@ async def audio_settings_action(c):
     return await azure_slots_action(c,'audio')
 
 def owner_menu():
-    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='⏸ Вимкнути' if enabled() else '▶️ Увімкнути',callback_data='owner:toggle')],[InlineKeyboardButton(text='🖥 Стан серверів',callback_data='owner:server')],[InlineKeyboardButton(text='📊 Статистика',callback_data='owner:stats')],[InlineKeyboardButton(text='🤖 Статистика текстового ШІ',callback_data='owner:ai')],[InlineKeyboardButton(text='🔊 Статистика озвучування',callback_data='owner:tts')],[InlineKeyboardButton(text='⚙️ Слоти тексту VPS',callback_data='owner:slots')],[InlineKeyboardButton(text='🎙 Слоти аудіо VPS',callback_data='owner:audiohost')],[InlineKeyboardButton(text='📈 Загальна статистика',callback_data='owner:overview')],[InlineKeyboardButton(text='🟢 Режим розробки: ON' if development_enabled() else '🔴 Режим розробки: OFF',callback_data='owner:development')],[InlineKeyboardButton(text='🧪 Режим тестування: ON' if testing_enabled() else '🧪 Режим тестування: OFF',callback_data='owner:testing')],[InlineKeyboardButton(text='🔄 Обнулити мій ліміт',callback_data='owner:reset_limit')]]+([[InlineKeyboardButton(text='🎙 Тест аудіо',callback_data='owner:testmenu:audio')],[InlineKeyboardButton(text='💬 Тест тексту',callback_data='owner:testmenu:text')],[InlineKeyboardButton(text='⚡ Тест навантаження',callback_data='owner:load')]] if testing_enabled() else []))
+    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='⏸ Вимкнути' if enabled() else '▶️ Увімкнути',callback_data='owner:toggle')],[InlineKeyboardButton(text='🖥 Стан серверів',callback_data='owner:server')],[InlineKeyboardButton(text='📊 Статистика',callback_data='owner:stats')],[InlineKeyboardButton(text='🤖 Статистика текстового ШІ',callback_data='owner:ai')],[InlineKeyboardButton(text='⚙️ Слоти тексту VPS',callback_data='owner:slots')],[InlineKeyboardButton(text='🎙 Слоти аудіо VPS',callback_data='owner:audiohost')],[InlineKeyboardButton(text='📈 Загальна статистика',callback_data='owner:overview')],[InlineKeyboardButton(text='🟢 Режим розробки: ON' if development_enabled() else '🔴 Режим розробки: OFF',callback_data='owner:development')],[InlineKeyboardButton(text='🧪 Режим тестування: ON' if testing_enabled() else '🧪 Режим тестування: OFF',callback_data='owner:testing')],[InlineKeyboardButton(text='🔄 Обнулити мій ліміт',callback_data='owner:reset_limit')]]+([[InlineKeyboardButton(text='🎙 Тест аудіо',callback_data='owner:testmenu:audio')],[InlineKeyboardButton(text='💬 Тест тексту',callback_data='owner:testmenu:text')],[InlineKeyboardButton(text='⚡ Тест навантаження',callback_data='owner:load')]] if testing_enabled() else []))
 error_alert_times={}
 def error_message_source(m):
     chat=m.chat
@@ -3503,8 +3483,6 @@ async def owner_action(c:CallbackQuery):
                 logging.exception('Owner text statistics failed')
                 await c.message.answer('⚠️ Не вдалося відкрити статистику: '+type(e).__name__,parse_mode=None,reply_markup=text_stats_menu())
         return
-    if c.data=='owner:tts':
-        return await c.message.edit_text(tts_stats_report(),parse_mode='HTML',reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='🔄 Оновити',callback_data='owner:tts')],[InlineKeyboardButton(text='⬅️ Назад',callback_data='owner:back')]]))
     if c.data=='owner:stats':
         try: await c.message.edit_text(report(),parse_mode='HTML',reply_markup=stats_menu())
         except Exception as e:
@@ -4302,13 +4280,7 @@ async def generate_text(m,question,context='',group=False,history_context='',dia
             continue
         if group and not group_enabled(chat): return
         keyboard=miniapp.keyboard(m)
-        rows=[[InlineKeyboardButton(text='🔊 Озвучити (/voice — змінити голос)',callback_data='tts:answer')]]
-        if keyboard: rows.extend(keyboard.inline_keyboard)
-        keyboard=InlineKeyboardMarkup(inline_keyboard=rows)
         sent=await m.reply(html.escape(answer[:3700])+('\n\n<blockquote>'+html.escape(DISCLAIMER)+'</blockquote>' if development_enabled() else ''),parse_mode='HTML',reply_markup=keyboard)
-        db.execute('INSERT OR REPLACE INTO tts_answers VALUES (?,?,?,?,?)',(chat,sent.message_id,m.message_id,answer[:3700],int(time.time())))
-        db.execute('DELETE FROM tts_answers WHERE created<?',(int(time.time())-7*86400,))
-        db.commit()
         visible_tokens=0
         notify_limit=False
         if not local:
@@ -4535,237 +4507,16 @@ async def cloud_text_probe():
         return False
 
 
-def tts_usage_record(chat_type,voice,text,success):
-    day=datetime.datetime.now(datetime.timezone.utc).date().isoformat()
-    scope='private' if chat_type=='private' else 'groups'
-    words=len(text.split())
-    with db:
-        db.execute("""INSERT INTO tts_usage(day,scope,voice,attempts,successes,failures,words)
-            VALUES(?,?,?,?,?,?,?) ON CONFLICT(day,scope,voice) DO UPDATE SET
-            attempts=attempts+1,successes=successes+excluded.successes,
-            failures=failures+excluded.failures,words=words+excluded.words""",
-            (day,scope,voice,1,int(success),int(not success),words))
-
-def tts_stats_report():
-    today=datetime.datetime.now(datetime.timezone.utc).date()
-    one=datetime.timedelta(days=1)
-    month=today.replace(day=1)
-    prev=month-one
-    periods=[('Сьогодні',today,today),('Вчора',today-one,today-one),
-        ('Минулий тиждень',today-one* (today.weekday()+7),today-one*(today.weekday()+1)),
-        ('Минулий місяць',prev.replace(day=1),prev),
-        ('За весь час',datetime.date(1970,1,1),today)]
-    lines=['<b>🔊 Статистика генерацій Piper</b>','Періоди за UTC. Тести навантаження не враховуються.']
-    for label,start,end in periods:
-        lines.append('\n<b>'+label+'</b>')
-        for scope,name in [('private','ЛС'),('groups','Групи'),(None,'Усього')]:
-            q='SELECT COALESCE(SUM(attempts),0),COALESCE(SUM(successes),0),COALESCE(SUM(failures),0),COALESCE(SUM(words),0) FROM tts_usage WHERE day BETWEEN ? AND ?'
-            args=[start.isoformat(),end.isoformat()]
-            if scope: q+=' AND scope=?'; args.append(scope)
-            attempts,ok,failed,words=db.execute(q,args).fetchone()
-            lines.append(f'{name}: {attempts} спроб · {ok} успішних · {failed} помилок · {words} слів')
-    voices=db.execute('SELECT voice,SUM(successes) FROM tts_usage GROUP BY voice ORDER BY SUM(successes) DESC').fetchall()
-    if voices: lines.extend(['','<b>Голоси (успішні генерації)</b>']+[html.escape(TTS_VOICES.get(v,v))+': '+str(n) for v,n in voices])
-    from azure_tts import pending
-    lines.append(f'\nЧерга TTS: {pending}/32 · паралельних слотів: 4')
-    return '\n'.join(lines)
-
-def tts_benchmark_text(word_count):
-    # Deterministic Ukrainian sentences; exact requested whitespace word count.
-    corpus=('Сьогодні ми перевіряємо швидкість синтезу українського мовлення. '
-        'Сервер створює голосове повідомлення та вимірює час обробки. '
-        'Цей тест допомагає оцінити навантаження на процесор і чергу завдань.').split()
-    return ' '.join(corpus[i%len(corpus)] for i in range(word_count))
-
-async def run_tts_load_test(message, config):
-    """Live Piper load test with bounded workers and cancellable progress."""
-    from azure_tts import benchmark_synthesis
-
-    count = config['count']
-    words = config['tts_words']
-    routes = config['routes'] if config['mode'] == 'selected' else ['serhiy']
-    if not routes:
-        return await message.answer('Не вибрано голосів.')
-
-    start = time.monotonic()
-    completed = successful = failed = active = 0
-    elapsed_total = 0.0
-    details = []
-    queue = asyncio.Queue()
-    for i in range(count):
-        queue.put_nowait(i)
-
-    controls = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text='🛑 Скасувати тест', callback_data='owner:load:cancel')]
-    ])
-    progress = await message.answer('🔊 Підготовка тесту Piper…', reply_markup=controls)
-    last_report = None
-    workers = []
-
-    def report(final=False, cancelled=False, timed_out=False):
-        waiting = queue.qsize()
-        average = elapsed_total / successful if successful else 0
-        state = ('🛑 Скасовано' if cancelled else
-                 '⌛ Час тесту вичерпано' if timed_out else
-                 '✅ Завершено' if final else '⏳ Виконується')
-        return (
-            f'🔊 Тест навантаження Piper — {state}\n'
-            f'Голос(и): {", ".join(routes)}\n'
-            f'Слів на генерацію: {words}\n'
-            f'Прогрес: {completed}/{count} ({completed * 100 // count}%)\n'
-            f'Успішно: {successful} · Помилок: {failed}\n'
-            f'Активних: {active} · Очікують: {waiting}\n'
-            f'Середній час синтезу: {average:.2f} с\n'
-            f'Минуло: {time.monotonic() - start:.1f} с'
-        )
-
-    async def publish(final=False, cancelled=False, timed_out=False):
-        nonlocal last_report
-        body = report(final, cancelled, timed_out)
-        if body == last_report:
-            return
-        try:
-            await progress.edit_text(
-                body, reply_markup=None if final else controls
-            )
-            last_report = body
-        except TelegramBadRequest as exc:
-            if 'message is not modified' not in str(exc).lower():
-                logging.warning('Piper test progress update: %s', exc)
-        except Exception as exc:
-            logging.warning('Piper test progress update: %s', exc)
-
-    async def worker():
-        nonlocal completed, successful, failed, active, elapsed_total
-        while not queue.empty():
-            if not testing_enabled():
-                return
-            try:
-                i = queue.get_nowait()
-            except asyncio.QueueEmpty:
-                return
-            voice = routes[i % len(routes)]
-            active += 1
-            try:
-                result = await benchmark_synthesis(tts_benchmark_text(words), voice)
-                successful += 1
-                elapsed_total += result['elapsed']
-                details.append(
-                    f'#{i + 1} {voice}: OK · очікування {result["wait"]:.2f} с · '
-                    f'синтез {result["elapsed"]:.2f} с · '
-                    f'аудіо {result["seconds"]:.1f} с'
-                )
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                failed += 1
-                details.append(f'#{i + 1} {voice}: {type(exc).__name__}')
-            finally:
-                active -= 1
-                completed += 1
-                queue.task_done()
-
-    cancelled = timed_out = False
-    try:
-        # Never launch more than four benchmark jobs at once.
-        workers = [asyncio.create_task(worker()) for _ in range(min(4, count))]
-        deadline = start + 300
-        await publish()
-        while any(not worker.done() for worker in workers):
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                timed_out = True
-                break
-            await asyncio.wait(workers, timeout=min(5, remaining),
-                               return_when=asyncio.FIRST_COMPLETED)
-            await publish()
-        if timed_out:
-            for worker_task in workers:
-                if not worker_task.done():
-                    worker_task.cancel()
-        await asyncio.gather(*workers, return_exceptions=True)
-    except asyncio.CancelledError:
-        cancelled = True
-        for worker_task in workers:
-            worker_task.cancel()
-        await asyncio.gather(*workers, return_exceptions=True)
-    finally:
-        await publish(final=True, cancelled=cancelled, timed_out=timed_out)
-        if details:
-            lines = sorted(details, key=lambda x: int(x.split(' ', 1)[0][1:]))
-            chunk = ''
-            for line in lines:
-                if len(chunk) + len(line) > 3500:
-                    await message.answer(chunk)
-                    chunk = ''
-                chunk += line + '\n'
-            if chunk:
-                await message.answer(chunk)
-
-TTS_VOICES={'natural':'🌌 Nebula Natural','deep':'🌌 Nebula Deep','soft':'🌌 Nebula Soft','serhiy':'🎙 Сергій (High)','mykyta':'Микита (оригінал)','oleksa':'Олекса','lada':'Лада','tetiana':'Тетяна','ukrainian_tts':'Ukrainian TTS'}
-
-def tts_preference(user_id):
-    row=db.execute('SELECT voice FROM tts_preferences WHERE user_id=?',(user_id,)).fetchone()
-    return row[0] if row and row[0] in TTS_VOICES else 'serhiy'
-
-def tts_voice_menu(user_id):
-    selected=tts_preference(user_id)
-    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=('✅ ' if key==selected else '')+label,callback_data='ttsvoice:'+key)] for key,label in TTS_VOICES.items()])
-
-@dp.message(Command('voice'))
-async def tts_voice_command(m:Message):
-    if not m.from_user or m.from_user.is_bot: return
-    await m.reply('🎙 Обери український голос. Для інших мов голос визначається автоматично.',reply_markup=tts_voice_menu(m.from_user.id))
-
-@dp.callback_query(F.data.startswith('ttsvoice:'))
-async def tts_voice_choose(c:CallbackQuery):
-    voice=c.data.split(':',1)[1]
-    if voice not in TTS_VOICES: return await c.answer('Невідомий голос.')
-    db.execute('INSERT OR REPLACE INTO tts_preferences VALUES (?,?)',(c.from_user.id,voice))
-    db.commit()
-    await c.answer('Голос: '+TTS_VOICES[voice])
-    if isinstance(c.message,Message):
-        markup=tts_voice_menu(c.from_user.id)
-        if c.message.chat.type=='private' and c.message.reply_markup!=markup:
-            await c.message.edit_reply_markup(reply_markup=markup)
-
-tts_inflight=set()
-
-@dp.callback_query(F.data=='tts:answer')
-async def local_tts_answer(c:CallbackQuery):
-    if not isinstance(c.message,Message):
-        return await c.answer('Повідомлення недоступне.',show_alert=True)
-    key=(c.message.chat.id,c.message.message_id)
-    row=db.execute('SELECT request_id,answer FROM tts_answers WHERE chat=? AND answer_id=? AND created>=?',(*key,int(time.time())-7*86400)).fetchone()
-    if not row:
-        return await c.answer('Відповідь недоступна для озвучування.',show_alert=True)
-    if key in tts_inflight:
-        return await c.answer('Вже озвучую.')
-    # Reply to the original request by its persisted ID, even if Telegram
-    # omits reply_to_message from the callback payload.
-    from azure_tts import speak
-    tts_inflight.add(key)
-    try:
-        await c.answer('Озвучую…')
-        ok=await speak(c.message,row[1],tts_preference(c.from_user.id),reply_to_message_id=row[0])
-        tts_usage_record(c.message.chat.type,tts_preference(c.from_user.id),row[1],bool(ok))
-    except Exception as e:
-        tts_usage_record(c.message.chat.type,tts_preference(c.from_user.id),row[1],False)
-        logging.exception('Local TTS failed')
-        await c.message.reply('Озвучування тимчасово недоступне.')
-    finally:
-        tts_inflight.discard(key)
-
 @dp.message(F.text,F.chat.type.in_({'group','supergroup','private'}))
 async def text_message(m:Message):
     global load_count_wait
     if testing_enabled() and m.from_user and m.from_user.id==OWNER and m.chat.type=='private' and load_count_wait:
-        limit=500 if load_count_wait=='words' else 1000
+        limit=1000
         if not (m.text or '').isdigit() or not 1<=int(m.text)<=limit: return await m.reply(f'Введи число від 1 до {limit}.')
-        field='tts_words' if load_count_wait=='words' else 'count'
+        field='count'
         load_count_wait=False
         load_config[field]=int(m.text)
-        return await m.reply(('Слів на генерацію: ' if field=='tts_words' else 'Кількість: ')+str(load_config[field]),reply_markup=load_menu())
+        return await m.reply('Кількість: '+str(load_config[field]),reply_markup=load_menu())
     if not m.from_user or m.from_user.is_bot: return
     group=m.chat.type!='private'
     chat=m.chat.id
@@ -4899,9 +4650,6 @@ async def d1_initialize(session):
                 source.backup(db)
             finally: source.close()
         # Restoring a legacy snapshot can remove Azure-only schema.
-        db.execute('CREATE TABLE IF NOT EXISTS tts_preferences (user_id INTEGER PRIMARY KEY, voice TEXT NOT NULL)')
-        db.execute('CREATE TABLE IF NOT EXISTS tts_answers (chat INTEGER NOT NULL, answer_id INTEGER NOT NULL, request_id INTEGER NOT NULL, answer TEXT NOT NULL, created INTEGER NOT NULL, PRIMARY KEY(chat,answer_id))')
-        db.execute('CREATE TABLE IF NOT EXISTS tts_usage (day TEXT NOT NULL, scope TEXT NOT NULL, voice TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, successes INTEGER NOT NULL DEFAULT 0, failures INTEGER NOT NULL DEFAULT 0, words INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(day,scope,voice))')
         db.commit()
         RuntimeSettings(db)
         ensure_local_qwen_control()
