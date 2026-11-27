@@ -5,7 +5,7 @@ import tempfile
 import re
 import json
 from pathlib import Path
-from aiogram.types import FSInputFile
+from aiogram.types import FSInputFile, ReplyParameters
 
 slots = asyncio.Semaphore(4)
 pending = 0
@@ -113,7 +113,7 @@ def normalize_ukrainian_tts(text):
     text = re.sub(r"\n{3,}", "\n\n", text)
     return text.strip()
 
-async def speak(message, text, preference='mykyta'):
+async def speak(message, text, preference='mykyta', reply_to_message_id=None):
     global pending
     if pending >= 32:
         return await message.reply("Черга озвучування заповнена. Спробуй пізніше.")
@@ -141,6 +141,10 @@ async def speak(message, text, preference='mykyta'):
                 audio_filter = (audio_filter + "," + speed_filter) if audio_filter else speed_filter
                 filters = ["-af", audio_filter]
                 await run_process("ffmpeg", "-nostdin", "-loglevel", "error", "-i", wav, *filters, "-c:a", "libopus", "-threads", "1", ogg)
-                await message.reply_voice(FSInputFile(ogg))
+                await message.bot.send_voice(
+                    chat_id=message.chat.id,
+                    voice=FSInputFile(ogg),
+                    reply_parameters=ReplyParameters(message_id=reply_to_message_id or message.message_id),
+                )
     finally:
         pending -= 1
