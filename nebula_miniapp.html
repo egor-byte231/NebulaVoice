@@ -1,0 +1,185 @@
+<!doctype html>
+<html lang="uk">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="color-scheme" content="dark">
+<title>NebulaVoice Mini App</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+:root{color-scheme:dark;--bg:#0d0a14;--card:#191323;--ink:#f6efff;--muted:#bbadcd;--border:#38294c;--accent:#c58bff}
+[hidden]{display:none!important}*{box-sizing:border-box}body{margin:0;background:radial-gradient(ellipse at 50% 0,#2c1745,transparent 29rem),var(--bg);color:var(--ink);font:16px/1.45 system-ui,sans-serif}
+main{max-width:580px;margin:auto;padding:calc(18px + max(env(safe-area-inset-top),var(--tg-content-safe-area-inset-top,0px))) 16px calc(104px + max(env(safe-area-inset-bottom),var(--tg-content-safe-area-inset-bottom,0px)))}
+header{display:flex;align-items:center;gap:12px;margin-bottom:24px}.logo{display:flex;align-items:center;justify-content:center;gap:3px;width:44px;height:44px;background:#35204e;border:1px solid #694690;border-radius:15px;box-shadow:0 0 30px #883fe753}.logo i{width:3px;border-radius:8px;background:#d3a4ff;height:15px}.logo i:nth-child(2),.logo i:nth-child(4){height:23px}.logo i:nth-child(3){height:31px}
+h1,h2,h3,p{margin:0}h1{font-size:20px}h2{font-size:27px;margin-bottom:12px;overflow-wrap:anywhere}h3{font-size:16px}p,small{color:var(--muted)}p+p{margin-top:6px}.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.card{background:linear-gradient(145deg,#211632,var(--card));border:1px solid var(--border);border-radius:18px;padding:15px;margin:10px 0;overflow-wrap:anywhere}.grid .card{margin:0}.value{display:block;font-size:clamp(20px,6vw,30px);letter-spacing:-.03em;margin:.15em 0}
+progress{width:100%;height:9px;margin-top:12px;accent-color:var(--accent)}a{color:inherit;text-decoration:none}button,.action,select{font:inherit;color:inherit;min-height:44px;border:1px solid var(--border);border-radius:12px;background:#251936;padding:8px 12px}button,.action{cursor:pointer;transition:background .18s,transform .18s}button:active,.action:active{transform:scale(.97)}.action{display:block;text-align:center;margin-top:10px}.primary{background:#773db4;border-color:#a963e8;font-weight:650;width:100%}
+nav{position:fixed;bottom:0;left:0;right:0;background:#140e1cf2;border-top:1px solid var(--border);backdrop-filter:blur(14px);padding:8px 8px calc(8px + max(env(safe-area-inset-bottom),var(--tg-content-safe-area-inset-bottom,0px)));display:flex;justify-content:center}
+nav button{width:min(24vw,140px);padding:6px 1px;background:transparent;border-color:transparent;font-size:11px;color:var(--muted)}nav span{display:block;font-size:20px}nav button[aria-selected=true]{background:#322046;color:var(--ink)}
+label{display:flex;justify-content:space-between;align-items:center;gap:8px;margin:8px 0}select{max-width:56%;font-size:16px}input[type=checkbox]{width:22px;height:22px;accent-color:#ac70ef}.view{animation:appear .22s ease-out}.transcript{white-space:pre-wrap;margin-top:5px;color:var(--ink)}.error{color:#ffafb7;margin:10px 0}.caption{font-size:13px;margin-top:10px}
+@keyframes appear{from{opacity:0;transform:translateY(7px)}to{opacity:1;transform:translateY(0)}}@media(prefers-reduced-motion:reduce){*,*::before,*::after{animation:none!important;transition:none!important}}
+</style>
+</head>
+<body>
+<main>
+<header><div class="logo" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></div><div><h1>NebulaVoice</h1><small>Telegram Mini App</small></div></header>
+<div id="status" role="status"></div><div id="content"></div>
+</main>
+<nav id="nav" aria-label="Розділи" hidden></nav>
+<script>
+'use strict';
+const tg = window.Telegram?.WebApp;
+const content = document.getElementById('content');
+const status = document.getElementById('status');
+const nav = document.getElementById('nav');
+const format = new Intl.NumberFormat('uk-UA');
+const titles = [['⌂','Головна'],['▥','Статистика'],['◷','Історія'],['⚙','Профіль']];
+let data, section = 0;
+function node(tag, text, cls) {
+  const el = document.createElement(tag);
+  if (text != null) el.textContent = text;
+  if (cls) el.className = cls;
+  return el;
+}
+function card(title, value, description) {
+  const el = node('div', null, 'card');
+  el.append(node('h3', title));
+  if (value != null) el.append(node('strong', value, 'value'));
+  if (description) el.append(node('p', description));
+  return el;
+}
+function action(label, handler, primary = false) {
+  const button = node('button', label, primary ? 'action primary' : 'action');
+  button.onclick = handler;
+  return button;
+}
+function openTelegram(url) { tg.openTelegramLink(url); }
+function bonus(key, label) {
+  const claimed = Object.hasOwn(data.bonus, key);
+  return card(label, format.format(data.bonus[key] ?? 0), claimed ? 'Бонусні токени без терміну дії' : 'Бонус ще не отримано');
+}
+function viewHome(root) {
+  root.append(node('h2', 'Привіт, ' + data.name + ' 👋'));
+  const balances = node('div', null, 'grid');
+  balances.append(bonus(data.uid, 'Особистий баланс'));
+  const group = data.chat !== data.uid;
+  if (group) balances.append(bonus(data.chat, 'Баланс групи'));
+  root.append(balances);
+  const guide = card('Одноразові бонуси', null,
+    '10 000 токенів за відкриття Mini App під відповіддю бота в ЛС. 2 000 токенів для групи за відкриття під відповіддю в цій групі.');
+  guide.append(node('p', 'Бонуси використовуються після вичерпання добового ліміту текстового ШІ.', 'caption'));
+  root.append(guide);
+  const limits = card(group ? 'Добовий ліміт групи' : 'Твій добовий ліміт', null,
+    format.format(data.dailyUsed) + ' / ' + format.format(data.dailyLimit) + ' токенів · скидання о 00:00 UTC');
+  const progress = node('progress');
+  progress.max = data.dailyLimit;
+  progress.value = Math.min(data.dailyUsed, data.dailyLimit);
+  progress.setAttribute('aria-label', 'Використання добового ліміту');
+  limits.append(progress);
+  root.append(limits, action('Додати бота в групу', () => openTelegram(data.addUrl), true),
+    action('Відкрити чат із ботом', () => openTelegram(data.privateUrl)));
+}
+function viewStats(root) {
+  root.append(node('h2', 'Статистика'));
+  root.append(node('p', (data.chat === data.uid ? 'Особиста' : 'Поточна група') + ' · останні 30 днів'));
+  const audio = data.stats.find(row => row.kind === 'audio');
+  const text = data.stats.find(row => row.kind === 'text');
+  const grid = node('div', null, 'grid');
+  grid.append(card('Транскрипцій', format.format(audio?.count ?? 0)), card('Відповідей ШІ', format.format(text?.count ?? 0)));
+  root.append(grid, card('Витрачено токенів ШІ', format.format(text?.tokens ?? 0)));
+  root.append(node('p', 'Статистика збирається з моменту підключення Mini App.', 'caption'));
+}
+function viewHistory(root) {
+  root.append(node('h2', 'Історія транскрипцій'));
+  if (!data.history.length) root.append(card('Поки порожньо', null, 'Тут з’являться твої нові транскрипції з цього чату.'));
+  for (const row of data.history) {
+    const el = node('article', null, 'card');
+    el.append(node('small', new Date(row.at * 1000).toLocaleString('uk-UA')),
+      node('p', row.body, 'transcript'));
+    root.append(el);
+  }
+}
+function selectRow(parent, label, values, selected) {
+  const row = node('label', label);
+  const select = node('select');
+  for (const [key, title] of values) {
+    const option = node('option', title);
+    option.value = key;
+    select.append(option);
+  }
+  select.value = selected;
+  row.append(select);
+  parent.append(row);
+  return select;
+}
+function viewProfile(root) {
+  root.append(node('h2', 'Профіль'));
+  const settings = card('Налаштування ШІ та сповіщень');
+  const language = selectRow(settings, 'Мова відповіді', [['auto','Автоматично'],['uk','Українська'],['ru','Російська']], data.settings.language);
+  const style = selectRow(settings, 'Стиль відповіді', [['default','Стандартний'],['short','Стислий']], data.settings.style);
+  const row = node('label', 'Особисті сповіщення про ліміт');
+  const checkbox = node('input');
+  checkbox.type = 'checkbox';
+  checkbox.checked = Boolean(data.settings.notifications);
+  row.append(checkbox);
+  settings.append(row, action('Дозволити боту писати в ЛС', () => {
+    if (!tg.requestWriteAccess || !tg.isVersionAtLeast('6.9')) {
+      return notice('Онови Telegram, щоб надати дозвіл у Mini App.', true);
+    }
+    tg.requestWriteAccess(granted => notice(granted ? 'Telegram надав дозвіл.' : 'Дозвіл не надано.'));
+  }));
+  settings.append(action('Зберегти', async event => {
+    event.currentTarget.disabled = true;
+    try {
+      await refresh({language: language.value, style: style.value, notifications: checkbox.checked});
+      notice('Налаштування збережено.');
+    } catch (err) {
+      notice(err.message, true);
+    } finally {
+      event.target.disabled = false;
+    }
+  }, true));
+  const referral = card('Реферальна програма', format.format(data.referrals), 'Людей відкрили Mini App за твоїм запрошенням.');
+  referral.append(action('Поділитися запрошенням', () => openTelegram(
+    'https://t.me/share/url?url=' + encodeURIComponent(data.referralUrl) + '&text=' + encodeURIComponent('Спробуй NebulaVoice')
+  )));
+  root.append(settings, referral);
+}
+function render() {
+  content.replaceChildren();
+  const root = node('section', null, 'view');
+  [viewHome, viewStats, viewHistory, viewProfile][section](root);
+  content.append(root);
+  for (const [index, tab] of [...nav.children].entries()) tab.setAttribute('aria-selected', String(index === section));
+}
+function notice(text, error = false) {
+  status.className = error ? 'error' : 'caption';
+  status.textContent = text;
+}
+async function refresh(settings) {
+  const response = await fetch(new URL('api', document.baseURI), {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({initData:tg.initData,settings})
+  });
+  if (!response.ok) throw new Error(response.status === 401 ? 'Відкрий Mini App ще раз із Telegram.' : 'Не вдалося завантажити дані. Спробуй ще раз.');
+  data = await response.json();
+  render();
+}
+async function boot() {
+  if (!tg?.initData) return notice('Відкрий Mini App кнопкою під повідомленням NebulaVoice в Telegram.');
+  tg.ready();
+  tg.expand();
+  if (tg.isVersionAtLeast('6.1')) { tg.setHeaderColor('#0d0a14'); tg.setBackgroundColor('#0d0a14'); }
+  for (const [index, [icon, label]] of titles.entries()) {
+    const tab = node('button');
+    tab.append(node('span', icon), document.createTextNode(label));
+    tab.onclick = () => { section = index; notice(''); render(); };
+    nav.append(tab);
+  }
+  notice('Завантаження…');
+  try { await refresh(); nav.hidden = false; notice(''); }
+  catch (err) { notice(err.message, true); }
+}
+boot();
+</script>
+</body>
+</html>
