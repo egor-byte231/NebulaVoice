@@ -4150,9 +4150,81 @@ icebreaker_questions=(
     'Який день тижня твій улюблений?',
     'Що обереш: рік без соцмереж чи місяць без музики?',
     'Яка дрібниця робить твій день кращим?',
+    "Хто з чату, на твою думку, найбільше схожий на NPC?",
+    "Хто з чату, на твою думку, найбільший душнила?",
+    "Хто з чату першим вижив би на безлюдному острові?",
+    "Хто з чату найчастіше змінює тему розмови?",
+    "Хто з чату міг би стати коміком?",
+    "Хто з чату найкраще зіграв би детектива?",
+    "Хто з чату міг би виграти вікторину?",
+    "Хто з чату найімовірніше стане мемом?",
+    "Хто з чату найкраще організував би вечірку?",
+    "Хто з чату міг би написати книжку?",
+    "Хто з чату найкраще придумує відмовки?",
+    "Хто з чату міг би стати ведучим новин?",
+    "Хто з чату найкраще торгувався б на базарі?",
+    "Хто з чату найімовірніше забуде, навіщо зайшов у кімнату?",
+    "Хто з чату найкраще зіграв би лиходія у фільмі?",
+    "Хто з чату міг би виграти конкурс мемів?",
+    "Хто з чату найкраще впорався б із роллю капітана корабля?",
+    "Хто з чату найімовірніше засне посеред фільму?",
+    "Хто з чату міг би стати екскурсоводом?",
+    "Хто з чату найкраще придумав би назву для гурту?",
+    "Чи віриш у кохання з першого погляду?",
+    "Що важливіше у стосунках: довіра чи романтика?",
+    "Чи потрібен особистий простір у стосунках?",
+    "Яке побачення для тебе ідеальне?",
+    "Чи можуть протилежності добре ладнати?",
+    "Чи важливо мати спільні захоплення?",
+    "Що для тебе найкращий прояв турботи?",
+    "Чи легко тобі пробачати?",
+    "Що ти найбільше цінуєш у друзях?",
+    "Чи віриш у дружбу на відстані?",
+    "Що краще: подарунок чи спільні враження?",
+    "Чи важливо вміти сміятися із себе?",
+    "Що допомагає тобі помиритися після сварки?",
+    "Яка риса характеру тебе приваблює?",
+    "Що для тебе означає справжня дружба?",
+    "Піца з ананасами: так чи ні?",
+    "Солодке чи солоне?",
+    "Кіт чи собака?",
+    "Літо чи зима?",
+    "Рано вставати чи пізно лягати?",
+    "Кінотеатр чи домашній перегляд?",
+    "Голосові чи текстові повідомлення?",
+    "Книга чи аудіокнига?",
+    "Місто чи природа?",
+    "Потяг чи літак?",
+    "Дощ чи сніг?",
+    "Настільні ігри чи відеоігри?",
+    "Сніданок удома чи в кафе?",
+    "Спонтанна подорож чи запланована відпустка?",
+    "Комедія чи детектив?",
+    "Якби ти виграв мільйон, що купив би першим?",
+    "Якби тварини говорили, з якою ти поговорив би?",
+    "Якби ти міг жити у світі будь-якої гри, яку обрав би?",
+    "Яку вигадану професію ти хотів би спробувати?",
+    "Який предмет узяв би на безлюдний острів?",
+    "Якби ти міг телепортуватися, куди вирушив би зараз?",
+    "Який закон ти запровадив би у вигаданій країні?",
+    "Якби твій день мав саундтрек, яка пісня грала б?",
+    "Яку страву ти назвав би на свою честь?",
+    "Якби ти міг зупинити час на годину, що зробив би?",
+    "Який найсмішніший випадок ти пам’ятаєш зі школи?",
+    "Яку звичку ти хотів би набути?",
+    "Що ти вмів би робити ідеально, якби міг обрати одну навичку?",
+    "Який запах нагадує тобі дитинство?",
+    "Що тебе найбільше дивує у сучасному світі?",
+    "Який подарунок тобі запам’ятався найбільше?",
+    "Який смак морозива ти обираєш?",
+    "Яку річ ти завжди береш із собою?",
+    "Що ти зробив би, якби отримав додатковий вихідний?",
+    "Яке питання ти поставив би всьому чату?",
 )
 def icebreaker_schema():
     db.execute('CREATE TABLE IF NOT EXISTS icebreaker_settings (chat INTEGER PRIMARY KEY, enabled INTEGER NOT NULL, next_at REAL NOT NULL, last_question TEXT)')
+    db.execute('CREATE TABLE IF NOT EXISTS icebreaker_history (id INTEGER PRIMARY KEY AUTOINCREMENT, chat INTEGER NOT NULL, question TEXT NOT NULL)')
+    db.execute('CREATE INDEX IF NOT EXISTS icebreaker_history_chat ON icebreaker_history(chat,id)')
     db.commit()
 
 @dp.message(Command('questions_on','questions_off'),F.chat.type.in_({'group','supergroup'}))
@@ -4193,11 +4265,16 @@ async def icebreaker_monitor():
                 db.commit()
                 continue
             if not row[0] or row[1]>now: continue
-            question=random.choice([q for q in icebreaker_questions if q!=row[2]])
-            name=random.choice(list(members.values()))[0]
+            recent={r[0] for r in db.execute('SELECT question FROM icebreaker_history WHERE chat=? ORDER BY id DESC LIMIT 10',(chat,))}
+            if row[2]: recent.add(row[2])
+            question=random.choice([q for q in icebreaker_questions if q not in recent])
+            uid,(name,_)=random.choice(list(members.items()))
             db.execute('UPDATE icebreaker_settings SET next_at=?,last_question=? WHERE chat=?',(now+random.randint(1800,5400),question,chat))
             db.commit()
-            try: await bot.send_message(chat,name+', '+question,parse_mode=None)
+            db.execute('INSERT INTO icebreaker_history(chat,question) VALUES (?,?)',(chat,question))
+            db.execute('DELETE FROM icebreaker_history WHERE chat=? AND id NOT IN (SELECT id FROM icebreaker_history WHERE chat=? ORDER BY id DESC LIMIT 10)',(chat,chat))
+            db.commit()
+            try: await bot.send_message(chat,f'<a href="tg://user?id={uid}">{html.escape(name)}</a>, {html.escape(question)}',parse_mode='HTML')
             except Exception as e: logging.warning('Group question failed: %s',type(e).__name__)
 
 @dp.message(Command('ai_on','ai_off','ai_stats'),F.chat.type.in_({'group','supergroup'}))
