@@ -79,11 +79,12 @@ function action(label, handler, primary = false) {
   return button;
 }
 function openTelegram(url) { tg.openTelegramLink(url); }
-function bonus(key, label) {
-  const claimed = Object.prototype.hasOwnProperty.call(data.bonus, key);
-  const value = key == null ? '–' : format.format(data.bonus[key] ?? 0);
-  const el = card(label, value, key == null ? 'Відкрий Mini App у групі' : claimed ? 'токенів' : 'Бонус ще не отримано');
+function balance(key, label) {
+  const quota = key == null ? null : data.quotas?.[key];
+  const el = card(label, quota ? format.format(quota.remaining) : '–',
+    quota ? 'із ' + format.format(quota.limit) + ' токенів на день' : 'Відкрий Mini App у групі');
   el.classList.add('balance');
+  if (quota) el.append(node('p', 'Підписка ' + quota.plan, 'caption'));
   return el;
 }
 function changeSection(index) {
@@ -104,7 +105,7 @@ function viewHome(root) {
 
   const group = data.chat !== data.uid;
   const balances = node('div', null, 'grid');
-  balances.append(bonus(data.uid, 'Особистий баланс'), bonus(group ? data.chat : null, 'Баланс групи'));
+  balances.append(balance(data.uid, 'Особистий залишок'), balance(group ? data.chat : null, 'Залишок групи'));
   root.append(balances);
 
   const claimed = Object.prototype.hasOwnProperty.call(data.bonus, data.chat);
@@ -112,9 +113,25 @@ function viewHome(root) {
   const mark = node('span', claimed ? '✓' : '✧', 'bonus-mark');
   mark.setAttribute('aria-hidden', 'true');
   const copy = node('div');
-  copy.append(node('h3', claimed ? 'Бонус отримано' : 'Одноразовий бонус'),
-    node('p', claimed ? 'Бонусні токени не згорають.' : 'Відкрий Mini App під відповіддю бота в ЛС або групі.'));
+  const bonusAmount = group ? 2000 : 10000;
+  copy.append(node('h3', claimed ? 'Бонус нараховано' : 'Одноразовий бонус'),
+    node('p', claimed ? 'Залишок бонусу · ' + format.format(data.bonus[data.chat]) + ' токенів'
+      : '+' + format.format(bonusAmount) + ' токенів без терміну дії'));
   bonusStatus.append(mark, copy);
+  if (!claimed && data.canClaimBonus) {
+    copy.append(action('Отримати бонус', async event => {
+      const button = event.currentTarget;
+      button.disabled = true;
+      try {
+        await refresh({claimBonus:true});
+      } catch (err) {
+        notice(err.message, true);
+        button.disabled = false;
+      }
+    }));
+  } else if (!claimed) {
+    copy.append(node('p', 'Відкрий Mini App під відповіддю бота в потрібному чаті.'));
+  }
   root.append(bonusStatus, action('Додати бота в групу', () => openTelegram(data.addUrl), true));
 
   const shortcuts = node('div', null, 'shortcuts');
@@ -182,16 +199,11 @@ function viewProfile(root) {
   checkbox.type = 'checkbox';
   checkbox.checked = Boolean(data.settings.notifications);
   row.append(checkbox);
-  settings.append(row, action('Дозволити боту писати в ЛС', () => {
-    if (!tg.requestWriteAccess || !tg.isVersionAtLeast('6.9')) {
-      return notice('Онови Telegram, щоб надати дозвіл у Mini App.', true);
-    }
-    tg.requestWriteAccess(granted => notice(granted ? 'Telegram надав дозвіл.' : 'Дозвіл не надано.'));
-  }));
+  settings.append(row);
   settings.append(action('Зберегти', async event => {
     event.currentTarget.disabled = true;
     try {
-      await refresh({language: language.value, style: style.value, notifications: checkbox.checked});
+      await refresh({settings:{language: language.value, style: style.value, notifications: checkbox.checked}});
       notice('Налаштування збережено.');
     } catch (err) {
       notice(err.message, true);
@@ -216,10 +228,10 @@ function notice(text, error = false) {
   status.className = error ? 'error' : 'caption';
   status.textContent = text;
 }
-async function refresh(settings) {
+async function refresh(options = {}) {
   const response = await fetch(new URL('api', document.baseURI), {
     method:'POST', headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({initData:tg.initData,settings})
+    body:JSON.stringify({initData:tg.initData,...options})
   });
   if (!response.ok) throw new Error(response.status === 401 ? 'Відкрий Mini App ще раз із Telegram.' : 'Не вдалося завантажити дані. Спробуй ще раз.');
   data = await response.json();
@@ -237,7 +249,13 @@ async function boot() {
     nav.append(tab);
   }
   notice('Завантаження…');
-  try { await refresh(); nav.hidden = false; notice(''); }
+  try {
+    const supportsWritePrompt = typeof tg.requestWriteAccess === 'function' && tg.isVersionAtLeast('6.9');
+    await refresh({checkWritePrompt:supportsWritePrompt});
+    nav.hidden = false;
+    notice('');
+    if (supportsWritePrompt && data.promptWriteAccess) tg.requestWriteAccess();
+  }
   catch (err) { notice(err.message, true); }
 }
 boot();
