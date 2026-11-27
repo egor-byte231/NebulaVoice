@@ -11,7 +11,16 @@ slots = asyncio.Semaphore(4)
 pending = 0
 download_lock = asyncio.Lock()
 
+# Experimental presets; only applied to the Ukrainian Mykyta model.
+PRESETS = {
+    'natural': (['--length-scale','1.04','--sentence-silence','0.22'], 'highpass=f=65,equalizer=f=3200:t=q:w=1:g=-1.5,acompressor=threshold=0.15:ratio=1.5'),
+    'deep': (['--length-scale','1.07','--sentence-silence','0.25'], 'asetrate=20948,aresample=22050,atempo=1.05263,highpass=f=60,equalizer=f=180:t=q:w=1:g=2'),
+    'soft': (['--length-scale','1.10','--sentence-silence','0.30'], 'highpass=f=65,equalizer=f=3500:t=q:w=1:g=-3,acompressor=threshold=0.12:ratio=1.7'),
+}
+
 async def select_model(text, preference='mykyta'):
+    if preference in PRESETS:
+        preference = 'mykyta'
     # Language detection runs in the isolated Piper environment.
     python = str(Path(os.getenv("PIPER_BIN", "piper")).with_name("python"))
     proc = await asyncio.create_subprocess_exec(python, "-c",
@@ -88,8 +97,15 @@ async def speak(message, text, preference='mykyta'):
             with tempfile.TemporaryDirectory(prefix="nebula-tts-") as directory:
                 wav = str(Path(directory) / "speech.wav")
                 ogg = str(Path(directory) / "speech.ogg")
-                await run_process(os.getenv("PIPER_BIN", "piper"), "--model", model, "--output_file", wav, data=text[:3700].encode("utf-8"))
-                await run_process("ffmpeg", "-nostdin", "-loglevel", "error", "-i", wav, "-c:a", "libopus", "-threads", "1", ogg)
+                options, audio_filter = PRESETS.get(preference, ([], None)) if Path(model).name.startswith("uk_UA-mykyta-") else ([], None)
+                await run_process(os.getenv("PIPER_BIN", "piper"), "--model", model, "--output_file", wav, *options, data=text[:3700].encode("utf-8"))
+                if preference == "deep" and audio_filter:
+                    import wave
+                    with wave.open(wav, "rb") as stream:
+                        rate = stream.getframerate()
+                    audio_filter = audio_filter.replace("20948", str(round(rate*0.95))).replace("22050", str(rate))
+                filters = ["-af", audio_filter] if audio_filter else []
+                await run_process("ffmpeg", "-nostdin", "-loglevel", "error", "-i", wav, *filters, "-c:a", "libopus", "-threads", "1", ogg)
                 await message.reply_voice(FSInputFile(ogg))
     finally:
         pending -= 1
