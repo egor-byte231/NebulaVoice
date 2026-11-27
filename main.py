@@ -4115,6 +4115,91 @@ async def group_admin(m):
         member=await bot.get_chat_member(m.chat.id,m.from_user.id)
         return member.status in ('administrator','creator')
     except Exception: return False
+# Optional group conversation prompts. No AI calls or user tagging.
+import random
+from collections import defaultdict
+icebreaker_members=defaultdict(dict)
+icebreaker_questions=(
+    'Хто з чату, на твою думку, найхитріший?',
+    'Хто з чату найбільше нагадує головного героя гри?',
+    'Душ зранку чи ввечері?',
+    'Чи важливі спільні цілі у стосунках?',
+    'Що для тебе означає підтримка у стосунках?',
+    'Хто з чату найкраще піднімає настрій?',
+    'Яку суперсилу ти обрав би на один день?',
+    'Що краще: море чи гори?',
+    'Який фільм ти можеш передивлятися безкінечно?',
+    'Хто з чату найкраще впорався б із квестом?',
+    'Що важливіше: талант чи дисципліна?',
+    'Яка твоя найбільш непопулярна думка про їжу?',
+    'Подорож у минуле чи майбутнє?',
+    'Яка пісня зараз у тебе на повторі?',
+    'Хто з чату міг би вести власне шоу?',
+    'Що для тебе ідеальний вихідний?',
+    'Чи можна дружити після розставання?',
+    'Кава чи чай?',
+    'Яку країну ти мрієш відвідати?',
+    'Що тебе завжди смішить?',
+    'Якби цей чат був серіалом, як би він називався?',
+    'Що краще: планувати все чи імпровізувати?',
+    'Який винахід ти вважаєш найкориснішим?',
+    'Хто з чату найкраще розповідає історії?',
+    'Яку страву ти міг би їсти щодня?',
+    'Що важливіше у дружбі: чесність чи почуття гумору?',
+    'Якби можна було миттєво вивчити одну мову, яку?',
+    'Який день тижня твій улюблений?',
+    'Що обереш: рік без соцмереж чи місяць без музики?',
+    'Яка дрібниця робить твій день кращим?',
+)
+def icebreaker_schema():
+    db.execute('CREATE TABLE IF NOT EXISTS icebreaker_settings (chat INTEGER PRIMARY KEY, enabled INTEGER NOT NULL, next_at REAL NOT NULL, last_question TEXT)')
+    db.commit()
+
+@dp.message(Command('questions_on','questions_off'),F.chat.type.in_({'group','supergroup'}))
+async def icebreaker_control(m:Message):
+    if not await group_admin(m): return
+    icebreaker_schema()
+    on=int(m.text.split()[0].split('@')[0]=='/questions_on')
+    db.execute('INSERT INTO icebreaker_settings VALUES (?,?,?,NULL) ON CONFLICT(chat) DO UPDATE SET enabled=excluded.enabled,next_at=excluded.next_at',(m.chat.id,on,time.time()+random.randint(1800,5400)))
+    db.commit()
+    await m.reply('💬 Питання для активності увімкнено.' if on else '💬 Питання для активності вимкнено.')
+
+@dp.message.outer_middleware()
+async def icebreaker_observe(handler,event,data):
+    if event.chat.type in ('group','supergroup') and event.from_user and not event.from_user.is_bot and not event.sender_chat and (event.text or event.voice or event.video_note):
+        now=time.time()
+        members=icebreaker_members[event.chat.id]
+        for uid,entry in list(members.items()):
+            if now-entry[1]>900: members.pop(uid,None)
+        members[event.from_user.id]=(event.from_user.full_name[:80],now)
+        if len(members)>200: members.pop(min(members,key=lambda uid:members[uid][1]),None)
+    return await handler(event,data)
+
+async def icebreaker_monitor():
+    icebreaker_schema()
+    while True:
+        await asyncio.sleep(30)
+        now=time.time()
+        for chat,members in list(icebreaker_members.items()):
+            for uid,entry in list(members.items()):
+                if now-entry[1]>900: members.pop(uid,None)
+            if not members:
+                icebreaker_members.pop(chat,None)
+                continue
+            if len(members)<3 or not enabled() or not group_enabled(chat): continue
+            row=db.execute('SELECT enabled,next_at,last_question FROM icebreaker_settings WHERE chat=?',(chat,)).fetchone()
+            if row is None:
+                db.execute('INSERT OR IGNORE INTO icebreaker_settings VALUES (?,?,?,NULL)',(chat,0,now+random.randint(1800,5400)))
+                db.commit()
+                continue
+            if not row[0] or row[1]>now: continue
+            question=random.choice([q for q in icebreaker_questions if q!=row[2]])
+            name=random.choice(list(members.values()))[0]
+            db.execute('UPDATE icebreaker_settings SET next_at=?,last_question=? WHERE chat=?',(now+random.randint(1800,5400),question,chat))
+            db.commit()
+            try: await bot.send_message(chat,name+', '+question,parse_mode=None)
+            except Exception as e: logging.warning('Group question failed: %s',type(e).__name__)
+
 @dp.message(Command('ai_on','ai_off','ai_stats'),F.chat.type.in_({'group','supergroup'}))
 async def group_ai_control(m:Message):
     overview_user(m)
@@ -4949,6 +5034,7 @@ async def main():
     tasks.append(asyncio.create_task(quota_reset_monitor()))
     tasks.append(asyncio.create_task(daily_report_monitor()))
     tasks.append(asyncio.create_task(deletion_watch_monitor()))
+    tasks.append(asyncio.create_task(icebreaker_monitor()))
     if False:
         await cloud_restore_reservations()
         tasks.append(asyncio.create_task(cloud_reconcile()))
