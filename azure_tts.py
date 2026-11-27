@@ -141,15 +141,18 @@ def normalize_ukrainian_tts(text):
 async def speak(message, text, preference='mykyta', reply_to_message_id=None):
     global pending
     if pending >= 32:
-        return await message.reply("Черга озвучування заповнена. Спробуй пізніше.")
+        await message.reply("Черга озвучування заповнена. Спробуй пізніше.")
+        return False
     pending += 1
     try:
         async with slots:
             model = await select_model(text, preference)
             if not model:
                 if preference == 'serhiy':
-                    return await message.reply('Голос Сергій ще не встановлений на VPS. Завантаж модель командою встановлення.')
-                return await message.reply('Для цієї мови немає доступної голосової моделі Piper.')
+                    await message.reply('Голос Сергій ще не встановлений на VPS. Завантаж модель командою встановлення.')
+                    return False
+                await message.reply('Для цієї мови немає доступної голосової моделі Piper.')
+                return False
             with tempfile.TemporaryDirectory(prefix="nebula-tts-") as directory:
                 wav = str(Path(directory) / "speech.wav")
                 ogg = str(Path(directory) / "speech.ogg")
@@ -171,5 +174,33 @@ async def speak(message, text, preference='mykyta', reply_to_message_id=None):
                     voice=FSInputFile(ogg),
                     reply_parameters=ReplyParameters(message_id=reply_to_message_id or message.message_id),
                 )
+                return True
     finally:
         pending -= 1
+
+
+async def benchmark_synthesis(text, preference="serhiy"):
+    """Generate a real Piper+ffmpeg audio file without sending it to Telegram."""
+    import wave
+    started = asyncio.get_running_loop().time()
+    async with slots:
+        entered = asyncio.get_running_loop().time()
+        model = await select_model(text, preference)
+        if not model:
+            raise RuntimeError("TTS model unavailable")
+        with tempfile.TemporaryDirectory(prefix="nebula-tts-bench-") as directory:
+            wav = str(Path(directory) / "speech.wav")
+            ogg = str(Path(directory) / "speech.ogg")
+            options, audio_filter = PRESETS.get(preference, ([], None)) if Path(model).name.startswith("uk_UA-mykyta-") else ([], None)
+            speech = normalize_ukrainian_tts(text) if Path(model).name.startswith("uk_UA-") else text
+            await run_process(os.getenv("PIPER_BIN", "piper"), "--model", model, "--output_file", wav, *options, data=speech.encode("utf-8"))
+            with wave.open(wav, "rb") as source:
+                seconds = source.getnframes() / source.getframerate() / 1.05
+            if preference == "deep" and audio_filter:
+                with wave.open(wav, "rb") as source:
+                    rate = source.getframerate()
+                audio_filter = audio_filter.replace("20948", str(round(rate * 0.95))).replace("22050", str(rate))
+            audio_filter = (audio_filter + ",atempo=1.05") if audio_filter else "atempo=1.05"
+            await run_process("ffmpeg", "-nostdin", "-loglevel", "error", "-i", wav, "-af", audio_filter, "-c:a", "libopus", "-threads", "1", ogg)
+            size = Path(ogg).stat().st_size
+    return {"wait": entered - started, "elapsed": asyncio.get_running_loop().time() - entered, "seconds": seconds, "bytes": size}
