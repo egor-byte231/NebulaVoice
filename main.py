@@ -57,7 +57,8 @@ def overview_user(m,kind='direct'):
     scope='private' if m.chat.type=='private' else 'groups'
     day=datetime.datetime.now(datetime.timezone.utc).date().isoformat()
     db.execute('INSERT OR IGNORE INTO overview_users VALUES (?,?,?)',(day,scope,m.from_user.id))
-    if kind=='audio': kind='direct' if scope=='private' else 'automatic'
+    if kind=='audio': kind='pm' if scope=='private' else 'automatic'
+    elif kind=='direct': kind='pm' if scope=='private' else 'group_direct'
     db.execute('INSERT OR IGNORE INTO overview_activity VALUES (?,?,?)',(day,kind,m.from_user.id))
     db.commit()
 
@@ -73,7 +74,7 @@ def overview_add(m,voices=0,circles=0,requests=0):
 def overview_menu(scope=None):
     rows=[]
     if scope is None:
-        for key,label in [('groups','👥 Статистика в групах'),('private','👤 Статистика в ЛС'),('all','🌐 Загальна статистика'),('direct','🎯 Прямі взаємодії'),('automatic','🎙 Автоматична транскрипція в групах')]:
+        for key,label in [('groups','👥 Статистика в групах'),('private','👤 Статистика в ЛС'),('all','🌐 Загальна статистика'),('pm','1 · Прямі взаємодії в ЛС'),('group_direct','2 · Прямі взаємодії в групах'),('webapp','3 · Web App'),('combined','4 · Комбінована статистика'),('automatic','🎙 Автоматична транскрипція в групах')]:
             rows.append([InlineKeyboardButton(text=label,callback_data='owner:overview:'+key)])
         back='owner:back'
     else:
@@ -84,20 +85,30 @@ def overview_menu(scope=None):
 
 def activity_report(kind):
     today=datetime.datetime.now(datetime.timezone.utc).date()
-    title={'direct':'🎯 Прямі взаємодії','automatic':'🎙 Автоматична транскрипція в групах'}[kind]
-    total=db.execute('SELECT COUNT(DISTINCT user_id) FROM overview_activity WHERE kind=?',(kind,)).fetchone()[0]
-    lines=['<b>'+title+'</b>',f'Унікальні за весь час: {total}']
-    for label,days in [('DAU',1),('WAU',7),('MAU',30)]:
-        start=(today-datetime.timedelta(days=days-1)).isoformat()
-        end=today.isoformat()
-        active=db.execute('SELECT COUNT(DISTINCT user_id) FROM overview_activity WHERE kind=? AND day BETWEEN ? AND ?',(kind,start,end)).fetchone()[0]
-        new=db.execute('SELECT COUNT(*) FROM (SELECT MIN(day) AS first_day FROM overview_activity WHERE kind=? GROUP BY user_id) WHERE first_day BETWEEN ? AND ?',(kind,start,end)).fetchone()[0]
-        lines.append(f'{label} ({days} дн.): {active} | нові: {new}')
-    lines.extend(['','UTC. Окремий облік з моменту оновлення. Категорії можуть перетинатися. Це не офіційний MAU Telegram.'])
+    categories={'pm':('pm',),'group_direct':('group_direct',),'webapp':('webapp',),'automatic':('automatic',),'12':('pm','group_direct'),'13':('pm','webapp'),'23':('group_direct','webapp'),'123':('pm','group_direct','webapp')}
+    titles={'pm':'1 · ЛС','group_direct':'2 · Групи','webapp':'3 · Web App','automatic':'Автоматична транскрипція','12':'1+2','13':'1+3','23':'2+3','123':'1+2+3'}
+    lines=['<b>📊 Комбінована статистика</b>' if kind=='combined' else '<b>'+titles[kind]+'</b>']
+    for key in (('12','13','23','123') if kind=='combined' else (kind,)):
+        kinds=categories[key]
+        where='kind IN ('+','.join('?' for _ in kinds)+')'
+        total=db.execute('SELECT COUNT(DISTINCT user_id) FROM overview_activity WHERE '+where,kinds).fetchone()[0]
+        lines.extend(['','<b>'+titles[key]+'</b>',f'Унікальні за весь час: {total}'])
+        for label,days in [('DAU',1),('WAU',7),('MAU',30)]:
+            start=(today-datetime.timedelta(days=days-1)).isoformat()
+            end=today.isoformat()
+            active=db.execute('SELECT COUNT(DISTINCT user_id) FROM overview_activity WHERE '+where+' AND day BETWEEN ? AND ?',kinds+(start,end)).fetchone()[0]
+            new=db.execute('SELECT COUNT(*) FROM (SELECT MIN(day) AS first_day FROM overview_activity WHERE '+where+' GROUP BY user_id) WHERE first_day BETWEEN ? AND ?',kinds+(start,end)).fetchone()[0]
+            lines.append(f'{label} ({days} дн.): {active} | нові: {new}')
+    lines.extend(['','UTC. Нові категорії рахуються з оновлення. Об’єднання без дублювання. Не офіційний MAU Telegram.'])
     return '\n'.join(lines)
 
+def overview_webapp(uid):
+    day=datetime.datetime.now(datetime.timezone.utc).date().isoformat()
+    db.execute('INSERT OR IGNORE INTO overview_activity VALUES (?,?,?)',(day,'webapp',int(uid)))
+    db.commit()
+
 def overview_report(scope):
-    if scope in ('direct','automatic'): return activity_report(scope)
+    if scope in ('pm','group_direct','webapp','combined','automatic'): return activity_report(scope)
     today=datetime.datetime.now(datetime.timezone.utc).date()
     day=datetime.timedelta(days=1)
     week=today-datetime.timedelta(days=today.weekday())
@@ -3501,7 +3512,7 @@ async def owner_action(c:CallbackQuery):
         return await c.message.edit_text('📈 Загальна статистика — обери розділ',reply_markup=overview_menu())
     if c.data.startswith('owner:overview:'):
         scope=c.data.rsplit(':',1)[-1]
-        if scope not in ('groups','private','all','direct','automatic'): return
+        if scope not in ('groups','private','all','pm','group_direct','webapp','combined','automatic'): return
         try: await c.message.edit_text(overview_report(scope),parse_mode='HTML',reply_markup=overview_menu(scope))
         except Exception as e:
             if 'message is not modified' not in str(e).lower(): raise
@@ -4074,6 +4085,7 @@ async def mini_query(sql,params=()):
     return await d1_query(history_session,sql,params)
 
 miniapp=MiniApp(bot,mini_query,group_used,mini_daily_limit)
+miniapp.audience_open=overview_webapp
 mini_billing_locks=tuple(asyncio.Lock() for _ in range(64))
 
 @dp.message(F.write_access_allowed)
@@ -4105,6 +4117,7 @@ async def group_admin(m):
     except Exception: return False
 @dp.message(Command('ai_on','ai_off','ai_stats'),F.chat.type.in_({'group','supergroup'}))
 async def group_ai_control(m:Message):
+    overview_user(m)
     if not await group_admin(m): return
     cmd=m.text.split()[0].split('@')[0]
     chat=m.chat.id
@@ -4337,6 +4350,7 @@ async def generate_text(m,question,context='',group=False,history_context='',dia
     await m.reply('Текстовий ШІ тимчасово недоступний.')
 @dp.message(Command('premium'),F.chat.type.in_({'group','supergroup','private'}))
 async def premium_offer(m:Message):
+    overview_user(m)
     if m.chat.type!='private' and not await group_admin(m): return await m.reply('Придбати Premium для групи може адміністратор.')
     import secrets
     payload='nebula:'+secrets.token_hex(16)
@@ -4367,6 +4381,7 @@ async def premium_paid(m:Message):
     await m.answer('⭐ Premium активовано на 30 днів. Ліміт: '+('40 000' if chat>0 else '100 000')+' токенів/день.')
 @dp.message(Command('paysupport'),F.chat.type=='private')
 async def payment_support(m:Message):
+    overview_user(m)
     if not m.from_user: return
     try:
         await bot.send_message(OWNER,f'Запит підтримки платежів від Telegram ID {m.from_user.id}.')
@@ -4376,10 +4391,12 @@ async def payment_support(m:Message):
 
 @dp.message(Command('ai_stats'),F.chat.type=='private')
 async def private_stats(m:Message):
+    overview_user(m)
     chat=m.chat.id
     await m.answer(f'Тариф: {"Premium" if premium_until(chat)>time.time() else "Free"}\nТокени: {group_used(chat)} / {private_limit(chat)} (UTC)\n/premium — придбати Premium.')
 @dp.message(Command('limit'))
 async def show_limit(m:Message):
+    overview_user(m)
     if m.chat.type not in ('private','group','supergroup'): return
     chat=m.chat.id
     limit=private_limit(chat) if m.chat.type=='private' else group_limit(chat)
