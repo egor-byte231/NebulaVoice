@@ -165,8 +165,7 @@ def report():
     for k in ORDER:
         a,b,c,d=rows.get(k,(0,0,0,0))
         remaining=max(0,int(blocked('quota:'+k)-time.time()))
-        primary={'groq2':'groq1','groq2t':'groq1t','cf2':'cf1'}.get(k)
-        state='🔴 Ліміт API' if remaining else '🟡 Обробка' if k in active_providers else '⚪ Резерв' if primary and blocked('quota:'+primary)<=time.time() else '🟡 Пауза' if blocked(k)>time.time() else '🟢 Готовий'
+        state='🔴 Ліміт API' if remaining else '🟡 Обробка' if k in active_providers else '🟡 Пауза' if blocked(k)>time.time() else '🟢 Готовий'
         items=[('Транскрипцій',c),('Спроб',a),('Аудіо',duration(b))]
         if k.startswith('groq'):
             limit=28800
@@ -3240,9 +3239,6 @@ async def run_audio_load_inner(m,config,progress):
                         if blocked(k)>time.time() or (audio_platform()=='FadeHost' and k in active_providers):
                             attempts.append(NAMES[k]+': зайнятий/ліміт')
                             continue
-                        if config['mode']=='auto' and MODELS[k][1]==2:
-                            primary={'groq2':'groq1','groq2t':'groq1t','cf2':'cf1'}[k]
-                            if blocked('quota:'+primary)<=time.time(): continue
                         active_providers.add(k)
                         try:
                             usage(k,seconds=(item.duration.total_seconds() if hasattr(item.duration,'total_seconds') else item.duration),attempt=1)
@@ -3691,8 +3687,6 @@ async def process_voice_inner(m,status,failures,selected,local_media=None,local_
                 audio_profile_active[forced]-=1
                 if forced=='ovh': ovh_cooldown_until=time.monotonic()+30
                 if not audio_profile_active[forced]: active_providers.discard(forced)
-        order=[k for k in ORDER if k!='ovh']
-        # Secondary credentials must represent independently permitted quotas; only use after primary HTTP 429.
         deadline=time.time()+600
         notified=False
         candidate=None
@@ -3711,12 +3705,9 @@ async def process_voice_inner(m,status,failures,selected,local_media=None,local_
                 message='⚠️ Не вдалося отримати текст транскрипції. Спробуй надіслати аудіо повторно.'
             return await deliver_transcript(m,status,message)
         while time.time()<deadline and enabled():
-            primary=next((k for k in order if blocked(k)<=time.time() and k not in rejected),None)
-            overflow=primary is not None and audio_profile_active.get(primary,0)>=4
-            cycle=(['ovh'] if overflow and audio_seconds<=15 and time.monotonic()>=ovh_cooldown_until and not audio_profile_active.get('ovh',0) else [])+order
-            for k in cycle:
+            for k in ORDER:
                 if blocked(k)>time.time() or audio_profile_active.get(k,0)>=(1 if k=='ovh' else 4): continue
-                if k=='ovh' and time.monotonic()<ovh_cooldown_until: continue
+                if k=='ovh' and (audio_seconds>15 or time.monotonic()<ovh_cooldown_until): continue
                 if k in rejected or (candidate and MODELS[k][2] in tried_models): continue
                 if not enabled(): return await mark_disabled(status)
                 audio_profile_active[k]=audio_profile_active.get(k,0)+1
