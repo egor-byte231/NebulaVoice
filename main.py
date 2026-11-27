@@ -4221,6 +4221,41 @@ icebreaker_questions=(
     "Що ти зробив би, якби отримав додатковий вихідний?",
     "Яке питання ти поставив би всьому чату?",
 )
+def group_roster_schema():
+    db.execute("""CREATE TABLE IF NOT EXISTS group_roster (
+        chat INTEGER NOT NULL, user_id INTEGER NOT NULL, name TEXT NOT NULL, username TEXT,
+        first_seen REAL NOT NULL, last_seen REAL, joined REAL, left_at REAL,
+        present INTEGER NOT NULL DEFAULT 1, messages INTEGER NOT NULL DEFAULT 0,
+        voices INTEGER NOT NULL DEFAULT 0, circles INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY(chat,user_id))""")
+    db.commit()
+
+def roster_update(chat,user,at,kind):
+    if not user or user.is_bot: return
+    group_roster_schema()
+    if kind=='leave':
+        db.execute('UPDATE group_roster SET present=0,left_at=? WHERE chat=? AND user_id=?',(at,chat,user.id))
+        icebreaker_members.get(chat,{}).pop(user.id,None)
+    else:
+        db.execute("""INSERT INTO group_roster(chat,user_id,name,username,first_seen,last_seen,joined,present,messages,voices,circles)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(chat,user_id) DO UPDATE SET
+            name=excluded.name,username=excluded.username,present=1,
+            last_seen=COALESCE(excluded.last_seen,group_roster.last_seen),
+            joined=COALESCE(excluded.joined,group_roster.joined),
+            messages=group_roster.messages+excluded.messages,voices=group_roster.voices+excluded.voices,
+            circles=group_roster.circles+excluded.circles""",
+            (chat,user.id,user.full_name[:120],user.username,at,at if kind!='join' else None,at if kind=='join' else None,1,int(kind!='join'),int(kind=='voice'),int(kind=='circle')))
+    db.commit()
+
+@dp.chat_member()
+async def roster_membership(event):
+    if event.chat.type not in ('group','supergroup'): return
+    def present(member):
+        return member.status not in ('left','kicked') and (member.status!='restricted' or member.is_member)
+    old,new=event.old_chat_member,event.new_chat_member
+    if present(old)!=present(new):
+        roster_update(event.chat.id,new.user,event.date.timestamp(),'join' if present(new) else 'leave')
+
 def icebreaker_schema():
     db.execute('CREATE TABLE IF NOT EXISTS icebreaker_settings (chat INTEGER PRIMARY KEY, enabled INTEGER NOT NULL, next_at REAL NOT NULL, last_question TEXT)')
     db.execute('CREATE TABLE IF NOT EXISTS icebreaker_history (id INTEGER PRIMARY KEY AUTOINCREMENT, chat INTEGER NOT NULL, question TEXT NOT NULL)')
@@ -4238,6 +4273,12 @@ async def icebreaker_control(m:Message):
 
 @dp.message.outer_middleware()
 async def icebreaker_observe(handler,event,data):
+    if event.chat.type in ('group','supergroup'):
+        at=event.date.timestamp()
+        for user in event.new_chat_members or []: roster_update(event.chat.id,user,at,'join')
+        if event.left_chat_member: roster_update(event.chat.id,event.left_chat_member,at,'leave')
+        if not event.sender_chat and not event.new_chat_members and not event.left_chat_member and event.from_user and not event.from_user.is_bot:
+            roster_update(event.chat.id,event.from_user,at,'voice' if event.voice else 'circle' if event.video_note else 'message')
     if event.chat.type in ('group','supergroup') and event.from_user and not event.from_user.is_bot and not event.sender_chat and (event.text or event.voice or event.video_note):
         now=time.time()
         members=icebreaker_members[event.chat.id]
@@ -4249,6 +4290,7 @@ async def icebreaker_observe(handler,event,data):
 
 async def icebreaker_monitor():
     icebreaker_schema()
+    group_roster_schema()
     while True:
         await asyncio.sleep(30)
         now=time.time()
@@ -5115,7 +5157,7 @@ async def main():
     if False:
         await cloud_restore_reservations()
         tasks.append(asyncio.create_task(cloud_reconcile()))
-    try: await dp.start_polling(bot,handle_as_tasks=True)
+    try: await dp.start_polling(bot,handle_as_tasks=True,allowed_updates=dp.resolve_used_update_types())
     finally:
         await miniapp.close()
         for task in tasks: task.cancel()
