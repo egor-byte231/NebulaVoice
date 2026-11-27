@@ -4260,6 +4260,8 @@ def icebreaker_schema():
     db.execute('CREATE TABLE IF NOT EXISTS icebreaker_settings (chat INTEGER PRIMARY KEY, enabled INTEGER NOT NULL, next_at REAL NOT NULL, last_question TEXT)')
     db.execute('CREATE TABLE IF NOT EXISTS icebreaker_history (id INTEGER PRIMARY KEY AUTOINCREMENT, chat INTEGER NOT NULL, question TEXT NOT NULL)')
     db.execute('CREATE INDEX IF NOT EXISTS icebreaker_history_chat ON icebreaker_history(chat,id)')
+    db.execute('CREATE TABLE IF NOT EXISTS icebreaker_user_history (id INTEGER PRIMARY KEY AUTOINCREMENT, chat INTEGER NOT NULL, user_id INTEGER NOT NULL)')
+    db.execute('CREATE INDEX IF NOT EXISTS icebreaker_user_history_chat ON icebreaker_user_history(chat,id)')
     db.commit()
 
 @dp.message(Command('questions_on','questions_off'),F.chat.type.in_({'group','supergroup'}))
@@ -4310,10 +4312,15 @@ async def icebreaker_monitor():
             recent={r[0] for r in db.execute('SELECT question FROM icebreaker_history WHERE chat=? ORDER BY id DESC LIMIT 10',(chat,))}
             if row[2]: recent.add(row[2])
             question=random.choice([q for q in icebreaker_questions if q not in recent])
-            uid,(name,_)=random.choice(list(members.items()))
+            recent_users={r[0] for r in db.execute('SELECT user_id FROM icebreaker_user_history WHERE chat=? ORDER BY id DESC LIMIT 10',(chat,))}
+            candidates=[(uid,entry) for uid,entry in members.items() if uid not in recent_users]
+            if not candidates: continue
+            uid,(name,_)=random.choice(candidates)
             db.execute('UPDATE icebreaker_settings SET next_at=?,last_question=? WHERE chat=?',(now+random.randint(1800,5400),question,chat))
             db.commit()
             db.execute('INSERT INTO icebreaker_history(chat,question) VALUES (?,?)',(chat,question))
+            db.execute('INSERT INTO icebreaker_user_history(chat,user_id) VALUES (?,?)',(chat,uid))
+            db.execute('DELETE FROM icebreaker_user_history WHERE chat=? AND id NOT IN (SELECT id FROM icebreaker_user_history WHERE chat=? ORDER BY id DESC LIMIT 10)',(chat,chat))
             db.execute('DELETE FROM icebreaker_history WHERE chat=? AND id NOT IN (SELECT id FROM icebreaker_history WHERE chat=? ORDER BY id DESC LIMIT 10)',(chat,chat))
             db.commit()
             try: await bot.send_message(chat,f'<a href="tg://user?id={uid}">{html.escape(name)}</a>, {html.escape(question)}',parse_mode='HTML')
