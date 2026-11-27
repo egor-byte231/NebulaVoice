@@ -135,7 +135,7 @@ function viewHome(root) {
   root.append(bonusStatus, action('Додати бота в групу', () => openTelegram(data.addUrl), true));
 
   const shortcuts = node('div', null, 'shortcuts');
-  for (const [index, icon, label] of [[1,'▥','Статистика'],[2,'◷','Історія транскрипцій'],[3,'✦','Налаштування ШІ']]) {
+  for (const [index, icon, label] of [[1,'▥','Статистика'],[2,'◷','Історія транскрипцій']]) {
     const button = node('button', null, 'shortcut');
     const badge = node('span', icon, 'shortcut-icon');
     badge.setAttribute('aria-hidden', 'true');
@@ -176,46 +176,13 @@ function viewHistory(root) {
   if (data.chat !== data.uid) root.append(node('p', 'Старі записи групи без даних про автора враховано у статистиці.', 'caption'));
 }
 
-function selectRow(parent, label, values, selected) {
-  const row = node('label', label);
-  const select = node('select');
-  for (const [key, title] of values) {
-    const option = node('option', title);
-    option.value = key;
-    select.append(option);
-  }
-  select.value = selected;
-  row.append(select);
-  parent.append(row);
-  return select;
-}
 function viewProfile(root) {
   root.append(node('h2', 'Профіль'));
-  const settings = card('Налаштування ШІ та сповіщень');
-  const language = selectRow(settings, 'Мова текстового ШІ', [['auto','Автоматично'],['uk','Українська'],['ru','Російська']], data.settings.language);
-  const style = selectRow(settings, 'Стиль текстового ШІ', [['default','Стандартний'],['short','Стислий']], data.settings.style);
-  const row = node('label', 'Особисті сповіщення про ліміт');
-  const checkbox = node('input');
-  checkbox.type = 'checkbox';
-  checkbox.checked = Boolean(data.settings.notifications);
-  row.append(checkbox);
-  settings.append(row);
-  settings.append(action('Зберегти', async event => {
-    event.currentTarget.disabled = true;
-    try {
-      await refresh({settings:{language: language.value, style: style.value, notifications: checkbox.checked}});
-      notice('Налаштування збережено.');
-    } catch (err) {
-      notice(err.message, true);
-    } finally {
-      event.target.disabled = false;
-    }
-  }, true));
   const referral = card('Запрошення до Mini App', format.format(data.referrals), 'Людей відкрили Mini App за твоїм запрошенням.');
   referral.append(action('Поділитися запрошенням', () => openTelegram(
     'https://t.me/share/url?url=' + encodeURIComponent(data.referralUrl) + '&text=' + encodeURIComponent('Спробуй NebulaVoice')
   )));
-  root.append(settings, referral, action('Відкрити чат із ботом', () => openTelegram(data.privateUrl)));
+  root.append(referral, action('Відкрити чат із ботом', () => openTelegram(data.privateUrl)));
 }
 function render() {
   content.replaceChildren();
@@ -228,13 +195,16 @@ function notice(text, error = false) {
   status.className = error ? 'error' : 'caption';
   status.textContent = text;
 }
-async function refresh(options = {}) {
+async function requestData(options = {}) {
   const response = await fetch(new URL('api', document.baseURI), {
     method:'POST', headers:{'Content-Type':'application/json'},
     body:JSON.stringify({initData:tg.initData,...options})
   });
   if (!response.ok) throw new Error(response.status === 401 ? 'Відкрий Mini App ще раз із Telegram.' : 'Не вдалося завантажити дані. Спробуй ще раз.');
-  data = await response.json();
+  return response.json();
+}
+async function refresh(options) {
+  data = await requestData(options);
   render();
 }
 async function boot() {
@@ -254,7 +224,15 @@ async function boot() {
     await refresh({checkWritePrompt:supportsWritePrompt});
     nav.hidden = false;
     notice('');
-    if (supportsWritePrompt && data.promptWriteAccess) tg.requestWriteAccess();
+    if (supportsWritePrompt && data.promptWriteAccess) {
+      try {
+        tg.requestWriteAccess(() => {
+          requestData({writePromptFinished:true}).catch(() => {});
+        });
+      } catch (err) {
+        console.warn('Telegram write permission dialog unavailable', err);
+      }
+    }
   }
   catch (err) { notice(err.message, true); }
 }
