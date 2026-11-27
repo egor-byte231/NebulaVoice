@@ -19,7 +19,7 @@ PRESETS = {
 }
 
 async def select_model(text, preference='mykyta'):
-    if preference in PRESETS:
+    if preference in PRESETS or preference.startswith('mine_'):
         preference = 'mykyta'
     # Language detection runs in the isolated Piper environment.
     python = str(Path(os.getenv("PIPER_BIN", "piper")).with_name("python"))
@@ -104,6 +104,28 @@ async def speak(message, text, preference='mykyta'):
                     with wave.open(wav, "rb") as stream:
                         rate = stream.getframerate()
                     audio_filter = audio_filter.replace("20948", str(round(rate*0.95))).replace("22050", str(rate))
+                if preference.startswith("mine_"):
+                    reference = Path(os.getenv("VOICE_REFERENCE_WAV", ""))
+                    converter = os.getenv("VOICE_CONVERTER_PYTHON", "")
+                    checkpoint = os.getenv("VOICE_CONVERTER_CHECKPOINT_DIR", "")
+                    if not converter or not checkpoint or not reference.is_file():
+                        return await message.reply("Мій голос ще не налаштований на сервері. Потрібні приватний зразок і модель OpenVoice.")
+                    converted = str(Path(directory) / "converted.wav")
+                    await run_process(converter, str(Path(__file__).with_name("voice_clone_openvoice.py")),
+                        "--input", wav, "--reference", str(reference), "--output", converted,
+                        "--checkpoint-dir", checkpoint)
+                    wav = converted
+                    my_filters = {
+                        "mine_natural": "highpass=f=70,acompressor=threshold=0.15:ratio=1.3",
+                        "mine_deep": "asetrate=20948,aresample=22050,atempo=1.05263",
+                        "mine_soft": "highpass=f=70,equalizer=f=3500:t=q:w=1:g=-2",
+                    }
+                    audio_filter = my_filters.get(preference)
+                    if preference == "mine_deep":
+                        import wave
+                        with wave.open(wav, "rb") as stream:
+                            rate = stream.getframerate()
+                        audio_filter = audio_filter.replace("20948", str(round(rate * 0.95))).replace("22050", str(rate))
                 filters = ["-af", audio_filter] if audio_filter else []
                 await run_process("ffmpeg", "-nostdin", "-loglevel", "error", "-i", wav, *filters, "-c:a", "libopus", "-threads", "1", ogg)
                 await message.reply_voice(FSInputFile(ogg))
