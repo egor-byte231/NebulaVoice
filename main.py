@@ -25,6 +25,8 @@ OWNER=int(os.environ['OWNER_ID']); bot=Bot(os.environ['BOT_TOKEN']); dp=Dispatch
 bot.session.middleware(telegram_retry)
 ORDER=['groq1','groq2','groq1t','groq2t','cf1','cf2','ovh']
 db=sqlite3.connect('state.db')
+db.execute('CREATE TABLE IF NOT EXISTS tts_preferences (user_id INTEGER PRIMARY KEY, voice TEXT NOT NULL)')
+db.commit()
 db.execute('CREATE TABLE IF NOT EXISTS tts_answers (chat INTEGER NOT NULL, answer_id INTEGER NOT NULL, request_id INTEGER NOT NULL, answer TEXT NOT NULL, created INTEGER NOT NULL, PRIMARY KEY(chat,answer_id))')
 db.commit()
 from azure_runtime import RuntimeSettings, SlotGate
@@ -4285,7 +4287,7 @@ async def generate_text(m,question,context='',group=False,history_context='',dia
         if group and not group_enabled(chat): return
         keyboard=miniapp.keyboard(m)
         if m.from_user.id==OWNER:
-            rows=[[InlineKeyboardButton(text='🔊 Озвучити',callback_data='tts:answer')]]
+            rows=[[InlineKeyboardButton(text='🔊 Озвучити (/voice — змінити голос)',callback_data='tts:answer')]]
             if keyboard: rows.extend(keyboard.inline_keyboard)
             keyboard=InlineKeyboardMarkup(inline_keyboard=rows)
         sent=await m.reply(html.escape(answer[:3700])+('\n\n<blockquote>'+html.escape(DISCLAIMER)+'</blockquote>' if development_enabled() else ''),parse_mode='HTML',reply_markup=keyboard)
@@ -4518,6 +4520,35 @@ async def cloud_text_probe():
         logging.warning('Cloud probe failed: %s',type(e).__name__)
         return False
 
+TTS_VOICES={'mykyta':'Микита','oleksa':'Олекса','lada':'Лада','tetiana':'Тетяна','ukrainian_tts':'Ukrainian TTS'}
+
+def tts_preference(user_id):
+    row=db.execute('SELECT voice FROM tts_preferences WHERE user_id=?',(user_id,)).fetchone()
+    return row[0] if row and row[0] in TTS_VOICES else 'mykyta'
+
+def tts_voice_menu(user_id):
+    selected=tts_preference(user_id)
+    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=('✅ ' if key==selected else '')+label,callback_data='ttsvoice:'+key)] for key,label in TTS_VOICES.items()])
+
+@dp.message(Command('voice'))
+async def tts_voice_command(m:Message):
+    if not m.from_user or m.from_user.id!=OWNER: return
+    await m.reply('🎙 Обери український голос. Для інших мов голос визначається автоматично.',reply_markup=tts_voice_menu(m.from_user.id))
+
+@dp.callback_query(F.data.startswith('ttsvoice:'))
+async def tts_voice_choose(c:CallbackQuery):
+    if c.from_user.id!=OWNER:
+        return await c.answer('Доступно лише власнику.',show_alert=True)
+    voice=c.data.split(':',1)[1]
+    if voice not in TTS_VOICES: return await c.answer('Невідомий голос.')
+    db.execute('INSERT OR REPLACE INTO tts_preferences VALUES (?,?)',(c.from_user.id,voice))
+    db.commit()
+    await c.answer('Голос: '+TTS_VOICES[voice])
+    if isinstance(c.message,Message):
+        markup=tts_voice_menu(c.from_user.id)
+        if c.message.reply_markup!=markup:
+            await c.message.edit_reply_markup(reply_markup=markup)
+
 tts_inflight=set()
 
 @dp.callback_query(F.data=='tts:answer')
@@ -4539,7 +4570,7 @@ async def local_tts_answer(c:CallbackQuery):
     tts_inflight.add(key)
     try:
         await c.answer('Озвучую…')
-        await speak(request,row[1])
+        await speak(request,row[1],tts_preference(c.from_user.id))
     except Exception as e:
         logging.exception('Local TTS failed')
         await request.reply('Озвучування тимчасово недоступне.')
@@ -4687,6 +4718,7 @@ async def d1_initialize(session):
                 source.backup(db)
             finally: source.close()
         # Restoring a legacy snapshot can remove Azure-only schema.
+        db.execute('CREATE TABLE IF NOT EXISTS tts_preferences (user_id INTEGER PRIMARY KEY, voice TEXT NOT NULL)')
         db.execute('CREATE TABLE IF NOT EXISTS tts_answers (chat INTEGER NOT NULL, answer_id INTEGER NOT NULL, request_id INTEGER NOT NULL, answer TEXT NOT NULL, created INTEGER NOT NULL, PRIMARY KEY(chat,answer_id))')
         db.commit()
         RuntimeSettings(db)
