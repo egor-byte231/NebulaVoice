@@ -29,6 +29,8 @@ from azure_runtime import RuntimeSettings, SlotGate
 from nebula_miniapp import MiniApp
 azure_settings=RuntimeSettings(db)
 azure_text_gate=SlotGate(azure_settings,'text')
+db.execute('CREATE TABLE IF NOT EXISTS tts_answers (chat INTEGER, answer_id INTEGER, request_id INTEGER, answer TEXT, created INTEGER, PRIMARY KEY(chat,answer_id))')
+db.commit()
 db.execute('CREATE TABLE IF NOT EXISTS cloud_completed (id TEXT PRIMARY KEY)')
 db.execute('CREATE TABLE IF NOT EXISTS cloud_pending (id TEXT PRIMARY KEY,chat INTEGER,day TEXT,budget INTEGER)')
 db.commit()
@@ -4279,7 +4281,16 @@ async def generate_text(m,question,context='',group=False,history_context='',dia
         if context and re.search(r'як там люди|как там люди|хто себе як|кто себя как|хто.*повод|кто.*вед[её]т|атмосфер',question,re.I) and re.search(r'люди.{0,30}різні|люди.{0,30}разные|хтось.{0,30}зайнятий|хтось.{0,30}відпочиває|кто-то.{0,30}отдыхает',answer,re.I):
             continue
         if group and not group_enabled(chat): return
-        sent=await m.reply(html.escape(answer[:3700])+('\n\n<blockquote>'+html.escape(DISCLAIMER)+'</blockquote>' if development_enabled() else ''),parse_mode='HTML',reply_markup=miniapp.keyboard(m))
+        keyboard=miniapp.keyboard(m)
+        sent=await m.reply(html.escape(answer[:3700])+('\n\n<blockquote>'+html.escape(DISCLAIMER)+'</blockquote>' if development_enabled() else ''),parse_mode='HTML',reply_markup=keyboard)
+        if m.from_user.id==OWNER:
+            db.execute('INSERT OR REPLACE INTO tts_answers VALUES (?,?,?,?,?)',(chat,sent.message_id,m.message_id,answer[:3700],int(time.time())))
+            db.execute('DELETE FROM tts_answers WHERE created<?',(int(time.time())-7*86400,))
+            db.commit()
+            rows=[[InlineKeyboardButton(text='🔊 Озвучити',callback_data='tts:answer')]]
+            if keyboard: rows.extend(keyboard.inline_keyboard)
+            try: await sent.edit_reply_markup(reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+            except Exception: logging.warning('TTS button update failed')
         visible_tokens=0
         notify_limit=False
         if not local:
@@ -4505,19 +4516,33 @@ async def cloud_text_probe():
         logging.warning('Cloud probe failed: %s',type(e).__name__)
         return False
 
-@dp.message(Command('tts'))
-async def local_tts_command(m:Message):
-    if not m.from_user or m.from_user.id != OWNER: return
+tts_inflight=set()
+
+@dp.callback_query(F.data=='tts:answer')
+async def local_tts_answer(c:CallbackQuery):
+    if c.from_user.id!=OWNER:
+        return await c.answer('Доступно лише власнику бота.',show_alert=True)
+    if not isinstance(c.message,Message):
+        return await c.answer('Повідомлення недоступне.',show_alert=True)
+    key=(c.message.chat.id,c.message.message_id)
+    row=db.execute('SELECT request_id,answer FROM tts_answers WHERE chat=? AND answer_id=? AND created>=?',(*key,int(time.time())-7*86400)).fetchone()
+    if not row:
+        return await c.answer('Відповідь недоступна для озвучування.',show_alert=True)
+    if key in tts_inflight:
+        return await c.answer('Вже озвучую.')
+    request=c.message.reply_to_message
+    if not request or request.message_id!=row[0]:
+        return await c.answer('Початковий запит недоступний.',show_alert=True)
     from azure_tts import speak
-    text=(m.text or '').partition(' ')[2].strip()
-    if not text and m.reply_to_message:
-        text=m.reply_to_message.text or m.reply_to_message.caption or ''
-    if not text: return await m.reply('Використання: /tts текст або відповідь на повідомлення.')
+    tts_inflight.add(key)
     try:
-        await speak(m,text)
+        await c.answer('Озвучую…')
+        await speak(request,row[1])
     except Exception as e:
         logging.warning('Local TTS failed: %s',type(e).__name__)
-        await m.reply('Озвучування тимчасово недоступне.')
+        await request.reply('Озвучування тимчасово недоступне.')
+    finally:
+        tts_inflight.discard(key)
 
 @dp.message(F.text,F.chat.type.in_({'group','supergroup','private'}))
 async def text_message(m:Message):
