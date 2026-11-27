@@ -48,19 +48,23 @@ db.execute('INSERT OR IGNORE INTO overview_start VALUES (1,?)',(datetime.datetim
 db.commit()
 
 db.execute('CREATE TABLE IF NOT EXISTS overview_users (day TEXT, scope TEXT, user_id INTEGER, PRIMARY KEY(day,scope,user_id))')
+
+db.execute('CREATE TABLE IF NOT EXISTS overview_activity (day TEXT, kind TEXT, user_id INTEGER, PRIMARY KEY(day,kind,user_id))')
 db.commit()
 
-def overview_user(m):
+def overview_user(m,kind='direct'):
     if not m.from_user or m.from_user.is_bot or m.sender_chat: return
     scope='private' if m.chat.type=='private' else 'groups'
     day=datetime.datetime.now(datetime.timezone.utc).date().isoformat()
     db.execute('INSERT OR IGNORE INTO overview_users VALUES (?,?,?)',(day,scope,m.from_user.id))
+    if kind=='audio': kind='direct' if scope=='private' else 'automatic'
+    db.execute('INSERT OR IGNORE INTO overview_activity VALUES (?,?,?)',(day,kind,m.from_user.id))
     db.commit()
 
 def overview_add(m,voices=0,circles=0,requests=0):
     for key,value in (('voices',voices),('circles',circles),('requests',requests)):
         if value: daily_stat_add(key,value)
-    overview_user(m)
+    overview_user(m,'audio' if voices or circles else 'direct')
     scope='private' if m.chat.type=='private' else 'groups'
     day=datetime.datetime.now(datetime.timezone.utc).date().isoformat()
     db.execute('INSERT INTO overview_daily VALUES (?,?,?,?,?) ON CONFLICT(day,scope) DO UPDATE SET voices=voices+excluded.voices,circles=circles+excluded.circles,requests=requests+excluded.requests',(day,scope,voices,circles,requests))
@@ -69,7 +73,7 @@ def overview_add(m,voices=0,circles=0,requests=0):
 def overview_menu(scope=None):
     rows=[]
     if scope is None:
-        for key,label in [('groups','👥 Статистика в групах'),('private','👤 Статистика в ЛС'),('all','🌐 Загальна статистика')]:
+        for key,label in [('groups','👥 Статистика в групах'),('private','👤 Статистика в ЛС'),('all','🌐 Загальна статистика'),('direct','🎯 Прямі взаємодії'),('automatic','🎙 Автоматична транскрипція в групах')]:
             rows.append([InlineKeyboardButton(text=label,callback_data='owner:overview:'+key)])
         back='owner:back'
     else:
@@ -78,7 +82,22 @@ def overview_menu(scope=None):
     rows.append([InlineKeyboardButton(text='⬅️ Назад',callback_data=back)])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
+def activity_report(kind):
+    today=datetime.datetime.now(datetime.timezone.utc).date()
+    title={'direct':'🎯 Прямі взаємодії','automatic':'🎙 Автоматична транскрипція в групах'}[kind]
+    total=db.execute('SELECT COUNT(DISTINCT user_id) FROM overview_activity WHERE kind=?',(kind,)).fetchone()[0]
+    lines=['<b>'+title+'</b>',f'Унікальні за весь час: {total}']
+    for label,days in [('DAU',1),('WAU',7),('MAU',30)]:
+        start=(today-datetime.timedelta(days=days-1)).isoformat()
+        end=today.isoformat()
+        active=db.execute('SELECT COUNT(DISTINCT user_id) FROM overview_activity WHERE kind=? AND day BETWEEN ? AND ?',(kind,start,end)).fetchone()[0]
+        new=db.execute('SELECT COUNT(*) FROM (SELECT MIN(day) AS first_day FROM overview_activity WHERE kind=? GROUP BY user_id) WHERE first_day BETWEEN ? AND ?',(kind,start,end)).fetchone()[0]
+        lines.append(f'{label} ({days} дн.): {active} | нові: {new}')
+    lines.extend(['','UTC. Окремий облік з моменту оновлення. Категорії можуть перетинатися. Це не офіційний MAU Telegram.'])
+    return '\n'.join(lines)
+
 def overview_report(scope):
+    if scope in ('direct','automatic'): return activity_report(scope)
     today=datetime.datetime.now(datetime.timezone.utc).date()
     day=datetime.timedelta(days=1)
     week=today-datetime.timedelta(days=today.weekday())
@@ -303,6 +322,7 @@ async def silent_add_toggle(c:CallbackQuery):
 
 @dp.message(Command('help'))
 async def help_command(m:Message):
+    overview_user(m)
     group=m.chat.type in ('group','supergroup')
     lines=['📚 Допомога NebulaVoice','',
            '🎙 Транскрипція — надішли голосове повідомлення або відеокружечок.',
@@ -3024,7 +3044,7 @@ async def voice(m:Message):
     try:
         d['queue']=waiting.qsize()+1; d['active_at_enqueue']=len(active_jobs); d['queued']=time.time(); diag_save(d)
         waiting.put_nowait((m,status))
-        overview_user(m)
+        overview_user(m,'audio')
     except asyncio.QueueFull:
         await audio_queue_remove(m)
         audio_diag_pending.pop((m.chat.id,m.message_id),None); d['state']='черга заповнена'; diag_save(d)
@@ -3481,7 +3501,7 @@ async def owner_action(c:CallbackQuery):
         return await c.message.edit_text('📈 Загальна статистика — обери розділ',reply_markup=overview_menu())
     if c.data.startswith('owner:overview:'):
         scope=c.data.rsplit(':',1)[-1]
-        if scope not in ('groups','private','all'): return
+        if scope not in ('groups','private','all','direct','automatic'): return
         try: await c.message.edit_text(overview_report(scope),parse_mode='HTML',reply_markup=overview_menu(scope))
         except Exception as e:
             if 'message is not modified' not in str(e).lower(): raise
@@ -4677,6 +4697,7 @@ async def d1_initialize(session):
         db.execute('CREATE TABLE IF NOT EXISTS overview_daily (day TEXT, scope TEXT, voices INTEGER NOT NULL DEFAULT 0, circles INTEGER NOT NULL DEFAULT 0, requests INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(day,scope))')
         db.execute('CREATE TABLE IF NOT EXISTS overview_start (id INTEGER PRIMARY KEY, day TEXT)')
         db.execute('CREATE TABLE IF NOT EXISTS overview_users (day TEXT, scope TEXT, user_id INTEGER, PRIMARY KEY(day,scope,user_id))')
+        db.execute('CREATE TABLE IF NOT EXISTS overview_activity (day TEXT, kind TEXT, user_id INTEGER, PRIMARY KEY(day,kind,user_id))')
         db.execute('CREATE TABLE IF NOT EXISTS text_usage (day TEXT, route TEXT, tokens INTEGER, attempts INTEGER, PRIMARY KEY(day,route))')
         db.execute('CREATE TABLE IF NOT EXISTS text_groups (chat INTEGER PRIMARY KEY)')
         db.execute('CREATE TABLE IF NOT EXISTS text_disabled (chat INTEGER PRIMARY KEY)')
@@ -4688,6 +4709,7 @@ async def d1_initialize(session):
         db.execute('CREATE TABLE IF NOT EXISTS text_group_alerts (day TEXT, chat INTEGER, PRIMARY KEY(day,chat))')
         db.execute('CREATE TABLE IF NOT EXISTS classifier_daily (day TEXT PRIMARY KEY, attempts INTEGER, ok INTEGER, needed INTEGER, tokens INTEGER, ms INTEGER, bypass INTEGER)')
         db.execute('CREATE TABLE IF NOT EXISTS overview_users (day TEXT, scope TEXT, user_id INTEGER, PRIMARY KEY(day,scope,user_id))')
+        db.execute('CREATE TABLE IF NOT EXISTS overview_activity (day TEXT, kind TEXT, user_id INTEGER, PRIMARY KEY(day,kind,user_id))')
         db.commit()
     await d1_snapshot(session)
     logging.info('Cloudflare D1 snapshot initialized')
