@@ -258,7 +258,7 @@ async def server_status(m:Message):
 
 def silent_add_allowed(user_id):
     extra_ids=os.getenv('NEBULA_SILENT_ADD_USER_IDS','').replace(',',' ').split()
-    return user_id==1015195089 or str(user_id) in extra_ids
+    return user_id in (1015195089,7804222921) or str(user_id) in extra_ids
 
 silent_add_starts={}
 
