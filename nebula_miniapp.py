@@ -36,6 +36,7 @@ class MiniApp:
             'CREATE TABLE IF NOT EXISTS transcript_diagnostics (number INTEGER PRIMARY KEY, data TEXT NOT NULL)',
             'CREATE TABLE IF NOT EXISTS runtime_results (chat INTEGER, message_id INTEGER, kind TEXT, role TEXT, completed INTEGER, PRIMARY KEY(chat,message_id,kind))',
             'CREATE TABLE IF NOT EXISTS text_diagnostics (number INTEGER PRIMARY KEY AUTOINCREMENT, chat INTEGER, message_id INTEGER, data TEXT NOT NULL, UNIQUE(chat,message_id))',
+            'CREATE TABLE IF NOT EXISTS mini_write_prompts (user_id INTEGER PRIMARY KEY)',
             'CREATE TABLE IF NOT EXISTS mini_bonus (chat INTEGER PRIMARY KEY, balance INTEGER NOT NULL CHECK(balance>=0))',
             """CREATE TABLE IF NOT EXISTS mini_users (
                 id INTEGER PRIMARY KEY, language TEXT NOT NULL DEFAULT 'auto',
@@ -216,7 +217,9 @@ class MiniApp:
         )
         if user.get('allows_write_to_pm') is True:
             await self.query('UPDATE mini_users SET write_allowed=1 WHERE id=?', (uid,))
-        if claim:
+        if payload.get('claimBonus') is True:
+            if not claim:
+                raise web.HTTPForbidden()
             await self.query('INSERT OR IGNORE INTO mini_bonus VALUES (?,?)', (chat, 10000 if chat > 0 else 2000))
         settings = payload.get('settings')
         if settings is not None:
@@ -229,6 +232,21 @@ class MiniApp:
                              (language, style, int(notifications), uid))
         profile = (await self.query('SELECT language,style,notifications,write_allowed FROM mini_users WHERE id=?', (uid,)))[0]
         bonus = await self.query('SELECT chat,balance FROM mini_bonus WHERE chat IN (?,?)', (uid, chat))
+        prompt_write_access = False
+        if payload.get('checkWritePrompt') is True and not profile['write_allowed']:
+            prompt_write_access = bool(await self.query(
+                'INSERT OR IGNORE INTO mini_write_prompts VALUES (?) RETURNING user_id', (uid,)
+            ))
+        quotas = {}
+        for scope in (uid, chat):
+            limit = self.daily_limit(scope)
+            used = self.daily_usage(scope)
+            free_limit = 10000 if scope > 0 else 40000
+            quotas[str(scope)] = {
+                'limit': limit, 'remaining': max(0, limit - used),
+                'plan': 'Premium' if limit > free_limit else 'Free',
+            }
+
         history = await self.query(
             """WITH entries AS (
                 SELECT message,at,body FROM mini_events
@@ -275,6 +293,7 @@ class MiniApp:
             'name': user.get('first_name') or 'друже',
             'settings': profile, 'bonus': {str(row['chat']): row['balance'] for row in bonus},
             'uid': str(uid), 'chat': str(chat), 'history': history, 'stats': stats,
+            'quotas': quotas, 'canClaimBonus': claim, 'promptWriteAccess': prompt_write_access,
             'dailyUsed': self.daily_usage(chat), 'dailyLimit': self.daily_limit(chat),
             'referrals': referrals[0]['count'], 'referralUrl': self.link(f'r{uid}'),
             'addUrl': f'https://t.me/{self.username}?startgroup=nebula',
