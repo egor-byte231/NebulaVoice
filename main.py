@@ -4633,7 +4633,18 @@ async def premium_paid(m:Message):
         if not cur.rowcount: return
         until=max(time.time(),premium_until(chat))+30*86400
         db.execute('INSERT OR REPLACE INTO text_premium VALUES (?,?)',(chat,until))
-    await m.answer('⭐ Premium активовано на 30 днів. Ліміт: '+('40 000' if chat>0 else '100 000')+' токенів/день.')
+    limit=mini_daily_limit(chat)
+    used=group_used(chat,text_day())
+    remaining=max(0,limit-used)
+    notice=('⭐ Premium активовано! Новий ліміт діє вже зараз.\n'
+            f'Добовий ліміт: {limit:,} токенів.\n'
+            f'Використано сьогодні: {used:,}.\n'
+            f'Доступно зараз: {remaining:,} токенів.\n'
+            'Наступне оновлення ліміту: 00:00 UTC.').replace(',',' ')
+    await m.answer(notice)
+    if chat<0:
+        try: await bot.send_message(chat,notice)
+        except Exception: logging.warning('Group Premium activation notice failed')
 @dp.message(Command('paysupport'),F.chat.type=='private')
 async def payment_support(m:Message):
     overview_user(m)
