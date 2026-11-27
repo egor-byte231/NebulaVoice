@@ -2,7 +2,7 @@ import difflib, datetime, html, wave, re, os, asyncio, time, tempfile, logging, 
 from pathlib import Path
 import aiohttp
 from aiogram import Bot, Dispatcher, F
-from aiogram.exceptions import TelegramRetryAfter, TelegramBadRequest
+from aiogram.exceptions import TelegramRetryAfter, TelegramBadRequest, TelegramForbiddenError
 
 async def telegram_retry(make_request, bot, method):
     for attempt in range(4):
@@ -444,8 +444,20 @@ async def start(m:Message):
         return await m.answer(result)
     await m.answer(WELCOME,parse_mode='HTML')
     if m.chat.type=='private' and m.from_user and m.from_user.id==OWNER: await m.answer('Панель власника',reply_markup=owner_menu())
+db.execute('CREATE TABLE IF NOT EXISTS publication_membership (chat INTEGER PRIMARY KEY, present INTEGER NOT NULL)')
+db.commit()
+
+def publication_present(member):
+    return member.status not in ('left','kicked') and (member.status!='restricted' or member.is_member)
+
+def publication_membership(chat,present):
+    with db:
+        db.execute('INSERT OR REPLACE INTO publication_membership VALUES (?,?)',(chat,int(present)))
+
 @dp.my_chat_member()
 async def joined(event:ChatMemberUpdated):
+    if event.chat.type in ('group','supergroup'):
+        publication_membership(event.chat.id,publication_present(event.new_chat_member))
     if event.chat.type in ('group','supergroup') and event.old_chat_member.status in ('left','kicked') and event.new_chat_member.status in ('member','administrator'):
         if silent_add_enabled(event.from_user.id): return
         await bot.send_message(event.chat.id,WELCOME,parse_mode='HTML')
@@ -5407,9 +5419,26 @@ async def daily_publish(c:CallbackQuery):
         if not rows: return await bot.send_message(OWNER,'Звіт не знайдено.')
         groups={r[0] for r in db.execute('SELECT chat FROM text_groups WHERE chat<0')}
         groups.update(r['chat'] for r in await d1_query(history_session,'SELECT DISTINCT chat FROM runtime_results WHERE chat<0'))
-        sent=[]; failed=[]; skipped=0
+        membership=dict(db.execute('SELECT chat,present FROM publication_membership'))
+        groups.update(chat for chat,present in membership.items() if present)
+        groups.difference_update(chat for chat,present in membership.items() if not present)
+        sent=[]; failed=[]; skipped=0; removed=0
         for chat in sorted(groups):
             if not group_enabled(chat): continue
+            try:
+                member=await bot.get_chat_member(chat,bot.id)
+                present=publication_present(member)
+                publication_membership(chat,present)
+                if not present:
+                    removed+=1
+                    continue
+            except TelegramForbiddenError:
+                publication_membership(chat,False)
+                removed+=1
+                continue
+            except Exception as e:
+                failed.append(str(chat)+' — '+type(e).__name__)
+                continue
             if await d1_query(history_session,'SELECT chat FROM daily_publications WHERE day=? AND chat=?',(day,chat)):
                 skipped+=1
                 continue
@@ -5423,7 +5452,7 @@ async def daily_publish(c:CallbackQuery):
             except Exception as e:
                 failed.append(name+' — '+type(e).__name__)
             await asyncio.sleep(0.1)
-        report=f'📢 Публікація за {day}\n✅ Надіслано: {len(sent)}\n❌ Помилки: {len(failed)}\n⏭ Уже опубліковано: {skipped}\n\n'+'\n'.join('✅ '+x for x in sent)+'\n'+'\n'.join('❌ '+x for x in failed)
+        report=f'📢 Публікація за {day}\n✅ Надіслано: {len(sent)}\n❌ Помилки: {len(failed)}\n⏭ Уже опубліковано: {skipped}\n🚪 Виключено недоступних груп: {removed}\n\n'+'\n'.join('✅ '+x for x in sent)+'\n'+'\n'.join('❌ '+x for x in failed)
         for start in range(0,len(report),3500):
             await bot.send_message(OWNER,report[start:start+3500],parse_mode=None)
 
