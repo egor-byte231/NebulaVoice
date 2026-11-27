@@ -11,7 +11,7 @@ slots = asyncio.Semaphore(4)
 pending = 0
 download_lock = asyncio.Lock()
 
-async def select_model(text):
+async def select_model(text, preference='mykyta'):
     # Language detection runs in the isolated Piper environment.
     python = str(Path(os.getenv("PIPER_BIN", "piper")).with_name("python"))
     proc = await asyncio.create_subprocess_exec(python, "-c",
@@ -30,10 +30,16 @@ async def select_model(text):
     directory = Path(os.environ["PIPER_MODELS_DIR"]).resolve()
     directory.mkdir(parents=True, exist_ok=True)
     async with download_lock:
-        models = sorted(directory.glob("*.onnx"))
-        for model in models:
-            if model.name.split("_")[0] == lang and Path(str(model)+".json").is_file():
+        preferred = {"uk":"uk_UA-"+preference+"-high", "ru":"ru_RU-dmitri-medium", "en":"en_US-ryan-high"}
+        voice = preferred.get(lang)
+        if voice:
+            model = directory / (voice + ".onnx")
+            if model.is_file() and Path(str(model)+".json").is_file():
                 return str(model)
+        else:
+            for model in sorted(directory.glob("*.onnx")):
+                if model.name.split("_")[0] == lang and Path(str(model)+".json").is_file():
+                    return str(model)
         # Discover official voice identifiers from Piper's catalog.
         import urllib.request
         def catalog():
@@ -43,10 +49,16 @@ async def select_model(text):
         candidates = [key for key in voices if key.split("_")[0] == lang]
         if not candidates:
             return None
-        preferred = {"uk":"uk_UA-lada-x_low", "ru":"ru_RU-irina-medium", "en":"en_US-lessac-low"}
-        voice = preferred.get(lang)
+        if lang == "uk" and voice not in candidates:
+            matching = [key for key in candidates if key.startswith("uk_UA-"+preference+"-")]
+            if not matching:
+                return None
+            voice = sorted(matching, key=lambda key: (0 if key.endswith("-high") else 1 if key.endswith("-medium") else 2 if key.endswith("-low") else 3, key))[0]
         if voice not in candidates:
             voice = sorted(candidates, key=lambda key: (0 if key.endswith("-low") else 1 if key.endswith("-x_low") else 2 if key.endswith("-medium") else 3, key))[0]
+        model = directory / (voice + ".onnx")
+        if model.is_file() and Path(str(model)+".json").is_file():
+            return str(model)
         await run_process(python, "-m", "piper.download_voices", "--download-dir", str(directory), voice)
         model = directory / (voice + ".onnx")
         return str(model) if model.is_file() and Path(str(model)+".json").is_file() else None
@@ -63,14 +75,14 @@ async def run_process(*args, data=None):
     if proc.returncode:
         raise RuntimeError("TTS subprocess failed")
 
-async def speak(message, text):
+async def speak(message, text, preference='mykyta'):
     global pending
     if pending >= 32:
         return await message.reply("Черга озвучування заповнена. Спробуй пізніше.")
     pending += 1
     try:
         async with slots:
-            model = await select_model(text)
+            model = await select_model(text, preference)
             if not model:
                 return await message.reply('Для цієї мови немає доступної голосової моделі Piper.')
             with tempfile.TemporaryDirectory(prefix="nebula-tts-") as directory:
