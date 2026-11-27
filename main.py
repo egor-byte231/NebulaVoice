@@ -4520,7 +4520,7 @@ async def cloud_text_probe():
         logging.warning('Cloud probe failed: %s',type(e).__name__)
         return False
 
-TTS_VOICES={'mine_original':'🎙 Мій голос — Original','mine_natural':'🌌 Мій голос — Natural','mine_deep':'🔊 Мій голос — Deep','mine_soft':'☁️ Мій голос — Soft','natural':'🌌 Nebula Natural','deep':'🌌 Nebula Deep','soft':'🌌 Nebula Soft','mykyta':'Микита (оригінал)','oleksa':'Олекса','lada':'Лада','tetiana':'Тетяна','ukrainian_tts':'Ukrainian TTS'}
+TTS_VOICES={'natural':'🌌 Nebula Natural','deep':'🌌 Nebula Deep','soft':'🌌 Nebula Soft','mykyta':'Микита (оригінал)','oleksa':'Олекса','lada':'Лада','tetiana':'Тетяна','ukrainian_tts':'Ukrainian TTS'}
 
 def tts_preference(user_id):
     row=db.execute('SELECT voice FROM tts_preferences WHERE user_id=?',(user_id,)).fetchone()
