@@ -4522,7 +4522,7 @@ TTS_VOICES={'natural':'🌌 Nebula Natural','deep':'🌌 Nebula Deep','soft':'�
 
 def tts_preference(user_id):
     row=db.execute('SELECT voice FROM tts_preferences WHERE user_id=?',(user_id,)).fetchone()
-    return row[0] if row and row[0] in TTS_VOICES else 'mykyta'
+    return row[0] if row and row[0] in TTS_VOICES else 'serhiy'
 
 def tts_voice_menu(user_id):
     selected=tts_preference(user_id)
