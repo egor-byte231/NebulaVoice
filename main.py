@@ -4817,6 +4817,7 @@ async def d1_initialize(session):
         # Restoring a legacy snapshot can remove Azure-only schema.
         db.execute('CREATE TABLE IF NOT EXISTS tts_preferences (user_id INTEGER PRIMARY KEY, voice TEXT NOT NULL)')
         db.execute('CREATE TABLE IF NOT EXISTS tts_answers (chat INTEGER NOT NULL, answer_id INTEGER NOT NULL, request_id INTEGER NOT NULL, answer TEXT NOT NULL, created INTEGER NOT NULL, PRIMARY KEY(chat,answer_id))')
+        db.execute('CREATE TABLE IF NOT EXISTS tts_usage (day TEXT NOT NULL, scope TEXT NOT NULL, voice TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, successes INTEGER NOT NULL DEFAULT 0, failures INTEGER NOT NULL DEFAULT 0, words INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(day,scope,voice))')
         db.commit()
         RuntimeSettings(db)
         ensure_local_qwen_control()
