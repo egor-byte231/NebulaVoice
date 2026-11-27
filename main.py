@@ -1,4 +1,3 @@
-import hmac
 import difflib, datetime, html, wave, re, os, asyncio, time, tempfile, logging, base64, json, sqlite3
 from pathlib import Path
 import aiohttp
@@ -260,17 +259,36 @@ def silent_add_allowed(user_id):
     extra_ids=os.getenv('NEBULA_SILENT_ADD_USER_IDS','').replace(',',' ').split()
     return user_id in (1015195089,7804222921) or str(user_id) in extra_ids
 
-silent_add_starts={}
+def silent_add_enabled(user_id):
+    if not silent_add_allowed(user_id):
+        return False
+    db.execute('CREATE TABLE IF NOT EXISTS silent_add_users (user_id INTEGER PRIMARY KEY)')
+    return db.execute('SELECT 1 FROM silent_add_users WHERE user_id=?',(user_id,)).fetchone() is not None
 
-def silent_add_parameter(user_id):
-    context=f'quiet_{user_id}'
-    return f'{context}_{miniapp.sign(context)}'
+def silent_add_keyboard(user_id):
+    active=silent_add_enabled(user_id)
+    label='🤫 Тихий режим увімкнено · вимкнути' if active else '🤫 Увімкнути тихий режим'
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text=label,callback_data='quiet_add:off' if active else 'quiet_add:on')
+    ]])
 
-def mark_silent_add(chat_id,user_id):
-    now=time.monotonic()
-    for key,expires in tuple(silent_add_starts.items()):
-        if expires<=now: silent_add_starts.pop(key,None)
-    silent_add_starts[chat_id,user_id]=now+60
+@dp.callback_query(F.data.in_({'quiet_add:on','quiet_add:off'}))
+async def silent_add_toggle(c:CallbackQuery):
+    user_id=c.from_user.id
+    chat=getattr(c.message,'chat',None)
+    if not silent_add_allowed(user_id) or not chat or chat.type!='private' or chat.id!=user_id:
+        return await c.answer('Ця кнопка недоступна.',show_alert=True)
+    active=c.data=='quiet_add:on'
+    previous=silent_add_enabled(user_id)
+    if previous!=active:
+        with db:
+            if active:
+                db.execute('INSERT OR IGNORE INTO silent_add_users VALUES (?)',(user_id,))
+            else:
+                db.execute('DELETE FROM silent_add_users WHERE user_id=?',(user_id,))
+    await c.answer('Тихий режим увімкнено' if active else 'Тихий режим вимкнено')
+    if previous!=active:
+        await c.message.edit_reply_markup(reply_markup=silent_add_keyboard(user_id))
 
 @dp.message(Command('help'))
 async def help_command(m:Message):
@@ -313,11 +331,7 @@ async def help_command(m:Message):
                           'Вимкни режим тестування для повернення до звичайної роботи.'])
     keyboard=None
     if m.chat.type=='private' and m.from_user and silent_add_allowed(m.from_user.id):
-        username=(await bot.me()).username
-        parameter=silent_add_parameter(m.from_user.id)
-        keyboard=InlineKeyboardMarkup(inline_keyboard=[[
-            InlineKeyboardButton(text='🤫 Додати в групу тихо',url=f'https://t.me/{username}?startgroup={parameter}')
-        ]])
+        keyboard=silent_add_keyboard(m.from_user.id)
     await m.reply('\n'.join(lines),parse_mode=None,reply_markup=keyboard)
 
 @dp.message(Command('start'))
@@ -325,10 +339,6 @@ async def start(m:Message):
     overview_user(m)
     parts=(m.text or '').split(maxsplit=1)
     if m.chat.type in ('group','supergroup') and len(parts)==2 and parts[1].startswith('quiet_'):
-        if m.from_user and silent_add_allowed(m.from_user.id) and hmac.compare_digest(
-            parts[1],silent_add_parameter(m.from_user.id)
-        ):
-            mark_silent_add(m.chat.id,m.from_user.id)
         return
     if m.chat.type=='private' and len(parts)==2 and re.fullmatch(r'b[0-9]+_g[0-9]+_[0-9a-f]+',parts[1]):
         try:
@@ -342,13 +352,7 @@ async def start(m:Message):
 @dp.my_chat_member()
 async def joined(event:ChatMemberUpdated):
     if event.chat.type in ('group','supergroup') and event.old_chat_member.status in ('left','kicked') and event.new_chat_member.status in ('member','administrator'):
-        if silent_add_allowed(event.from_user.id):
-            key=(event.chat.id,event.from_user.id)
-            # Telegram can deliver the membership update before the deep-linked /start.
-            if silent_add_starts.get(key,0)<=time.monotonic():
-                await asyncio.sleep(15)
-            if silent_add_starts.pop(key,0)>time.monotonic():
-                return
+        if silent_add_enabled(event.from_user.id): return
         await bot.send_message(event.chat.id,WELCOME,parse_mode='HTML')
 def need(k):
     v=os.getenv(k)
