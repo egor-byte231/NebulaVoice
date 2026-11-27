@@ -1,5 +1,7 @@
 """Telegram entry point and persistent storage for the NebulaVoice Mini App."""
+import asyncio
 import hashlib
+import html
 import hmac
 import json
 import logging
@@ -10,7 +12,7 @@ from pathlib import Path
 from urllib.parse import parse_qsl
 
 from aiohttp import web
-from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
+from aiogram.exceptions import TelegramAPIError, TelegramBadRequest, TelegramForbiddenError
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 
@@ -272,6 +274,42 @@ class MiniApp:
         return {'limit': limit, 'remaining': max(0, limit - self.daily_usage(scope)),
                 'plan': 'Premium' if limit > free_limit else 'Free'}
 
+    async def admin_chat_labels(self, ids):
+        semaphore = asyncio.Semaphore(8)
+
+        async def lookup(chat_id):
+            try:
+                async with asyncio.timeout(5):
+                    async with semaphore:
+                        chat = await self.bot.get_chat(chat_id)
+            except (TelegramAPIError, TimeoutError):
+                return chat_id, {}
+            name = chat.title or ' '.join(filter(None, (chat.first_name, chat.last_name)))
+            return chat_id, {'name': name, 'username': chat.username}
+
+        return dict(await asyncio.gather(*(lookup(chat_id) for chat_id in ids)))
+
+    async def admin_profile_link(self, owner, target):
+        if owner != self.owner_id:
+            raise web.HTTPForbidden()
+        if not isinstance(target, str) or not re.fullmatch(r'[1-9][0-9]{0,15}', target):
+            raise web.HTTPBadRequest()
+        uid = int(target)
+        rows = await self.query(
+            """SELECT claim_details FROM mini_bonus_v2
+               WHERE chat=? OR json_extract(claim_details,'$.uid')=? LIMIT 1""", (uid, uid),
+        )
+        if not rows:
+            raise web.HTTPNotFound()
+        live = (await self.admin_chat_labels({uid}))[uid]
+        saved = json.loads(rows[0]['claim_details']) if rows[0]['claim_details'] else {}
+        label = html.escape(live.get('name') or saved.get('name') or f'Користувач {uid}')
+        try:
+            await self.bot.send_message(owner, f'<a href="tg://user?id={uid}">{label}</a> · ID {uid}', parse_mode='HTML')
+        except TelegramAPIError:
+            raise web.HTTPBadGateway() from None
+        return web.json_response({'url': f'https://t.me/{self.username}'}, headers={'Cache-Control': 'no-store'})
+
     async def admin_bonus_claims(self, uid, offset):
         if uid != self.owner_id:
             raise web.HTTPForbidden()
@@ -288,8 +326,12 @@ class MiniApp:
             ORDER BY COALESCE(json_extract(claims.claim_details,'$.at'),0) DESC, claims.chat DESC
             LIMIT 51 OFFSET ?""", (offset,),
         )
+        page = rows[:50]
+        ids = {row['claimant'] for row in page if row['claimant'] is not None}
+        ids.update(row['chat'] for row in page if row['chat'] < 0)
+        labels = await self.admin_chat_labels(ids)
         entries = []
-        for row in rows[:50]:
+        for row in page:
             details = json.loads(row['claim_details']) if row['claim_details'] else {}
             claimant = row['claimant']
             personal = self.account_quota(claimant) if claimant is not None else None
@@ -300,9 +342,13 @@ class MiniApp:
             if group is not None:
                 group['bonus'] = row['balance']
                 group['total'] = group['remaining'] + group['bonus']
+            user_label = labels.get(claimant) or {}
+            group_label = labels.get(row['chat']) or {} if group else {}
             entries.append({
                 'uid': str(claimant) if claimant is not None else None,
-                'username': details.get('username'), 'name': details.get('name'), 'at': details.get('at'),
+                'username': user_label.get('username') if user_label else details.get('username'),
+                'name': user_label.get('name') or details.get('name'), 'at': details.get('at'),
+                'groupName': group_label.get('name'), 'groupUsername': group_label.get('username'),
                 'groupId': str(row['chat']) if group else None, 'group': group, 'personal': personal,
             })
         return web.json_response({'claims': entries, 'nextOffset': offset + 50 if len(rows) > 50 else None},
@@ -315,6 +361,8 @@ class MiniApp:
         except (AttributeError, KeyError, ValueError, TypeError, OverflowError):
             raise web.HTTPUnauthorized() from None
         uid = user['id']
+        if 'adminProfileId' in payload:
+            return await self.admin_profile_link(uid, payload['adminProfileId'])
         if 'adminBonusOffset' in payload:
             return await self.admin_bonus_claims(uid, payload['adminBonusOffset'])
         chat, claim, referral = await self.scope(uid, fields)
