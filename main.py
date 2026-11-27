@@ -25,6 +25,8 @@ OWNER=int(os.environ['OWNER_ID']); bot=Bot(os.environ['BOT_TOKEN']); dp=Dispatch
 bot.session.middleware(telegram_retry)
 ORDER=['groq1','groq2','groq1t','groq2t','cf1','cf2','ovh']
 db=sqlite3.connect('state.db')
+db.execute('CREATE TABLE IF NOT EXISTS tts_answers (chat INTEGER NOT NULL, answer_id INTEGER NOT NULL, request_id INTEGER NOT NULL, answer TEXT NOT NULL, created INTEGER NOT NULL, PRIMARY KEY(chat,answer_id))')
+db.commit()
 from azure_runtime import RuntimeSettings, SlotGate
 from nebula_miniapp import MiniApp
 azure_settings=RuntimeSettings(db)
