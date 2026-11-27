@@ -32,6 +32,7 @@ class MiniApp:
         self.secret = hmac.digest(bot.token.encode(), b'nebula-miniapp-context-v1', 'sha256')
         self.username = None
         self.runner = None
+        self.audience_open = None
 
     async def start(self):
         if not self.url:
@@ -361,6 +362,8 @@ class MiniApp:
         except (AttributeError, KeyError, ValueError, TypeError, OverflowError):
             raise web.HTTPUnauthorized() from None
         uid = user['id']
+        if self.audience_open is not None and not user.get('is_bot'):
+            self.audience_open(uid)
         if 'adminProfileId' in payload:
             return await self.admin_profile_link(uid, payload['adminProfileId'])
         if 'adminBonusOffset' in payload:
