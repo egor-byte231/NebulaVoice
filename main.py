@@ -4505,6 +4505,20 @@ async def cloud_text_probe():
         logging.warning('Cloud probe failed: %s',type(e).__name__)
         return False
 
+@dp.message(Command('tts'))
+async def local_tts_command(m:Message):
+    if not m.from_user or m.from_user.id != OWNER: return
+    from azure_tts import speak
+    text=(m.text or '').partition(' ')[2].strip()
+    if not text and m.reply_to_message:
+        text=m.reply_to_message.text or m.reply_to_message.caption or ''
+    if not text: return await m.reply('Використання: /tts текст або відповідь на повідомлення.')
+    try:
+        await speak(m,text)
+    except Exception as e:
+        logging.warning('Local TTS failed: %s',type(e).__name__)
+        await m.reply('Озвучування тимчасово недоступне.')
+
 @dp.message(F.text,F.chat.type.in_({'group','supergroup','private'}))
 async def text_message(m:Message):
     global load_count_wait
