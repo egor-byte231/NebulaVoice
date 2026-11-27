@@ -88,6 +88,18 @@ async def run_process(*args, data=None):
     if proc.returncode:
         raise RuntimeError("TTS subprocess failed")
 
+def normalize_ukrainian_tts(text):
+    """Expand common Ukrainian numeric compounds before speech synthesis."""
+    # 20-словний / 20 словний / 20словний -> двадцятисловний.
+    # Preserve grammatical gender/number endings already present in the source.
+    text = re.sub(
+        r"(?<!\\w)20[\\s\\-]*словн(ий|ого|ому|им|ім|а|ої|ій|у|ою|е|ого|і|их|ими|им)(?!\\w)",
+        lambda match: "двадцятисловн" + match.group(1),
+        text, flags=re.IGNORECASE,
+    )
+    return text
+
+
 async def speak(message, text, preference='mykyta'):
     global pending
     if pending >= 32:
@@ -104,7 +116,7 @@ async def speak(message, text, preference='mykyta'):
                 wav = str(Path(directory) / "speech.wav")
                 ogg = str(Path(directory) / "speech.ogg")
                 options, audio_filter = PRESETS.get(preference, ([], None)) if Path(model).name.startswith("uk_UA-mykyta-") else ([], None)
-                await run_process(os.getenv("PIPER_BIN", "piper"), "--model", model, "--output_file", wav, *options, data=text[:3700].encode("utf-8"))
+                await run_process(os.getenv("PIPER_BIN", "piper"), "--model", model, "--output_file", wav, *options, data=normalize_ukrainian_tts(text[:3700]).encode("utf-8"))
                 if preference == "deep" and audio_filter:
                     import wave
                     with wave.open(wav, "rb") as stream:
