@@ -213,17 +213,29 @@ function viewAdmin(root) {
         if (row.uid) {
           entry.append(node('p', [row.name, row.username ? '@' + row.username : null].filter(Boolean).join(' · ') || 'Користувач Telegram'));
           entry.append(node('p', 'ID ' + row.uid));
-          const profile = node('a', 'Відкрити профіль', 'action');
-          profile.href = 'tg://user?id=' + encodeURIComponent(row.uid);
-          if (row.username && /^[a-zA-Z0-9_]+$/.test(row.username)) {
-            profile.href = 'https://t.me/' + row.username;
-            profile.onclick = event => { event.preventDefault(); openTelegram(profile.href); };
-          }
+          const username = row.username && /^[a-zA-Z0-9_]+$/.test(row.username) ? row.username : null;
+          const profile = action(username ? 'Відкрити профіль' : 'Посилання на профіль у ЛС', async event => {
+            if (username) return openTelegram('https://t.me/' + username);
+            const button = event.currentTarget;
+            button.disabled = true;
+            try {
+              const result = await requestData({adminProfileId:row.uid});
+              openTelegram(result.url);
+            } catch (err) {
+              notice(err.message, true);
+            } finally {
+              button.disabled = false;
+            }
+          });
           entry.append(profile, quota('Особистий баланс', row.personal));
         } else {
           entry.append(node('p', 'Одержувача не було записано під час нарахування.'));
         }
-        if (row.group) entry.append(node('p', 'ID групи ' + row.groupId), quota('Баланс групи', row.group));
+        if (row.group) {
+          entry.append(node('h3', row.groupName || 'Група Telegram'),
+            node('p', [row.groupUsername ? '@' + row.groupUsername : null, 'ID групи ' + row.groupId].filter(Boolean).join(' · ')),
+            quota('Баланс групи', row.group));
+        }
         list.append(entry);
       }
       offset = result.nextOffset;
