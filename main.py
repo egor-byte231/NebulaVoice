@@ -4577,46 +4577,130 @@ def tts_benchmark_text(word_count):
         'Цей тест допомагає оцінити навантаження на процесор і чергу завдань.').split()
     return ' '.join(corpus[i%len(corpus)] for i in range(word_count))
 
-async def run_tts_load_test(message,config):
+async def run_tts_load_test(message, config):
+    """Live Piper load test with bounded workers and cancellable progress."""
     from azure_tts import benchmark_synthesis
-    count=config['count']
-    words=config['tts_words']
-    routes=config['routes'] if config['mode']=='selected' else ['serhiy']
-    if not routes: return await message.answer('Не вибрано голосів.')
-    start=time.monotonic()
-    active=peak=0
-    results=[]
-    async def job(i):
-        nonlocal active,peak
-        if not testing_enabled(): return (False,'Режим тестування вимкнено',0)
-        voice=routes[i%len(routes)]
-        active+=1
-        peak=max(peak,active)
+
+    count = config['count']
+    words = config['tts_words']
+    routes = config['routes'] if config['mode'] == 'selected' else ['serhiy']
+    if not routes:
+        return await message.answer('Не вибрано голосів.')
+
+    start = time.monotonic()
+    completed = successful = failed = active = 0
+    elapsed_total = 0.0
+    details = []
+    queue = asyncio.Queue()
+    for i in range(count):
+        queue.put_nowait(i)
+
+    controls = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text='🛑 Скасувати тест', callback_data='owner:load:cancel')]
+    ])
+    progress = await message.answer('🔊 Підготовка тесту Piper…', reply_markup=controls)
+    last_report = None
+    workers = []
+
+    def report(final=False, cancelled=False, timed_out=False):
+        waiting = queue.qsize()
+        average = elapsed_total / successful if successful else 0
+        state = ('🛑 Скасовано' if cancelled else
+                 '⌛ Час тесту вичерпано' if timed_out else
+                 '✅ Завершено' if final else '⏳ Виконується')
+        return (
+            f'🔊 Тест навантаження Piper — {state}\n'
+            f'Голос(и): {", ".join(routes)}\n'
+            f'Слів на генерацію: {words}\n'
+            f'Прогрес: {completed}/{count} ({completed * 100 // count}%)\n'
+            f'Успішно: {successful} · Помилок: {failed}\n'
+            f'Активних: {active} · Очікують: {waiting}\n'
+            f'Середній час синтезу: {average:.2f} с\n'
+            f'Минуло: {time.monotonic() - start:.1f} с'
+        )
+
+    async def publish(final=False, cancelled=False, timed_out=False):
+        nonlocal last_report
+        body = report(final, cancelled, timed_out)
+        if body == last_report:
+            return
         try:
-            result=await benchmark_synthesis(tts_benchmark_text(words),voice)
-            return (True,f'#{i+1} {voice}: OK · черга {result["wait"]:.2f} с · синтез {result["elapsed"]:.2f} с · аудіо {result["seconds"]:.1f} с · {result["bytes"]} байт',result['elapsed'])
-        except Exception as e:
-            return (False,f'#{i+1} {voice}: {type(e).__name__}',0)
-        finally:
-            active-=1
-    tasks=[asyncio.create_task(job(i)) for i in range(count)]
+            await progress.edit_text(
+                body, reply_markup=None if final else controls
+            )
+            last_report = body
+        except TelegramBadRequest as exc:
+            if 'message is not modified' not in str(exc).lower():
+                logging.warning('Piper test progress update: %s', exc)
+        except Exception as exc:
+            logging.warning('Piper test progress update: %s', exc)
+
+    async def worker():
+        nonlocal completed, successful, failed, active, elapsed_total
+        while not queue.empty():
+            if not testing_enabled():
+                return
+            try:
+                i = queue.get_nowait()
+            except asyncio.QueueEmpty:
+                return
+            voice = routes[i % len(routes)]
+            active += 1
+            try:
+                result = await benchmark_synthesis(tts_benchmark_text(words), voice)
+                successful += 1
+                elapsed_total += result['elapsed']
+                details.append(
+                    f'#{i + 1} {voice}: OK · очікування {result["wait"]:.2f} с · '
+                    f'синтез {result["elapsed"]:.2f} с · '
+                    f'аудіо {result["seconds"]:.1f} с'
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                failed += 1
+                details.append(f'#{i + 1} {voice}: {type(exc).__name__}')
+            finally:
+                active -= 1
+                completed += 1
+                queue.task_done()
+
+    cancelled = timed_out = False
     try:
-        done,pending=await asyncio.wait(tasks,timeout=300)
-        results=[t.result() for t in done if not t.cancelled() and t.exception() is None]
+        # Never launch more than four benchmark jobs at once.
+        workers = [asyncio.create_task(worker()) for _ in range(min(4, count))]
+        deadline = start + 300
+        await publish()
+        while any(not worker.done() for worker in workers):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                timed_out = True
+                break
+            await asyncio.wait(workers, timeout=min(5, remaining),
+                               return_when=asyncio.FIRST_COMPLETED)
+            await publish()
+        if timed_out:
+            for worker_task in workers:
+                if not worker_task.done():
+                    worker_task.cancel()
+        await asyncio.gather(*workers, return_exceptions=True)
+    except asyncio.CancelledError:
+        cancelled = True
+        for worker_task in workers:
+            worker_task.cancel()
+        await asyncio.gather(*workers, return_exceptions=True)
     finally:
-        for t in tasks:
-            if not t.done(): t.cancel()
-        await asyncio.gather(*tasks,return_exceptions=True)
-    lines=[f'🔊 Piper: {sum(r[0] for r in results)}/{count} успішно · {words} слів на генерацію · час {time.monotonic()-start:.1f} с',
-        'Слоти синтезу: 4 · черга до 32 · без надсилання в Telegram',
-        f'Завершено: {len(results)} · без результату: {count-len(results)}']+[r[1] for r in results]
-    chunk=''
-    for line in lines:
-        if len(chunk)+len(line)>3500:
-            await message.answer(chunk,parse_mode=None)
-            chunk=''
-        chunk+=line+'\n'
-    if chunk: await message.answer(chunk,parse_mode=None)
+        await publish(final=True, cancelled=cancelled, timed_out=timed_out)
+        if details:
+            lines = sorted(details, key=lambda x: int(x.split(' ', 1)[0][1:]))
+            chunk = ''
+            for line in lines:
+                if len(chunk) + len(line) > 3500:
+                    await message.answer(chunk)
+                    chunk = ''
+                chunk += line + '\n'
+            if chunk:
+                await message.answer(chunk)
 
 TTS_VOICES={'natural':'🌌 Nebula Natural','deep':'🌌 Nebula Deep','soft':'🌌 Nebula Soft','serhiy':'🎙 Сергій (High)','mykyta':'Микита (оригінал)','oleksa':'Олекса','lada':'Лада','tetiana':'Тетяна','ukrainian_tts':'Ukrainian TTS'}
 
