@@ -4282,15 +4282,15 @@ async def generate_text(m,question,context='',group=False,history_context='',dia
             continue
         if group and not group_enabled(chat): return
         keyboard=miniapp.keyboard(m)
+        if m.from_user.id==OWNER:
+            rows=[[InlineKeyboardButton(text='🔊 Озвучити',callback_data='tts:answer')]]
+            if keyboard: rows.extend(keyboard.inline_keyboard)
+            keyboard=InlineKeyboardMarkup(inline_keyboard=rows)
         sent=await m.reply(html.escape(answer[:3700])+('\n\n<blockquote>'+html.escape(DISCLAIMER)+'</blockquote>' if development_enabled() else ''),parse_mode='HTML',reply_markup=keyboard)
         if m.from_user.id==OWNER:
             db.execute('INSERT OR REPLACE INTO tts_answers VALUES (?,?,?,?,?)',(chat,sent.message_id,m.message_id,answer[:3700],int(time.time())))
             db.execute('DELETE FROM tts_answers WHERE created<?',(int(time.time())-7*86400,))
             db.commit()
-            rows=[[InlineKeyboardButton(text='🔊 Озвучити',callback_data='tts:answer')]]
-            if keyboard: rows.extend(keyboard.inline_keyboard)
-            try: await sent.edit_reply_markup(reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
-            except Exception: logging.warning('TTS button update failed')
         visible_tokens=0
         notify_limit=False
         if not local:
