@@ -14,6 +14,10 @@ from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 
+PERSONAL_BONUS = 4000
+GROUP_BONUS = 10000
+
+
 class MiniApp:
     def __init__(self, bot, query, daily_usage, daily_limit):
         self.bot = bot
@@ -120,14 +124,23 @@ class MiniApp:
             return user_id, False, int(referral[1])
         return user_id, False, None
 
-    async def is_group_member(self, chat, user_id):
+    async def group_member(self, chat, user_id):
         try:
-            member = await self.bot.get_chat_member(chat, user_id)
+            return await self.bot.get_chat_member(chat, user_id)
         except (TelegramBadRequest, TelegramForbiddenError):
-            return False
-        return member.status in ('member', 'administrator', 'creator') or (
-            member.status == 'restricted' and member.is_member
+            return None
+
+    async def is_group_member(self, chat, user_id):
+        member = await self.group_member(chat, user_id)
+        return member is not None and (
+            member.status in ('member', 'administrator', 'creator') or (
+                member.status == 'restricted' and member.is_member
+            )
         )
+
+    async def is_group_owner(self, chat, user_id):
+        member = await self.group_member(chat, user_id)
+        return member is not None and member.status == 'creator'
 
     def bonus_link(self, chat, user_id):
         context = f'b{user_id}_g{abs(chat) if chat < 0 else 0}'
@@ -142,14 +155,23 @@ class MiniApp:
             return 'Це посилання на бонус недійсне. Відкрий Mini App і натисни «Написати боту».'
         user_id = message.from_user.id
         chat = -int(grant[2]) if grant[2] != '0' else user_id
-        if chat < 0 and not await self.is_group_member(chat, user_id):
-            return 'Не вдалося підтвердити участь у групі. Відкрий Mini App у цій групі й спробуй знову.'
-        amount = 2000 if chat < 0 else 10000
-        rows = await self.query('INSERT OR IGNORE INTO mini_bonus VALUES (?,?) RETURNING balance', (chat, amount))
-        if not rows:
+        grants = [(user_id, PERSONAL_BONUS)]
+        if chat < 0 and await self.is_group_owner(chat, user_id):
+            grants.append((chat, GROUP_BONUS))
+        values = ','.join('(?,?)' for _ in grants)
+        rows = await self.query(
+            f'INSERT OR IGNORE INTO mini_bonus(chat,balance) VALUES {values} RETURNING chat,balance',
+            tuple(value for grant in grants for value in grant),
+        )
+        credited = {row['chat']: row['balance'] for row in rows}
+        lines = []
+        for target, label in ((user_id, 'особистий баланс'), (chat, 'баланс групи') if chat < 0 else (None, '')):
+            if target in credited:
+                amount = f"{credited[target]:,}".replace(',', ' ')
+                lines.append(f'{amount} токенів на {label}.')
+        if not lines:
             return 'Цей одноразовий бонус уже нараховано.'
-        target = ' на баланс групи' if chat < 0 else ' на особистий баланс'
-        return f'🎁 Ви отримали бонус · {amount:,} токенів{target}.'.replace(',', ' ')
+        return '🎁 Ви отримали бонус!\n' + '\n'.join(lines)
 
     async def balance(self, chat):
         rows = await self.query('SELECT balance FROM mini_bonus WHERE chat=?', (chat,))
@@ -253,6 +275,14 @@ class MiniApp:
                              (language, style, int(notifications), uid))
         profile = (await self.query('SELECT language,style,notifications,write_allowed FROM mini_users WHERE id=?', (uid,)))[0]
         bonus = await self.query('SELECT chat,balance FROM mini_bonus WHERE chat IN (?,?)', (uid, chat))
+        balances = {str(row['chat']): row['balance'] for row in bonus}
+        group_bonus_available = (
+            claim and chat < 0 and str(chat) not in balances and await self.is_group_owner(chat, uid)
+        )
+        personal_bonus_available = claim and str(uid) not in balances
+        bonus_url = self.bonus_link(chat if group_bonus_available else uid, uid) if (
+            group_bonus_available or personal_bonus_available
+        ) else None
         if payload.get('writePromptFinished') is True:
             await self.query('INSERT OR IGNORE INTO mini_write_prompt_results VALUES (?)', (uid,))
         prompt_write_access = False
@@ -314,9 +344,11 @@ class MiniApp:
         referrals = await self.query('SELECT COUNT(*) AS count FROM mini_users WHERE referred_by=?', (uid,))
         return web.json_response({
             'name': user.get('first_name') or 'друже',
-            'settings': profile, 'bonus': {str(row['chat']): row['balance'] for row in bonus},
+            'settings': profile, 'bonus': balances,
             'uid': str(uid), 'chat': str(chat), 'history': history, 'stats': stats,
-            'quotas': quotas, 'bonusStartUrl': self.bonus_link(chat, uid) if claim else None, 'promptWriteAccess': prompt_write_access,
+            'quotas': quotas, 'bonusStartUrl': bonus_url,
+            'bonusOffer': {'personal': PERSONAL_BONUS if personal_bonus_available else 0,
+                           'group': GROUP_BONUS if group_bonus_available else 0}, 'promptWriteAccess': prompt_write_access,
             'dailyUsed': self.daily_usage(chat), 'dailyLimit': self.daily_limit(chat),
             'referrals': referrals[0]['count'], 'referralUrl': self.link(f'r{uid}'),
             'addUrl': f'https://t.me/{self.username}?startgroup=nebula',
