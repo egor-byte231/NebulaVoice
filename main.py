@@ -4541,7 +4541,7 @@ async def local_tts_answer(c:CallbackQuery):
         await c.answer('Озвучую…')
         await speak(request,row[1])
     except Exception as e:
-        logging.warning('Local TTS failed: %s',type(e).__name__)
+        logging.exception('Local TTS failed')
         await request.reply('Озвучування тимчасово недоступне.')
     finally:
         tts_inflight.discard(key)
@@ -4687,6 +4687,8 @@ async def d1_initialize(session):
                 source.backup(db)
             finally: source.close()
         # Restoring a legacy snapshot can remove Azure-only schema.
+        db.execute('CREATE TABLE IF NOT EXISTS tts_answers (chat INTEGER NOT NULL, answer_id INTEGER NOT NULL, request_id INTEGER NOT NULL, answer TEXT NOT NULL, created INTEGER NOT NULL, PRIMARY KEY(chat,answer_id))')
+        db.commit()
         RuntimeSettings(db)
         ensure_local_qwen_control()
         db.execute('CREATE TABLE IF NOT EXISTS cloud_completed (id TEXT PRIMARY KEY)')
