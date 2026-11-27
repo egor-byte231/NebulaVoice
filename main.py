@@ -51,7 +51,7 @@ db.execute('CREATE TABLE IF NOT EXISTS overview_users (day TEXT, scope TEXT, use
 db.commit()
 
 def overview_user(m):
-    if not m.from_user or m.from_user.is_bot: return
+    if not m.from_user or m.from_user.is_bot or m.sender_chat: return
     scope='private' if m.chat.type=='private' else 'groups'
     day=datetime.datetime.now(datetime.timezone.utc).date().isoformat()
     db.execute('INSERT OR IGNORE INTO overview_users VALUES (?,?,?)',(day,scope,m.from_user.id))
@@ -87,6 +87,18 @@ def overview_report(scope):
     periods=[('Сьогодні',today,today),('Вчора',today-day,today-day),('Минулий тиждень',week-7*day,week-day),('Минулий місяць',previous_month.replace(day=1),previous_month),('За весь час',datetime.date(1970,1,1),today)]
     titles={'groups':'👥 Статистика в групах','private':'👤 Статистика в ЛС','all':'🌐 Загальна статистика'}
     lines=['<b>'+titles[scope]+'</b>','Періоди за UTC']
+    scope_filter='' if scope=='all' else ' WHERE scope=?'
+    scope_args=() if scope=='all' else (scope,)
+    first_seen='SELECT user_id, MIN(day) AS first_day FROM overview_users'+scope_filter+' GROUP BY user_id'
+    total=db.execute('SELECT COUNT(*) FROM ('+first_seen+')',scope_args).fetchone()[0]
+    lines.extend(['','<b>👥 Аудиторія</b>',f'Унікальні за весь час: {total}'])
+    for label,days in [('DAU',1),('WAU',7),('MAU',30)]:
+        start=(today-(days-1)*day).isoformat()
+        end=today.isoformat()
+        active=db.execute('SELECT COUNT(DISTINCT user_id) FROM overview_users WHERE day BETWEEN ? AND ?'+(' AND scope=?' if scope!='all' else ''),(start,end)+scope_args).fetchone()[0]
+        new=db.execute('SELECT COUNT(*) FROM ('+first_seen+') WHERE first_day BETWEEN ? AND ?',scope_args+(start,end)).fetchone()[0]
+        lines.append(f'{label} ({days} дн.): {active} | нові: {new}')
+    lines.append('Календарні дні UTC, включно із сьогодні. Нові — вперше зафіксовані у вибраному розділі. Історія обмежена наявними записами.')
     for label,start,end in periods:
         args=(start.isoformat(),end.isoformat())
         sql='SELECT COALESCE(SUM(voices),0),COALESCE(SUM(circles),0),COALESCE(SUM(requests),0) FROM overview_daily WHERE day BETWEEN ? AND ?'
@@ -3012,6 +3024,7 @@ async def voice(m:Message):
     try:
         d['queue']=waiting.qsize()+1; d['active_at_enqueue']=len(active_jobs); d['queued']=time.time(); diag_save(d)
         waiting.put_nowait((m,status))
+        overview_user(m)
     except asyncio.QueueFull:
         await audio_queue_remove(m)
         audio_diag_pending.pop((m.chat.id,m.message_id),None); d['state']='черга заповнена'; diag_save(d)
@@ -4539,6 +4552,7 @@ async def text_message(m:Message):
     if video_link:
         logging.info('Video: link recognized, host=%s, group=%s',p.hostname,group)
         status=await m.reply('⏳ Завантажую медіа…')
+        overview_user(m)
         return await azure_video(m,status,media_url)
     if group and not group_enabled(chat): return
     if raw.startswith('/'): return
