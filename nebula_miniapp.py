@@ -113,18 +113,43 @@ class MiniApp:
         group = re.fullmatch(r'g([1-9][0-9]{0,15})', context)
         if group and chat_type in ('group', 'supergroup') and fields.get('chat_instance'):
             chat = -int(group[1])
-            try:
-                member = await self.bot.get_chat_member(chat, user_id)
-            except (TelegramBadRequest, TelegramForbiddenError):
-                return user_id, False, None
-            if member.status in ('member', 'administrator', 'creator') or (
-                member.status == 'restricted' and member.is_member
-            ):
+            if await self.is_group_member(chat, user_id):
                 return chat, True, None
         referral = re.fullmatch(r'r([1-9][0-9]{0,15})', context)
         if referral and int(referral[1]) != user_id:
             return user_id, False, int(referral[1])
         return user_id, False, None
+
+    async def is_group_member(self, chat, user_id):
+        try:
+            member = await self.bot.get_chat_member(chat, user_id)
+        except (TelegramBadRequest, TelegramForbiddenError):
+            return False
+        return member.status in ('member', 'administrator', 'creator') or (
+            member.status == 'restricted' and member.is_member
+        )
+
+    def bonus_link(self, chat, user_id):
+        context = f'b{user_id}_g{abs(chat) if chat < 0 else 0}'
+        return f'https://t.me/{self.username}?start={context}_{self.sign(context)}'
+
+    async def redeem_start(self, message, parameter):
+        context, _, signature = parameter.rpartition('_')
+        grant = re.fullmatch(r'b([1-9][0-9]{0,15})_g(0|[1-9][0-9]{0,15})', context)
+        if not self.username or not grant or not message.from_user or message.chat.type != 'private' or (
+            not hmac.compare_digest(self.sign(context), signature) or int(grant[1]) != message.from_user.id
+        ):
+            return 'Це посилання на бонус недійсне. Відкрий Mini App і натисни «Написати боту».'
+        user_id = message.from_user.id
+        chat = -int(grant[2]) if grant[2] != '0' else user_id
+        if chat < 0 and not await self.is_group_member(chat, user_id):
+            return 'Не вдалося підтвердити участь у групі. Відкрий Mini App у цій групі й спробуй знову.'
+        amount = 2000 if chat < 0 else 10000
+        rows = await self.query('INSERT OR IGNORE INTO mini_bonus VALUES (?,?) RETURNING balance', (chat, amount))
+        if not rows:
+            return 'Цей одноразовий бонус уже нараховано.'
+        target = ' на баланс групи' if chat < 0 else ' на особистий баланс'
+        return f'🎁 Ви отримали бонус · {amount:,} токенів{target}.'.replace(',', ' ')
 
     async def balance(self, chat):
         rows = await self.query('SELECT balance FROM mini_bonus WHERE chat=?', (chat,))
@@ -217,10 +242,6 @@ class MiniApp:
         )
         if user.get('allows_write_to_pm') is True:
             await self.query('UPDATE mini_users SET write_allowed=1 WHERE id=?', (uid,))
-        if payload.get('claimBonus') is True:
-            if not claim:
-                raise web.HTTPForbidden()
-            await self.query('INSERT OR IGNORE INTO mini_bonus VALUES (?,?)', (chat, 10000 if chat > 0 else 2000))
         settings = payload.get('settings')
         if settings is not None:
             if not isinstance(settings, dict):
@@ -295,7 +316,7 @@ class MiniApp:
             'name': user.get('first_name') or 'друже',
             'settings': profile, 'bonus': {str(row['chat']): row['balance'] for row in bonus},
             'uid': str(uid), 'chat': str(chat), 'history': history, 'stats': stats,
-            'quotas': quotas, 'canClaimBonus': claim, 'promptWriteAccess': prompt_write_access,
+            'quotas': quotas, 'bonusStartUrl': self.bonus_link(chat, uid) if claim else None, 'promptWriteAccess': prompt_write_access,
             'dailyUsed': self.daily_usage(chat), 'dailyLimit': self.daily_limit(chat),
             'referrals': referrals[0]['count'], 'referralUrl': self.link(f'r{uid}'),
             'addUrl': f'https://t.me/{self.username}?startgroup=nebula',
