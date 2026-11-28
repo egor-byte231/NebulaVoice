@@ -4118,7 +4118,7 @@ TEXT_ROUTES=[
  ('xKiro','XKIRO_API_KEY','https://api.xkiro.com/v1/chat/completions','cohere/command-a'),
  ('Vikasit','VIKASIT_API_KEY','https://api.vikasit.ai/v1/chat/completions','vikasit-nova'),
  ('Vireonix','VIREONIX_ENABLED','https://vireonix.ai/v1/chat/completions','auto'),
- ('SenseNova','SENSENOVA_API_KEY','https://token.sensenova.cn/v1/chat/completions','sensenova-6.8-flash-lite'),
+ ('SenseNova','SENSENOVA_API_KEY','https://token.sensenova.ai/v1/chat/completions','sensenova-6.8-flash-lite'),
 ]
 db.execute('CREATE TABLE IF NOT EXISTS text_usage (day TEXT, route TEXT, tokens INTEGER, attempts INTEGER, PRIMARY KEY(day,route))')
 db.commit()
@@ -4135,6 +4135,7 @@ def text_headers(name,key):
 
 from contextlib import asynccontextmanager
 vireonix_slots=asyncio.Semaphore(6)
+sensenova_slots=asyncio.Semaphore(6)
 vireonix_active=0
 vireonix_waiting=0
 def ensure_vireonix_stats():
@@ -4190,6 +4191,10 @@ async def text_post(session,name,url,**kwargs):
                 db.commit()
             except Exception:
                 logging.exception('Vireonix statistics write failed')
+    elif name=='SenseNova':
+        async with sensenova_slots:
+            async with session.post(url,**kwargs) as response:
+                yield response
     else:
         async with session.post(url,**kwargs) as response:
             yield response
@@ -5050,9 +5055,9 @@ async def generate_text(m,question,context='',group=False,history_context='',dia
         local=name=='Local Qwen'
         key,url,model=('local','http://127.0.0.1:11434/api/chat','qwen3.5:2b') if local else text_config(route)
         if not key or not url or not model or (not local and not url.startswith('https://')) or blocked('text:'+name)>time.time(): continue
-        if name=='Vireonix' and vireonix_slots.locked(): continue
+        if (name=='Vireonix' and vireonix_slots.locked()) or (name=='SenseNova' and sensenova_slots.locked()): continue
         if not local and not await text_api_pace(name): continue
-        if name=='Vireonix' and vireonix_slots.locked(): continue
+        if (name=='Vireonix' and vireonix_slots.locked()) or (name=='SenseNova' and sensenova_slots.locked()): continue
         day=text_day()
         used=group_used(chat,day)
         daily_limit=mini_daily_limit(chat)
