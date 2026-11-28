@@ -4176,6 +4176,37 @@ def ensure_vireonix_stats():
 
 ensure_vireonix_stats()
 
+db.execute('CREATE TABLE IF NOT EXISTS text_performance (day TEXT, route TEXT, ok INTEGER, errors INTEGER, ms REAL, PRIMARY KEY(day,route))')
+db.commit()
+
+@asynccontextmanager
+async def measured_text_post(session,name,url,**kwargs):
+    day=text_day()
+    started=time.monotonic()
+    ok=False
+    cancelled=False
+    try:
+        async with session.post(url,**kwargs) as response:
+            if response.status==200:
+                data=await response.json()
+                choices=data.get('choices') or []
+                content=(choices[0].get('message') or {}).get('content') if choices else None
+                ok=bool(isinstance(content,str) and content.strip() and choices[0].get('finish_reason') not in ('length','max_tokens'))
+            yield response
+    except asyncio.CancelledError:
+        cancelled=True
+        raise
+    except Exception:
+        ok=False
+        raise
+    finally:
+        if not cancelled:
+            try:
+                db.execute('INSERT INTO text_performance VALUES (?,?,?,?,?) ON CONFLICT(day,route) DO UPDATE SET ok=ok+excluded.ok,errors=errors+excluded.errors,ms=ms+excluded.ms',(day,name,int(ok),int(not ok),(time.monotonic()-started)*1000 if ok else 0))
+                db.commit()
+            except Exception:
+                logging.exception('Text performance statistics write failed')
+
 @asynccontextmanager
 async def text_post(session,name,url,**kwargs):
     if name=='Vireonix':
@@ -4190,7 +4221,7 @@ async def text_post(session,name,url,**kwargs):
         status='cancelled'
         inp=out=None
         try:
-            async with session.post(url,**kwargs) as response:
+            async with measured_text_post(session,name,url,**kwargs) as response:
                 status=str(response.status)
                 if response.status==200:
                     data=await response.json()
@@ -4221,10 +4252,10 @@ async def text_post(session,name,url,**kwargs):
     elif name=='SenseNova':
         async with sensenova_slots:
             await sensenova_rate_wait()
-            async with session.post(url,**kwargs) as response:
+            async with measured_text_post(session,name,url,**kwargs) as response:
                 yield response
     else:
-        async with session.post(url,**kwargs) as response:
+        async with measured_text_post(session,name,url,**kwargs) as response:
             yield response
 def text_day():
     return datetime.datetime.now(datetime.timezone.utc).date().isoformat()
@@ -4517,9 +4548,9 @@ async def groups_page(c:CallbackQuery):
         await bot.send_message(c.message.chat.id,'⚠️ Помилка сторінки груп: '+type(e).__name__)
 
 
-def text_stats_menu(page=0,total=3):
-    page=max(0,min(2,page))
-    rows=[[InlineKeyboardButton(text='◀️',callback_data='owner:ai:'+str(max(0,page-1))),InlineKeyboardButton(text=f'{page+1}/3 · 🔄',callback_data='owner:ai:'+str(page)),InlineKeyboardButton(text='▶️',callback_data='owner:ai:'+str(min(2,page+1)))],
+def text_stats_menu(page=0,total=5):
+    page=max(0,min(total-1,page))
+    rows=[[InlineKeyboardButton(text='◀️',callback_data='owner:ai:'+str(max(0,page-1))),InlineKeyboardButton(text=f'{page+1}/{total} · 🔄',callback_data='owner:ai:'+str(page)),InlineKeyboardButton(text='▶️',callback_data='owner:ai:'+str(min(total-1,page+1)))],
           [InlineKeyboardButton(text='📊 Vireonix',callback_data='owner:vireonix'),InlineKeyboardButton(text='🖥 Qwen',callback_data='localqwen:show')],
           [InlineKeyboardButton(text='⬅️ Назад',callback_data='owner:back')]]
     return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -4533,10 +4564,10 @@ def text_report_pages():
     marker=' <b>'+html.escape(TEXT_ROUTES[0][0])+' ·'
     first='\n<b>'+html.escape(TEXT_ROUTES[0][0])+' ·'
     if first in intro: intro=intro.split(first,1)[0].rstrip()
-    pages=[intro.replace('Статистика текстового ШІ','Статистика ШІ · 1/3',1)]
+    pages=[intro.replace('Статистика текстового ШІ','Статистика ШІ · 1/5',1)]
     groups=[[r for r in TEXT_ROUTES if r[0].startswith('Groq ')],[r for r in TEXT_ROUTES if not r[0].startswith('Groq ')]]
     for i,routes in enumerate(groups,2):
-        lines=[f'<b>🤖 Провайдери · {i}/3</b>',f'Дата: {text_day()} UTC','API | Спроби | Токени | Залишок']
+        lines=[f'<b>🤖 Провайдери · {i}/5</b>',f'Дата: {text_day()} UTC','API | Спроби | Токени | Залишок']
         for route in routes:
             name=route[0]
             key,url,model=text_config(route)
@@ -4547,6 +4578,17 @@ def text_report_pages():
             lines.append(html.escape(f'{status} {name} | {a} | {t} | {left}'))
         lines.append('🟢 налаштовано · 🟠 пауза · ⚪ вимкнено')
         lines.append('Залишки Groq — оцінка; облік включає тести.')
+        pages.append('\n'.join(lines))
+    perf={name:(ok,errors,ms) for name,ok,errors,ms in db.execute('SELECT route,ok,errors,ms FROM text_performance WHERE day=?',(text_day(),))}
+    for i,routes in enumerate(groups,4):
+        lines=[f'<b>📈 Продуктивність API · {i}/5</b>',f'Дата: {text_day()} UTC','API | Успіх | Час | Помилки']
+        for route in routes:
+            name=route[0]
+            ok,errors,ms=perf.get(name,(0,0,0))
+            rate=f'{100*ok/(ok+errors):.1f}%' if ok+errors else '—'
+            latency=f'{ms/ok:.0f} мс' if ok else '—'
+            lines.append(html.escape(f'{name} | {rate} | {latency} | {errors}'))
+        lines.append('Лише нові виміряні запити, включно з тестами. Час — середній для успішних API-відповідей; скасування не враховано.')
         pages.append('\n'.join(lines))
     return pages
 
