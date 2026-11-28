@@ -4131,7 +4131,7 @@ TEXT_ROUTES=[
  ('xKiro','XKIRO_API_KEY','https://api.xkiro.com/v1/chat/completions','cohere/command-a'),
  ('Vikasit','VIKASIT_API_KEY','https://api.vikasit.ai/v1/chat/completions','vikasit-nova'),
  ('Vireonix','VIREONIX_ENABLED','https://vireonix.ai/v1/chat/completions','auto'),
- ('SenseNova','SENSENOVA_API_KEY','https://token.sensenova.ai/v1/chat/completions','sensenova-6.8-flash-lite'),
+ ('SenseNova','SENSENOVA_API_KEY','https://token.sensenova.ai/v1/chat/completions','sensenova-6.8-flash'),
 ]
 db.execute('CREATE TABLE IF NOT EXISTS text_usage (day TEXT, route TEXT, tokens INTEGER, attempts INTEGER, PRIMARY KEY(day,route))')
 db.commit()
@@ -4142,6 +4142,8 @@ def text_config(route):
     if name=='Vireonix':
         return ('no-auth' if os.getenv('VIREONIX_ENABLED','0')=='1' else None),url,model
     prefix=key.removesuffix('_API_KEY')
+    if name=='SenseNova':
+        return os.getenv(key),os.getenv(prefix+'_TEXT_URL',url),model
     return os.getenv(key),os.getenv(prefix+'_TEXT_URL',url),model if name.endswith((' Qwen',' ALLAM')) else os.getenv(prefix+'_TEXT_MODEL',model)
 def text_headers(name,key):
     return {} if name=='Vireonix' else {'Authorization':'Bearer '+key}
