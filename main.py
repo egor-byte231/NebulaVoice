@@ -3386,10 +3386,10 @@ async def run_load_test(message,config):
     for line in lines:
         line=line[:3400]
         if len(chunk)+len(line)>3500:
-            await message.answer(chunk,parse_mode=None)
+            await rich_stats_send(message,chunk,parse_mode=None)
             chunk=''
         chunk+=line+'\n'
-    if chunk: await message.answer(chunk,parse_mode=None)
+    if chunk: await rich_stats_send(message,chunk,parse_mode=None)
 
 audio_load_wait=None
 load_count_wait=False
@@ -3674,7 +3674,7 @@ async def owner_action(c:CallbackQuery):
     if c.data.startswith('owner:overview:'):
         scope=c.data.rsplit(':',1)[-1]
         if scope not in ('groups','private','all','pm','group_direct','webapp','combined','automatic'): return
-        try: await rich_stats_send(c.message,overview_report(scope),edit=True,parse_mode='HTML',reply_markup=overview_menu(scope))
+        try: await rich_stats_send(c.message,overview_report(scope),edit=True,extra_html=activity_chart_html(scope),parse_mode='HTML',reply_markup=overview_menu(scope))
         except Exception as e:
             if 'message is not modified' not in str(e).lower(): raise
         return
@@ -4255,6 +4255,25 @@ async def vireonix_status(m:Message):
     await rich_stats_send(m,await vireonix_report(),parse_mode=None,reply_markup=vireonix_menu())
 
 
+
+def activity_chart_html(scope):
+    today=datetime.datetime.now(datetime.timezone.utc).date()
+    start=(today-datetime.timedelta(days=6)).isoformat()
+    if scope in ('groups','private','all'):
+        rows=db.execute('SELECT day,COUNT(DISTINCT user_id) FROM overview_users WHERE day>=?'+(' AND scope=?' if scope!='all' else '')+' GROUP BY day',(start,)+((scope,) if scope!='all' else ())).fetchall()
+    else:
+        kinds=('pm','group_direct','webapp') if scope=='combined' else (scope,)
+        rows=db.execute('SELECT day,COUNT(DISTINCT user_id) FROM overview_activity WHERE day>=? AND kind IN ('+','.join('?' for _ in kinds)+') GROUP BY day',(start,)+kinds).fetchall()
+    values=dict(rows)
+    peak=max([1]+list(values.values()))
+    lines=[]
+    for i in range(7):
+        day=today-datetime.timedelta(days=6-i)
+        n=values.get(day.isoformat())
+        bar='—' if n is None else '▰'*round(20*n/peak)+' '+str(n)
+        lines.append('<tr><td>'+day.strftime('%d.%m')+'</td><td>'+bar+'</td></tr>')
+    return '<details open><summary>📈 Активність за 7 днів (UTC)</summary><table><tr><th>Дата</th><th>Унікальні користувачі</th></tr>'+''.join(lines)+'</table><p>— немає записів; сьогодні неповний день.</p></details>'
+
 def rich_stats_html(body,parse_mode=None):
     plain=lambda x: html.unescape(re.sub(r'<[^>]+>','',x)) if parse_mode=='HTML' else x
     esc=lambda x: html.escape(plain(x))
@@ -4279,10 +4298,11 @@ def rich_stats_html(body,parse_mode=None):
             flush()
             blocks.append('<p>'+esc(line)+'</p>')
     flush()
-    return ''.join(blocks)
+    return blocks[0]+('<details open><summary>📊 Детальна статистика</summary>'+''.join(blocks[1:])+'</details>' if len(blocks)>1 else '') if blocks else '<p>Немає даних</p>'
 
-async def rich_stats_send(message,body,parse_mode=None,reply_markup=None,edit=False,reply=False):
-    payload={'chat_id':message.chat.id,'rich_message':{'html':rich_stats_html(body,parse_mode)}}
+async def rich_stats_send(message,body,parse_mode=None,reply_markup=None,edit=False,reply=False,extra_html=''):
+    chat_id=message if isinstance(message,int) else message.chat.id
+    payload={'chat_id':chat_id,'rich_message':{'html':rich_stats_html(body,parse_mode)+extra_html}}
     if reply_markup is not None:
         payload['reply_markup']=reply_markup.model_dump(exclude_none=True,mode='json')
     if edit: payload['message_id']=message.message_id
@@ -4299,6 +4319,7 @@ async def rich_stats_send(message,body,parse_mode=None,reply_markup=None,edit=Fa
     kwargs={'parse_mode':parse_mode,'reply_markup':reply_markup}
     if edit: return await message.edit_text(body,**kwargs)
     if reply: return await message.reply(body,**kwargs)
+    if isinstance(message,int): return await bot.send_message(message,body,**kwargs)
     return await message.answer(body,**kwargs)
 
 def text_stats_menu(page=0,total=1):
@@ -4821,7 +4842,7 @@ async def local_qwen_control(c:CallbackQuery):
     await c.answer()
     t,a=db.execute('SELECT COALESCE(SUM(tokens),0),COALESCE(SUM(attempts),0) FROM text_usage WHERE day=? AND route=?',(text_day(),'Local Qwen')).fetchone()
     try:
-        await c.message.edit_text(f'🖥 Qwen3.5 2B — локальний резерв\\nСлоти: {local_qwen_slots.active}/{local_qwen_settings.get("local")}\\nЧерга: {local_qwen_slots.waiting}\\nСпроби сьогодні: {a}\\nТокени (фактичні + оцінені): {t}\\nЛіміт провайдера: відсутній',reply_markup=local_qwen_menu())
+        await rich_stats_send(c.message,f'🖥 Qwen3.5 2B — локальний резерв\\nСлоти: {local_qwen_slots.active}/{local_qwen_settings.get("local")}\\nЧерга: {local_qwen_slots.waiting}\\nСпроби сьогодні: {a}\\nТокени (фактичні + оцінені): {t}\\nЛіміт провайдера: відсутній',edit=True,reply_markup=local_qwen_menu())
     except Exception as e:
         if 'message is not modified' not in str(e).lower(): raise
 
@@ -5628,7 +5649,7 @@ async def send_recovered_report(automatic=False):
     if automatic:
         await d1_query(history_session,'CREATE TABLE IF NOT EXISTS daily_recovery_sent (id INTEGER PRIMARY KEY)')
         if await d1_query(history_session,'SELECT id FROM daily_recovery_sent WHERE id=3'): return
-    await bot.send_message(OWNER,rows[0]['body'],parse_mode='HTML',reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='📢 Опублікувати в групах',callback_data='daily_publish:'+report_id)]]))
+    await rich_stats_send(OWNER,rows[0]['body'],parse_mode='HTML',reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='📢 Опублікувати в групах',callback_data='daily_publish:'+report_id)]]))
     if automatic: await d1_query(history_session,'INSERT OR IGNORE INTO daily_recovery_sent VALUES (3)')
 
 @dp.message(Command('daily_now'),F.chat.type=='private',F.from_user.id==OWNER)
@@ -5642,7 +5663,7 @@ async def daily_now(m:Message):
     body=daily_report_body(day,values).replace('00:00–23:00','00:00–'+now.strftime('%H:%M'))
     report_id=day+'-manual-'+str(int(time.time()))
     await d1_query(history_session,'INSERT INTO daily_reports VALUES (?,?)',(report_id,body))
-    await m.answer(body,parse_mode='HTML',reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='📢 Опублікувати в групах',callback_data='daily_publish:'+report_id)]]))
+    await rich_stats_send(m,body,parse_mode='HTML',reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='📢 Опублікувати в групах',callback_data='daily_publish:'+report_id)]]))
 
 async def milestone_reports():
     totals=db.execute('SELECT COALESCE(SUM(circles),0),COALESCE(SUM(requests),0) FROM overview_daily').fetchone()
@@ -5662,7 +5683,7 @@ async def milestone_reports():
             report_id=f'milestone-{kind}-{threshold}'
             body=f'🏆 <b>Нове досягнення NebulaVoice!</b>\n\nДосягнуто: <b>{threshold} {label}</b> за весь час.\nПоточний загальний показник: <b>{total}</b>'
             await d1_query(history_session,'INSERT OR IGNORE INTO daily_reports VALUES (?,?)',(report_id,body))
-            await bot.send_message(OWNER,body,parse_mode='HTML',reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='📢 Опублікувати в групах',callback_data='daily_publish:'+report_id)]]))
+            await rich_stats_send(OWNER,body,parse_mode='HTML',reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='📢 Опублікувати в групах',callback_data='daily_publish:'+report_id)]]))
             await d1_query(history_session,'INSERT OR IGNORE INTO milestone_sent VALUES (?,?)',(kind,threshold))
 
 async def daily_report_monitor():
@@ -5683,7 +5704,7 @@ async def daily_report_monitor():
                     db.execute('CREATE TABLE IF NOT EXISTS daily_kyiv_stats (day TEXT,key TEXT,value REAL,PRIMARY KEY(day,key))')
                     values=dict(db.execute('SELECT key,value FROM daily_kyiv_stats WHERE day=?',(day,)).fetchall())
                     body=daily_report_body(day,values)
-                    await bot.send_message(OWNER,body,parse_mode='HTML',reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='📢 Опублікувати в групах',callback_data='daily_publish:'+day)]]))
+                    await rich_stats_send(OWNER,body,parse_mode='HTML',reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='📢 Опублікувати в групах',callback_data='daily_publish:'+day)]]))
                     await d1_query(history_session,'INSERT OR IGNORE INTO daily_reports VALUES (?,?)',(day,body))
         except Exception as e:
             logging.warning('Daily report: %s',type(e).__name__)
