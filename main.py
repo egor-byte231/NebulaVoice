@@ -4995,6 +4995,8 @@ async def icebreaker_monitor():
             if not enabled() or not group_enabled(chat):
                 logging.info('Group question skipped: chat=%s bot or AI disabled',chat)
                 continue
+            if group_limit(chat)-group_used(chat)<2000:
+                continue
             local_now=datetime.datetime.now(kyiv)
             start,end,night_limit,_,_=question_schedule()
             bounds=question_night_bounds(local_now,start,end)
@@ -5019,6 +5021,9 @@ async def icebreaker_monitor():
             recent={ICEBREAKER_QUESTION_RENAMES.get(q,q) for q in recent}
             question=random.choice([q for q in icebreaker_questions if q not in recent])
             uid,(name,_)=random.choice(candidates)
+            # Recheck the live daily allowance immediately before sending.
+            if group_limit(chat)-group_used(chat)<2000:
+                continue
             try:
                 sent=await bot.send_message(chat,f'<a href="tg://user?id={uid}">{html.escape(name)}</a>, {html.escape(question)}',parse_mode='HTML')
                 with db:
