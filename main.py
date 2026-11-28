@@ -4118,6 +4118,7 @@ TEXT_ROUTES=[
  ('xKiro','XKIRO_API_KEY','https://api.xkiro.com/v1/chat/completions','cohere/command-a'),
  ('Vikasit','VIKASIT_API_KEY','https://api.vikasit.ai/v1/chat/completions','vikasit-nova'),
  ('Vireonix','VIREONIX_ENABLED','https://vireonix.ai/v1/chat/completions','auto'),
+ ('SenseNova','SENSENOVA_API_KEY','https://token.sensenova.cn/v1/chat/completions','sensenova-6.8-flash-lite'),
 ]
 db.execute('CREATE TABLE IF NOT EXISTS text_usage (day TEXT, route TEXT, tokens INTEGER, attempts INTEGER, PRIMARY KEY(day,route))')
 db.commit()
@@ -5042,7 +5043,7 @@ async def generate_text(m,question,context='',group=False,history_context='',dia
     ordered=text_api_order(routes,m.message_id)
     if simple:
         ordered=sorted(ordered,key=lambda r: 0 if r[0] in ('Groq 1','Groq 2','Groq 1 20B','Groq 2 20B') else 1)
-    ordered=sorted(ordered,key=lambda r: 0 if r[0]=='Vireonix' else 1)
+    ordered=sorted(ordered,key=lambda r: 0 if r[0]=='Vireonix' else 1 if r[0]=='SenseNova' else 2)
     for route in ordered+[("Local Qwen",)]:
         if group and not group_enabled(chat): return
         name=route[0]
