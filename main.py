@@ -5286,7 +5286,7 @@ async def generate_text(m,question,context='',group=False,history_context='',dia
     ordered=text_api_order(routes,m.message_id)
     if simple:
         ordered=sorted(ordered,key=lambda r: 0 if r[0] in ('Groq 1','Groq 2','Groq 1 20B','Groq 2 20B') else 1)
-    ordered=sorted(ordered,key=lambda r: 0 if r[0]=='Vireonix' else 1 if r[0]=='SenseNova' else 2)
+    ordered=sorted(ordered,key=lambda r: 0 if r[0]=='SenseNova' else 1 if r[0]=='Vireonix' else 2)
     for route in ordered+[("Local Qwen",)]:
         if group and not group_enabled(chat): return
         name=route[0]
