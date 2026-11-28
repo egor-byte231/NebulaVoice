@@ -4396,7 +4396,17 @@ async def rich_stats_send(message,body,parse_mode=None,reply_markup=None,edit=Fa
     return await message.answer(body,**kwargs)
 
 
+group_history_import_lock=asyncio.Lock()
+
 async def import_group_history():
+    async with group_history_import_lock:
+        ensure_group_overview()
+        db.execute('CREATE TABLE IF NOT EXISTS group_history_migrations (name TEXT PRIMARY KEY)')
+        db.commit()
+        if db.execute('SELECT 1 FROM group_history_migrations WHERE name=?',('initial_d1_import',)).fetchone(): return 0
+        return await import_group_history_once()
+
+async def import_group_history_once():
     ensure_group_overview()
     async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=25)) as session:
         rows=await d1_query(session,"SELECT chat,date(completed,'unixepoch') AS day,SUM(CASE WHEN kind='audio' THEN 1 ELSE 0 END) AS voices,SUM(CASE WHEN kind='video' THEN 1 ELSE 0 END) AS circles,SUM(CASE WHEN kind='text' THEN 1 ELSE 0 END) AS requests FROM runtime_results WHERE chat<0 AND kind IN ('audio','video','text') GROUP BY chat,date(completed,'unixepoch')")
@@ -4404,6 +4414,7 @@ async def import_group_history():
         for row in rows:
             if not row.get('day'): continue
             db.execute('INSERT INTO group_overview_daily VALUES (?,?,?,?,?) ON CONFLICT(day,chat) DO UPDATE SET voices=MAX(voices,excluded.voices),circles=MAX(circles,excluded.circles),requests=MAX(requests,excluded.requests)',(row['day'],row['chat'],row['voices'],row['circles'],row['requests']))
+        db.execute('INSERT OR IGNORE INTO group_history_migrations VALUES (?)',('initial_d1_import',))
     return len(rows)
 
 async def groups_report(message,page=0,edit=False):
