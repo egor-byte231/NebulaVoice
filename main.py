@@ -4106,6 +4106,7 @@ TEXT_ROUTES=[
  ('Airforce','AIRFORCE_API_KEY','https://api.airforce/v1/chat/completions','gemma3-270m:free'),
  ('DreamPrompting','DREAMPROMPTING_API_KEY','https://dreamprompting.com/api/v1/chat/completions','openai/gpt-oss-120b'),
  ('xKiro','XKIRO_API_KEY','https://api.xkiro.com/v1/chat/completions','cohere/command-a'),
+ ('Vikasit','VIKASIT_API_KEY','https://api.vikasit.ai/v1/chat/completions','vikasit-nova'),
 ]
 db.execute('CREATE TABLE IF NOT EXISTS text_usage (day TEXT, route TEXT, tokens INTEGER, attempts INTEGER, PRIMARY KEY(day,route))')
 db.commit()
