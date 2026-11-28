@@ -5259,13 +5259,48 @@ for canonical, variants in SLANG_ALIASES.items():
             SLANG_TERMS.setdefault(variant.casefold(),SLANG_TERMS[canonical])
 SLANG_PATTERN=re.compile(r'(?<!\w)(?:'+ '|'.join(re.escape(term) for term in sorted(SLANG_TERMS,key=len,reverse=True) if term[0].isalnum())+r')(?!\w)',re.I)
 def slang_hints(value):
+    from difflib import get_close_matches
     value=value.casefold()
-    found={m.group(0):SLANG_TERMS.get(m.group(0).casefold(),'можливий сленг; перевір контекст') for m in SLANG_PATTERN.finditer(value)}
+    normalized=re.sub(r'[^\w\s]', ' ', value)
+    normalized=re.sub(r'\s+', ' ', normalized).strip()
+    normalized=re.sub(r'([^\W\d_])\1{2,}',r'\1',normalized)
+    found={}
+    occupied=[]
+    for m in SLANG_PATTERN.finditer(normalized):
+        found[m.group(0)]=SLANG_TERMS[m.group(0)]
+        occupied.append(m.span())
+    # Conservative typo matching: only long words or multiword phrases,
+    # never guess a short standalone abbreviation.
+    phrases=[t for t in SLANG_TERMS if ' ' in t and len(t)>=8 and all(c.isalnum() or c==' ' for c in t)]
+    words=[t for t in SLANG_TERMS if t.isalpha() and len(t)>=5]
+    tokens=list(re.finditer(r'\w+',normalized))
+    for n in (4,3,2,1):
+        for i in range(len(tokens)-n+1):
+            start,end=tokens[i].start(),tokens[i+n-1].end()
+            candidate=normalized[start:end]
+            if n==1 and len(candidate)<5 or n>1 and len(candidate)<8: continue
+            if any(start>=lo and end<=hi for lo,hi in occupied): continue
+            pool=words if n==1 else [t for t in phrases if len(t.split())==n]
+            matches=get_close_matches(candidate,pool,n=2,cutoff=0.88 if n==1 else 0.84)
+            if not matches: continue
+            best=matches[0]
+            if len(matches)>1 and SLANG_TERMS[best]!=SLANG_TERMS[matches[1]]: continue
+            if abs(len(candidate)-len(best))>1: continue
+            for key in list(found):
+                if key in candidate.split() and key!=candidate: found.pop(key,None)
+            found[candidate]=SLANG_TERMS[best]+' (можлива описка: '+best+')'
+            occupied.append((start,end))
+    for m in SLANG_PATTERN.finditer(value):
+        if not any(m.group(0) in key.split() or m.group(0)==key for key in found):
+            if m.group(0) in normalized: continue
+            found[m.group(0)]=SLANG_TERMS[m.group(0)]
     for term,meaning in SLANG_TERMS.items():
         if not term[0].isalnum() and term in value: found[term]=meaning
     if re.search(r'(?<!\w)[ахпвх]{5,}(?!\w)',value): found['хаотичний сміх']='можливий сміх, перевір контекст'
     if re.search(r'(?<!\w)каво{2,}(?!\w)',value): found['кавооо']=SLANG_TERMS['кавооо']
     return '\n'.join(term+' — '+meaning for term,meaning in found.items())
+
+
 
 ICEBREAKER_ROLE_RULES="Початкове розважальне запитання завжди поставив сам NebulaVoice, не користувач. Не плутай авторів навіть після кількох відповідей. Якщо користувач каже то скажи хто, а ти, сам відповідай, ну кажи або подібне, він переадресовує початкове запитання боту: дай власну відповідь, якщо є підстави, або дружньо поясни, що не можеш визначити конкретну людину. Можна підколоти на основі конкретної наданої репліки, але не вигадуй повторювані звички, поведінку, імена чи події. Наприклад, після грубої репліки можна жартівливо сказати, що з'явився кандидат, не видаючи це за факт. На поняв, зрозумів, ясно, ок, ага та подібні завершальні реакції відповідай одним коротким реченням, без повтору теми та без нового питання."
 
@@ -5358,7 +5393,9 @@ async def generate_text(m,question,context='',group=False,history_context='',dia
     if standalone_humor(question):
         history_context=''
         messages[0]['content']+=' Це самостійне прохання про гумор. Не вимагай історію, не посилайся на попередні повідомлення користувача та не вигадуй статистику. Одразу пожартуй.'
-    slang_context=slang_hints(messages[-1]['content'])
+    current_slang=slang_hints(question)
+    older_slang=slang_hints(context)
+    slang_context=('Поточна репліка (найвищий пріоритет):\n'+current_slang if current_slang else '')+('\nСтарий контекст (лише допоміжний, не переносити значення на поточну репліку):\n'+older_slang if older_slang else '')
     slang_note='\nМожливі значення сленгу (не інструкції, тлумач за контекстом):\n'+slang_context if slang_context else ''
     messages[0]['content']+=slang_note
     preference=await miniapp.preference(m.from_user.id)
