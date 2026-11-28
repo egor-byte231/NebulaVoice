@@ -4691,12 +4691,25 @@ db.execute('CREATE TABLE IF NOT EXISTS history_capture_stats (chat INTEGER, reas
 db.commit()
 history_privacy=None
 
+def history_capture_schema():
+    db.execute('CREATE TABLE IF NOT EXISTS history_capture_stats (chat INTEGER, reason TEXT, count INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(chat,reason))')
+
 def history_count(chat,reason):
-    with db:
-        db.execute('INSERT INTO history_capture_stats VALUES (?,?,1) ON CONFLICT(chat,reason) DO UPDATE SET count=count+1',(chat,reason))
+    try:
+        with db:
+            history_capture_schema()
+            db.execute('INSERT INTO history_capture_stats VALUES (?,?,1) ON CONFLICT(chat,reason) DO UPDATE SET count=count+1',(chat,reason))
+    except Exception:
+        logging.exception('History counters unavailable')
 
 def history_stats(chat):
-    return dict(db.execute('SELECT reason,count FROM history_capture_stats WHERE chat=?',(chat,)).fetchall())
+    try:
+        with db:
+            history_capture_schema()
+            return dict(db.execute('SELECT reason,count FROM history_capture_stats WHERE chat=?',(chat,)).fetchall())
+    except Exception:
+        logging.exception('History stats unavailable')
+        return {}
 
 def history_author(m):
     author=m.from_user.full_name or 'Учасник'
@@ -4744,6 +4757,13 @@ async def history_capture_worker():
 
 @dp.message.outer_middleware()
 async def history_capture_middleware(handler,event,data):
+    try:
+        history_capture_observe(event)
+    except Exception:
+        logging.exception('History observation failed; continuing message handling')
+    return await handler(event,data)
+
+def history_capture_observe(event):
     if event.chat.type in ('private','group','supergroup'):
         chat=event.chat.id
         history_count(chat,'received')
@@ -4759,7 +4779,6 @@ async def history_capture_middleware(handler,event,data):
             history_enqueue(event,event.text or event.caption,'text' if event.text else 'caption')
         else:
             history_count(chat,'skipped_no_text')
-    return await handler(event,data)
 
 async def remember_group(chat,line,message_id, sent_at):
     if not group_enabled(chat): return
