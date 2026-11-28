@@ -62,7 +62,15 @@ def overview_user(m,kind='direct'):
     db.execute('INSERT OR IGNORE INTO overview_activity VALUES (?,?,?)',(day,kind,m.from_user.id))
     db.commit()
 
+db.execute('CREATE TABLE IF NOT EXISTS group_overview_daily (day TEXT,chat INTEGER,voices INTEGER DEFAULT 0,circles INTEGER DEFAULT 0,requests INTEGER DEFAULT 0,PRIMARY KEY(day,chat))')
+db.commit()
+
 def overview_add(m,voices=0,circles=0,requests=0):
+    if m.chat.type in ('group','supergroup'):
+        day=datetime.datetime.now(datetime.timezone.utc).date().isoformat()
+        db.execute('INSERT INTO group_overview_daily VALUES (?,?,?,?,?) ON CONFLICT(day,chat) DO UPDATE SET voices=voices+excluded.voices,circles=circles+excluded.circles,requests=requests+excluded.requests',(day,m.chat.id,voices,circles,requests))
+        publication_membership(m.chat.id,True)
+
     for key,value in (('voices',voices),('circles',circles),('requests',requests)):
         if value: daily_stat_add(key,value)
     overview_user(m,'audio' if voices or circles else 'direct')
@@ -4381,6 +4389,74 @@ async def rich_stats_send(message,body,parse_mode=None,reply_markup=None,edit=Fa
     if reply: return await message.reply(body,**kwargs)
     if isinstance(message,int): return await bot.send_message(message,body,**kwargs)
     return await message.answer(body,**kwargs)
+
+
+async def groups_report(message,page=0,edit=False):
+    import html
+    membership=dict(db.execute('SELECT chat,present FROM publication_membership'))
+    candidates={r[0] for r in db.execute('SELECT chat FROM text_groups WHERE chat<0')}
+    candidates.update(chat for chat,present in membership.items() if present)
+    candidates.update(r[0] for r in db.execute('SELECT DISTINCT chat FROM text_group_usage WHERE chat<0'))
+    try:
+        candidates.update(r['chat'] for r in await d1_query(history_session,'SELECT DISTINCT chat FROM runtime_results WHERE chat<0'))
+    except Exception:
+        pass
+    candidates.difference_update(chat for chat,present in membership.items() if not present)
+    groups=[]
+    unknown=0
+    for chat in sorted(candidates):
+        if membership.get(chat)==1:
+            groups.append(chat)
+            continue
+        try:
+            member=await bot.get_chat_member(chat,bot.id)
+            present=publication_present(member)
+            publication_membership(chat,present)
+            if present: groups.append(chat)
+        except TelegramForbiddenError:
+            publication_membership(chat,False)
+        except Exception:
+            unknown+=1
+    total=len(groups)
+    pages=max(1,(total+1)//2)
+    page=max(0,min(page,pages-1))
+    day=text_day()
+    title=f'👥 Групи NebulaVoice · {page+1}/{pages}'
+    subtitle=f'Відомих активних груп: {total}'
+    if unknown: subtitle+=f' · Не перевірено: {unknown}'
+    body=[title,subtitle]
+    rich=['<h3>'+html.escape(title)+'</h3><p>'+html.escape(subtitle)+'</p>']
+    for chat in groups[page*2:page*2+2]:
+        name=str(chat)
+        members='—'
+        try:
+            info=await bot.get_chat(chat)
+            name=info.title or name
+            members=str(await bot.get_chat_member_count(chat))
+        except Exception: pass
+        today=db.execute('SELECT COALESCE(SUM(voices),0),COALESCE(SUM(circles),0),COALESCE(SUM(requests),0) FROM group_overview_daily WHERE chat=? AND day=?',(chat,day)).fetchone()
+        alltime=db.execute('SELECT COALESCE(SUM(voices),0),COALESCE(SUM(circles),0),COALESCE(SUM(requests),0) FROM group_overview_daily WHERE chat=?',(chat,)).fetchone()
+        tokens=db.execute('SELECT COALESCE(SUM(tokens),0) FROM text_group_usage WHERE chat=?',(chat,)).fetchone()[0]
+        rows=[('Голосові',today[0],alltime[0]),('Кружечки',today[1],alltime[1]),('Транскрипції',today[0]+today[1],alltime[0]+alltime[1]),('Запити ШІ',today[2],alltime[2]),('Токени ШІ',group_used(chat,day),tokens)]
+        meta=f'ID: {chat} · Учасники: {members} · Ліміт: {mini_daily_limit(chat):,}'
+        body.extend(['',name,meta]+[f'{label}: {v} / {a}' for label,v,a in rows])
+        rich.append('<h3>'+html.escape(name)+'</h3><p>'+html.escape(meta)+'</p><table><tr><th>Показник</th><th>Сьогодні</th><th>Всього*</th></tr>'+''.join(f'<tr><td>{html.escape(label)}</td><td>{v:,}</td><td>{a:,}</td></tr>' for label,v,a in rows)+'</table>')
+    note='* Голосові, кружечки та запити — з моменту запуску нового обліку; токени — за наявною історією. День UTC.'
+    body.append(note)
+    rich.append('<p>'+html.escape(note)+'</p>')
+    markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='◀️',callback_data='groups_page:'+str(max(0,page-1))),InlineKeyboardButton(text=f'{page+1}/{pages} · 🔄',callback_data='groups_page:'+str(page)),InlineKeyboardButton(text='▶️',callback_data='groups_page:'+str(min(pages-1,page+1)))]])
+    await rich_stats_send(message,'\n'.join(body),reply_markup=markup,edit=edit,custom_html=''.join(rich))
+
+@dp.message(Command('groups'),F.chat.type=='private',F.from_user.id==OWNER)
+async def groups_command(m:Message):
+    await groups_report(m)
+
+@dp.callback_query(F.data.startswith('groups_page:'),F.from_user.id==OWNER)
+async def groups_page(c:CallbackQuery):
+    if not c.message or c.message.chat.type!='private': return await c.answer()
+    await c.answer()
+    await groups_report(c.message,int(c.data.split(':')[1]),edit=True)
+
 
 def text_stats_menu(page=0,total=3):
     page=max(0,min(2,page))
