@@ -3679,7 +3679,11 @@ async def owner_action(c:CallbackQuery):
             if 'message is not modified' not in str(e).lower(): raise
         return
     if c.data=='owner:vireonix':
-        try: await rich_stats_send(c.message,await vireonix_report(),edit=True,parse_mode=None,reply_markup=vireonix_menu())
+        try:
+            body=await vireonix_report()
+            sent=await bot.send_message(c.message.chat.id,body,parse_mode=None,reply_markup=vireonix_menu())
+            try: await bot.delete_message(c.message.chat.id,c.message.message_id)
+            except Exception: pass
         except Exception:
             logging.exception('Vireonix menu failed')
             await bot.send_message(c.message.chat.id,'⚠️ Не вдалося відкрити Vireonix. Спробуй /vireonix_stats.',reply_markup=vireonix_menu())
@@ -4219,41 +4223,42 @@ def vireonix_menu():
     return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='🔄 Оновити',callback_data='owner:vireonix')],[InlineKeyboardButton(text='⬅️ Назад',callback_data='owner:ai')]])
 
 async def vireonix_report():
-    lines=['📊 Vireonix — окрема статистика','Модель: auto',f'Слоти: {vireonix_active}/6 | Черга: {vireonix_waiting}',f'Пауза API: {max(0,int(blocked("text:Vireonix")-time.time()))} с','']
+    lines=['📊 Vireonix — Auto',f'Слоти: {6-vireonix_slots._value}/6']
     try:
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session:
-            async with session.get('https://vireonix.ai/api/limits',allow_redirects=False) as response:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15)) as session:
+            async with session.get('https://vireonix.ai/api/limits') as response:
                 response.raise_for_status()
                 data=await response.json()
         rate=data['model_rates']['auto']
         remaining=data['remaining']
-        lines.append('🌐 Поточна квота API (спільна для IP)')
         for label,key in [('Вхідні','input'),('Вихідні','output')]:
             limit=int(rate[key+'_tokens_per_hour'])
             pct=float(remaining[key])
             left=round(limit*pct/100)
-            lines.extend([f'{label}: {limit:,}/год',f'Залишок: ≈{left:,} ({pct:.2f}%)',f'Витрачено: ≈{limit-left:,}'])
-        reset=remaining.get('resets_at') or data.get('resets_at')
-        if reset:
-            dt=datetime.datetime.fromisoformat(reset.replace('Z','+00:00'))
-            lines.append(f'Поновлення: {dt:%Y-%m-%d %H:%M:%S} UTC | через {max(0,int((dt-datetime.datetime.now(datetime.timezone.utc)).total_seconds()))//60} хв')
-        lines.append('Тимчасовий режим: '+('так' if data.get('rate_policy',{}).get('temporary') else 'ні'))
+            lines.extend(['',f'{label}: ≈{left:,} / {limit:,} за годину',f'Доступно: {pct:g}%',f'Витрачено: ≈{limit-left:,}'])
+        lines.extend(['',f'Поновлення UTC: {remaining.get("resets_at","—")}',f'Загальний залишок: {remaining.get("overall","—")}%'])
     except Exception as e:
-        lines.append('⚠️ Квота API недоступна: '+type(e).__name__)
-    now=time.time()
-    for label,start in [('Останні 60 хв',now-3600),('Сьогодні (UTC)',datetime.datetime.now(datetime.timezone.utc).replace(hour=0,minute=0,second=0,microsecond=0).timestamp()),('За весь час нового обліку',0)]:
-        rows=db.execute('SELECT status,COUNT(*),COALESCE(SUM(input_tokens),0),COALESCE(SUM(output_tokens),0),COALESCE(SUM(seconds),0),COUNT(input_tokens),COUNT(output_tokens) FROM vireonix_stats WHERE ts>=? GROUP BY status',(start,)).fetchall()
-        counts={x[0]:x[1] for x in rows}
-        total=sum(counts.values())
-        ok=counts.get('ok',0)
-        lines.extend(['',label,f'Спроби: {total} | Успішні API-відповіді: {ok} ({100*ok/max(1,total):.1f}%)',f'429: {counts.get("429",0)} | 403: {counts.get("403",0)} | Таймаути: {counts.get("timeout",0)}',f'Інші помилки: {total-ok-counts.get("429",0)-counts.get("403",0)-counts.get("timeout",0)-counts.get("cancelled",0)} | Скасовано: {counts.get("cancelled",0)}',f'Вхідні: {sum(x[2] for x in rows):,} | Вихідні: {sum(x[3] for x in rows):,}',f'Відповідей з обліком обох типів токенів: не більше {min(sum(x[5] for x in rows),sum(x[6] for x in rows))}/{total}',f'Середній час успішної відповіді: {sum(x[4] for x in rows if x[0]=="ok")/max(1,ok):.2f} с' if ok else 'Середній час: —'])
-    t,a=db.execute('SELECT COALESCE(SUM(tokens),0),COALESCE(SUM(attempts),0) FROM text_usage WHERE day=? AND route=?',(text_day(),'Vireonix')).fetchone()
-    lines.extend(['',f'Загальний добовий облік бота: {t:,} токенів | {a} спроб','Детальний облік починається після оновлення; включає тести. Квота IP може включати сторонні запити. Успіх API не гарантує доставку повідомлення.'])
+        logging.exception('Vireonix live quota failed')
+        lines.append('⚠️ Жива квота: '+type(e).__name__)
+    try:
+        t,a=db.execute('SELECT COALESCE(SUM(tokens),0),COALESCE(SUM(attempts),0) FROM text_usage WHERE day=? AND route=?',(text_day(),'Vireonix')).fetchone()
+        lines.extend(['',f'Токени сьогодні: {t:,}',f'Спроби сьогодні: {a}'])
+    except Exception as e:
+        logging.exception('Vireonix daily accounting failed')
+        lines.append('⚠️ Добовий облік: '+type(e).__name__)
+    try:
+        for label,cutoff in [('60 хв',time.time()-3600),('Весь час',0)]:
+            n,ok,limited,timeout,inp,out,avg=db.execute("SELECT COUNT(*),COALESCE(SUM(CASE WHEN status='ok' THEN 1 ELSE 0 END),0),COALESCE(SUM(CASE WHEN status='429' THEN 1 ELSE 0 END),0),COALESCE(SUM(CASE WHEN status='timeout' THEN 1 ELSE 0 END),0),COALESCE(SUM(input_tokens),0),COALESCE(SUM(output_tokens),0),AVG(CASE WHEN status='ok' THEN seconds END) FROM vireonix_stats WHERE ts>=?",(cutoff,)).fetchone()
+            lines.extend(['',label,f'Спроби: {n} | OK: {ok}',f'429: {limited} | Таймаути: {timeout} | Інші: {n-ok-limited-timeout}',f'Вхід / вихід: {inp:,} / {out:,}',f'Середній час: {avg:.2f} с' if avg is not None else 'Середній час: —'])
+    except Exception as e:
+        logging.exception('Vireonix detailed accounting failed')
+        lines.append('⚠️ Детальний облік: '+type(e).__name__)
+    lines.append('Квота IP приблизна в токенах; відсотки отримані з API. Детальний облік включає тести.')
     return '\n'.join(lines)
 
 @dp.message(Command('vireonix_stats'),F.chat.type=='private',F.from_user.id==OWNER)
 async def vireonix_status(m:Message):
-    await rich_stats_send(m,await vireonix_report(),parse_mode=None,reply_markup=vireonix_menu())
+    await m.answer(await vireonix_report(),parse_mode=None,reply_markup=vireonix_menu())
 
 
 
