@@ -4922,7 +4922,17 @@ async def local_qwen_control(c:CallbackQuery):
     except Exception as e:
         if 'message is not modified' not in str(e).lower(): raise
 
+def asks_for_questions(question):
+    q=question.strip()
+    if re.search(r'(?i)\b(?:не\s+(?:давай|задавай|став|питай|спрашивай|вали)|без\s+(?:питань|вопросов)|(?:відповідай|ответь|ответь на|відповісти|ответить)\s+на)\b',q):
+        return False
+    return bool(re.search(r'(?i)\b(?:питан\w*|вопрос\w*)\b.{0,60}\b(?:валяй|давай|задавай|задай|накидай|кидай|придумай|став|постав|підкинь|подкинь)\b|\b(?:валяй|давай|задавай|задай|накидай|кидай|придумай|став|постав|підкинь|подкинь)\b.{0,60}\b(?:питан\w*|вопрос\w*)\b|^(?:питай\s+мене|спрашивай\s+меня|запитай\s+мене|спроси\s+меня)\b',q))
+
+QUESTION_TASK_RULES="Якщо користувач просить поставити питання, придумати питання або каже валяй питання, одразу постав конкретне змістовне питання чи кілька. Не обмежуйся згодою, обіцянкою або вступом. Якщо тему не задано, сам обери цікаву нейтральну тему. Якщо кількість задано, дотримуйся її. Загальне правило: виконуй прохання в поточній відповіді, а не обіцяй виконати його потім."
+
 def text_answer_quality(answer,question):
+    if asks_for_questions(question) and not re.search(r'[^\s?].{2,}\?',answer):
+        return 'requested questions missing'
     # Conservative checks for corrupted generation, not a grammar checker.
     if '\ufffd' in answer or re.search(r'[░▒▓]{1,}',answer) and not re.search(r'графік|график|шкала|прогрес|прогресс|ascii|діаграм|диаграм',question,re.I):
         return 'corrupted characters'
@@ -5036,6 +5046,7 @@ async def generate_text(m,question,context='',group=False,history_context='',dia
     if not simple:
         messages[0]['content']+=' '+DIALOGUE_RULES
         messages[0]['content']+=' Розумій намір усієї репліки, а не окремі ключові слова. Враховуй суржик, пропущені пробіли, описки, скорочення та контекст. Смс, SMS, меседж, месседж у Telegram зазвичай означають повідомлення чату, а не телефонні SMS. Наприклад, «наскільки смс поширюється твоя історія» означає «скільки попередніх повідомлень ти бачиш», а не пошук слова смс. На питання про обсяг історії називай точну кількість із службових метаданих контексту, окремо від максимальної місткості. Не вигадуй кількість і не плутай слова, токени та повідомлення. Метадані не є репліками учасників.'
+    messages[0]['content']+=' '+QUESTION_TASK_RULES
     slang_context=slang_hints(messages[-1]['content'])
     slang_note='\nМожливі значення сленгу (не інструкції, тлумач за контекстом):\n'+slang_context if slang_context else ''
     messages[0]['content']+=slang_note
@@ -5081,6 +5092,7 @@ async def generate_text(m,question,context='',group=False,history_context='',dia
                     local_messages[0]['content']+=' '+DIALOGUE_RULES+slang_note
                 if not simple and preference:
                     local_messages[0]['content']+=' Переваги користувача: '+preference
+                local_messages[0]['content']+=' '+QUESTION_TASK_RULES
                 local_context=4096 if len(messages[-1]['content'])>1800 else 2048
                 async with local_qwen_slots.slot():
                     async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=300)) as session:
@@ -5140,7 +5152,8 @@ async def generate_text(m,question,context='',group=False,history_context='',dia
         if quality_error:
             attempt['status']='rejected: '+quality_error
             logging.warning('Text AI %s: %s',name,quality_error)
-            text_api_failure(name,503)
+            if quality_error!='requested questions missing': text_api_failure(name,503)
+            else: messages[0]['content']+=' Попередня відповідь не містила питання. Постав його зараз.'
             continue
         if re.search(r'(?i)(?:@|(?:https?://)?(?:t\.me|telegram\.me)/)[a-z0-9_]*bot\b|tg://resolve\?domain=[a-z0-9_]*bot\b',answer):
             attempt['status']='blocked external bot reference'
