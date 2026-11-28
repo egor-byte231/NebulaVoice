@@ -4478,9 +4478,9 @@ def premium_until(chat):
     row=db.execute('SELECT until FROM text_premium WHERE chat=?',(chat,)).fetchone()
     return row[0] if row else 0
 def private_limit(chat):
-    return 40000 if premium_until(chat)>time.time() else 10000
+    return 40000 if premium_until(chat)>time.time() else 15000
 def group_limit(chat):
-    return 100000 if premium_until(chat)>time.time() else 40000
+    return 100000 if premium_until(chat)>time.time() else 60000
 def group_used(chat,day=None):
     row=db.execute('SELECT tokens FROM text_group_usage WHERE day=? AND chat=?',(day or text_day(),chat)).fetchone()
     return row[0] if row else 0
