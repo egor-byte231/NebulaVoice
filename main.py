@@ -3678,6 +3678,11 @@ async def owner_action(c:CallbackQuery):
         except Exception as e:
             if 'message is not modified' not in str(e).lower(): raise
         return
+    if c.data=='owner:vireonix':
+        try: await c.message.edit_text(await vireonix_report(),parse_mode=None,reply_markup=vireonix_menu())
+        except Exception as e:
+            if 'message is not modified' not in str(e).lower(): raise
+        return
     if c.data=='owner:ai' or c.data.startswith('owner:ai:'):
         try:
             pages=text_report_pages()
@@ -4124,13 +4129,53 @@ def text_headers(name,key):
 
 from contextlib import asynccontextmanager
 vireonix_slots=asyncio.Semaphore(6)
+vireonix_active=0
+vireonix_waiting=0
+db.execute('CREATE TABLE IF NOT EXISTS vireonix_stats (ts REAL, status TEXT, seconds REAL, input_tokens INTEGER, output_tokens INTEGER)')
+db.execute('CREATE INDEX IF NOT EXISTS vireonix_stats_ts ON vireonix_stats(ts)')
+db.commit()
 
 @asynccontextmanager
 async def text_post(session,name,url,**kwargs):
     if name=='Vireonix':
-        async with vireonix_slots:
+        global vireonix_active,vireonix_waiting
+        vireonix_waiting+=1
+        try:
+            await vireonix_slots.acquire()
+        finally:
+            vireonix_waiting-=1
+        vireonix_active+=1
+        started=time.monotonic()
+        status='cancelled'
+        inp=out=None
+        try:
             async with session.post(url,**kwargs) as response:
+                status=str(response.status)
+                if response.status==200:
+                    data=await response.json()
+                    usage=data.get('usage') or {}
+                    inp=usage.get('prompt_tokens')
+                    out=usage.get('completion_tokens')
+                    inp=inp if type(inp) is int and inp>=0 else None
+                    out=out if type(out) is int and out>=0 else None
+                    choices=data.get('choices') or []
+                    content=(choices[0].get('message') or {}).get('content') if choices else None
+                    status='ok' if isinstance(content,str) and content.strip() and choices[0].get('finish_reason') not in ('length','max_tokens') else 'invalid'
                 yield response
+        except asyncio.CancelledError:
+            status='cancelled'
+            raise
+        except Exception as e:
+            status='timeout' if isinstance(e,asyncio.TimeoutError) else 'error'
+            raise
+        finally:
+            vireonix_active-=1
+            vireonix_slots.release()
+            try:
+                db.execute('INSERT INTO vireonix_stats VALUES (?,?,?,?,?)',(time.time(),status,time.monotonic()-started,inp,out))
+                db.commit()
+            except Exception:
+                logging.exception('Vireonix statistics write failed')
     else:
         async with session.post(url,**kwargs) as response:
             yield response
@@ -4169,11 +4214,51 @@ async def text_diagnose(m:Message):
             lines.append(route[0]+': '+type(e).__name__)
     await m.answer('\n'.join(lines)[:3900],parse_mode=None)
 
+def vireonix_menu():
+    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='🔄 Оновити',callback_data='owner:vireonix')],[InlineKeyboardButton(text='⬅️ Назад',callback_data='owner:ai')]])
+
+async def vireonix_report():
+    lines=['📊 Vireonix — окрема статистика','Модель: auto',f'Слоти: {vireonix_active}/6 | Черга: {vireonix_waiting}',f'Пауза API: {max(0,int(blocked("text:Vireonix")-time.time()))} с','']
+    try:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session:
+            async with session.get('https://vireonix.ai/api/limits',allow_redirects=False) as response:
+                response.raise_for_status()
+                data=await response.json()
+        rate=data['model_rates']['auto']
+        remaining=data['remaining']
+        lines.append('🌐 Поточна квота API (спільна для IP)')
+        for label,key in [('Вхідні','input'),('Вихідні','output')]:
+            limit=int(rate[key+'_tokens_per_hour'])
+            pct=float(remaining[key])
+            left=round(limit*pct/100)
+            lines.extend([f'{label}: {limit:,}/год',f'Залишок: ≈{left:,} ({pct:.2f}%)',f'Витрачено: ≈{limit-left:,}'])
+        reset=remaining.get('resets_at') or data.get('resets_at')
+        if reset:
+            dt=datetime.datetime.fromisoformat(reset.replace('Z','+00:00'))
+            lines.append(f'Поновлення: {dt:%Y-%m-%d %H:%M:%S} UTC | через {max(0,int((dt-datetime.datetime.now(datetime.timezone.utc)).total_seconds()))//60} хв')
+        lines.append('Тимчасовий режим: '+('так' if data.get('rate_policy',{}).get('temporary') else 'ні'))
+    except Exception as e:
+        lines.append('⚠️ Квота API недоступна: '+type(e).__name__)
+    now=time.time()
+    for label,start in [('Останні 60 хв',now-3600),('Сьогодні (UTC)',datetime.datetime.now(datetime.timezone.utc).replace(hour=0,minute=0,second=0,microsecond=0).timestamp()),('За весь час нового обліку',0)]:
+        rows=db.execute('SELECT status,COUNT(*),COALESCE(SUM(input_tokens),0),COALESCE(SUM(output_tokens),0),COALESCE(SUM(seconds),0),COUNT(input_tokens),COUNT(output_tokens) FROM vireonix_stats WHERE ts>=? GROUP BY status',(start,)).fetchall()
+        counts={x[0]:x[1] for x in rows}
+        total=sum(counts.values())
+        ok=counts.get('ok',0)
+        lines.extend(['',label,f'Спроби: {total} | Успішні API-відповіді: {ok} ({100*ok/max(1,total):.1f}%)',f'429: {counts.get("429",0)} | 403: {counts.get("403",0)} | Таймаути: {counts.get("timeout",0)}',f'Інші помилки: {total-ok-counts.get("429",0)-counts.get("403",0)-counts.get("timeout",0)-counts.get("cancelled",0)} | Скасовано: {counts.get("cancelled",0)}',f'Вхідні: {sum(x[2] for x in rows):,} | Вихідні: {sum(x[3] for x in rows):,}',f'Відповідей з обліком обох типів токенів: не більше {min(sum(x[5] for x in rows),sum(x[6] for x in rows))}/{total}',f'Середній час успішної відповіді: {sum(x[4] for x in rows if x[0]=="ok")/max(1,ok):.2f} с' if ok else 'Середній час: —'])
+    t,a=db.execute('SELECT COALESCE(SUM(tokens),0),COALESCE(SUM(attempts),0) FROM text_usage WHERE day=? AND route=?',(text_day(),'Vireonix')).fetchone()
+    lines.extend(['',f'Загальний добовий облік бота: {t:,} токенів | {a} спроб','Детальний облік починається після оновлення; включає тести. Квота IP може включати сторонні запити. Успіх API не гарантує доставку повідомлення.'])
+    return '\n'.join(lines)
+
+@dp.message(Command('vireonix_stats'),F.chat.type=='private',F.from_user.id==OWNER)
+async def vireonix_status(m:Message):
+    await m.answer(await vireonix_report(),parse_mode=None,reply_markup=vireonix_menu())
+
 def text_stats_menu(page=0,total=1):
     rows=[[InlineKeyboardButton(text='🔄 Оновити',callback_data='owner:ai:'+str(page))]]
     if total>1:
         rows.append([InlineKeyboardButton(text=('✓ ' if i==page else '')+str(i+1),callback_data='owner:ai:'+str(i)) for i in range(total)])
-    rows.extend([[InlineKeyboardButton(text='🖥 Локальний ШІ',callback_data='localqwen:show')],[InlineKeyboardButton(text='⬅️ Назад',callback_data='owner:back')]])
+    rows.extend([[InlineKeyboardButton(text='📊 Vireonix',callback_data='owner:vireonix')],[InlineKeyboardButton(text='🖥 Локальний ШІ',callback_data='localqwen:show')],[InlineKeyboardButton(text='⬅️ Назад',callback_data='owner:back')]])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 def text_report_pages():
     pages=[]
@@ -4213,6 +4298,8 @@ def text_report():
         if quota:
             remaining=max(0,quota-t)
             details+=f'\nБазова квота: {quota}\nЗалишок (оцінка): {remaining}\nДоступно: {remaining/quota:.1%}'
+        elif name=='Vireonix':
+            details+='\nПогодинна квота: окрема статистика Vireonix'
         else:
             details+='\nЛіміт API: невідомий'
         lines.extend(['',f'<b>{html.escape(name)} · {html.escape(model[:100])}</b> · {status}',html.escape(details.replace('\n',' | '))])
