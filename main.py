@@ -3664,7 +3664,7 @@ async def slots_action(c):
 
 @dp.callback_query(F.data.startswith('owner:'))
 async def owner_action(c:CallbackQuery):
-    if c.from_user.id!=OWNER or not isinstance(c.message,Message) or c.message.chat.type!='private':
+    if c.from_user.id!=OWNER or c.message is None or c.message.chat.type!='private':
         return await c.answer('Тільки власник',show_alert=True)
     await c.answer()
     if c.data=='owner:audiohost' or c.data.startswith('owner:audiohost:'): return await audio_settings_action(c)
@@ -3680,8 +3680,9 @@ async def owner_action(c:CallbackQuery):
         return
     if c.data=='owner:vireonix':
         try: await rich_stats_send(c.message,await vireonix_report(),edit=True,parse_mode=None,reply_markup=vireonix_menu())
-        except Exception as e:
-            if 'message is not modified' not in str(e).lower(): raise
+        except Exception:
+            logging.exception('Vireonix menu failed')
+            await bot.send_message(c.message.chat.id,'⚠️ Не вдалося відкрити Vireonix. Спробуй /vireonix_stats.',reply_markup=vireonix_menu())
         return
     if c.data=='owner:ai' or c.data.startswith('owner:ai:'):
         try:
@@ -4277,6 +4278,11 @@ def activity_chart_html(scope):
 def rich_stats_html(body,parse_mode=None):
     plain=lambda x: html.unescape(re.sub(r'<[^>]+>','',x)) if parse_mode=='HTML' else x
     esc=lambda x: html.escape(plain(x))
+    if 'API | Спроби | Токени | Залишок' in body:
+        lines=body.splitlines()
+        entries=[plain(x).split(' | ') for x in lines if x.startswith(('🟢 ','🟠 ','⚪ ')) and x.count(' | ')==3]
+        table='<table><tr><th>API</th><th>Спр.</th><th>Токени</th><th>Зал.</th></tr>'+''.join('<tr>'+''.join('<td>'+html.escape(v)+'</td>' for v in row)+'</tr>' for row in entries)+'</table>'
+        return '<h3>'+esc(lines[0])+'</h3><p>'+esc(lines[1])+'</p>'+table+''.join('<p>'+esc(x)+'</p>' for x in lines[-2:])
     blocks=[]
     rows=[]
     def flush():
@@ -4317,28 +4323,51 @@ async def rich_stats_send(message,body,parse_mode=None,reply_markup=None,edit=Fa
     except Exception as e:
         logging.warning('Rich statistics unavailable: %s',type(e).__name__)
     kwargs={'parse_mode':parse_mode,'reply_markup':reply_markup}
-    if edit: return await message.edit_text(body,**kwargs)
+    if edit:
+        try: return await bot.edit_message_text(chat_id=chat_id,message_id=message.message_id,text=body,**kwargs)
+        except Exception as e:
+            if 'message is not modified' in str(e).lower(): return
+            sent=await bot.send_message(chat_id,body,**kwargs)
+            try: await bot.delete_message(chat_id,message.message_id)
+            except Exception: pass
+            return sent
     if reply: return await message.reply(body,**kwargs)
     if isinstance(message,int): return await bot.send_message(message,body,**kwargs)
     return await message.answer(body,**kwargs)
 
-def text_stats_menu(page=0,total=1):
-    rows=[[InlineKeyboardButton(text='🔄 Оновити',callback_data='owner:ai:'+str(page))]]
-    rows.append([InlineKeyboardButton(text='📊 Vireonix — жива квота',callback_data='owner:vireonix')])
-    if total>1:
-        rows.append([InlineKeyboardButton(text=('✓ ' if i==page else '')+str(i+1),callback_data='owner:ai:'+str(i)) for i in range(total)])
-    rows.extend([[InlineKeyboardButton(text='📊 Vireonix',callback_data='owner:vireonix')],[InlineKeyboardButton(text='🖥 Локальний ШІ',callback_data='localqwen:show')],[InlineKeyboardButton(text='⬅️ Назад',callback_data='owner:back')]])
+def text_stats_menu(page=0,total=3):
+    page=max(0,min(2,page))
+    rows=[[InlineKeyboardButton(text='◀️',callback_data='owner:ai:'+str(max(0,page-1))),InlineKeyboardButton(text=f'{page+1}/3 · 🔄',callback_data='owner:ai:'+str(page)),InlineKeyboardButton(text='▶️',callback_data='owner:ai:'+str(min(2,page+1)))],
+          [InlineKeyboardButton(text='📊 Vireonix',callback_data='owner:vireonix'),InlineKeyboardButton(text='🖥 Qwen',callback_data='localqwen:show')],
+          [InlineKeyboardButton(text='⬅️ Назад',callback_data='owner:back')]]
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
 def text_report_pages():
-    pages=[]
-    current=''
-    for line in text_report().splitlines():
-        if len(current)+len(line)+1>3000:
-            pages.append(current)
-            current=''
-        current+=line+'\n'
-    if current: pages.append(current)
+    rows=list(db.execute('SELECT route,tokens,attempts FROM text_usage WHERE day=?',(text_day(),)))
+    usage={name:(t,a) for name,t,a in rows}
+    intro=text_report().split('\n\n<b>'+html.escape(TEXT_ROUTES[0][0])+' ·',1)[0]
+    intro=intro.split('\n\n<b>'+html.escape(TEXT_ROUTES[0][0])+' ·',1)[0]
+    # The first page contains only the overview, not the provider sections.
+    marker=' <b>'+html.escape(TEXT_ROUTES[0][0])+' ·'
+    first='\n<b>'+html.escape(TEXT_ROUTES[0][0])+' ·'
+    if first in intro: intro=intro.split(first,1)[0].rstrip()
+    pages=[intro.replace('Статистика текстового ШІ','Статистика ШІ · 1/3',1)]
+    groups=[[r for r in TEXT_ROUTES if r[0].startswith('Groq ')],[r for r in TEXT_ROUTES if not r[0].startswith('Groq ')]]
+    for i,routes in enumerate(groups,2):
+        lines=[f'<b>🤖 Провайдери · {i}/3</b>',f'Дата: {text_day()} UTC','API | Спроби | Токени | Залишок']
+        for route in routes:
+            name=route[0]
+            key,url,model=text_config(route)
+            t,a=usage.get(name,(0,0))
+            status='⚪' if not key else '🟠' if blocked('text:'+name)>time.time() else '🟢'
+            quota=500000 if name.endswith(' ALLAM') else 200000 if name.startswith('Groq ') else None
+            left=str(max(0,quota-t)) if quota else ('год.' if name=='Vireonix' else '—')
+            lines.append(html.escape(f'{status} {name} | {a} | {t} | {left}'))
+        lines.append('🟢 налаштовано · 🟠 пауза · ⚪ вимкнено')
+        lines.append('Залишки Groq — оцінка; облік включає тести.')
+        pages.append('\n'.join(lines))
     return pages
+
 def user_stats_lines():
     today=datetime.datetime.now(datetime.timezone.utc).date()
     yesterday=(today-datetime.timedelta(days=1)).isoformat()
