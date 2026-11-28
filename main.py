@@ -3293,7 +3293,7 @@ async def run_load_test(message,config):
                         row=stats[name]
                         sent=time.monotonic()
                         try:
-                            async with session.post(url,headers={'Authorization':'Bearer '+key},json={'model':model,'messages':[{'role':'user','content':'Відповідай українською: скільки буде 2+2?'}],'max_tokens':512},allow_redirects=False) as response:
+                            async with session.post(url,headers=text_headers(name,key),json={'model':model,'messages':[{'role':'user','content':'Відповідай українською: скільки буде 2+2?'}],'max_tokens':512},allow_redirects=False) as response:
                                 if response.status!=200:
                                     status_code=str(response.status)
                                     row[status_code if status_code in ('429','403') else 'errors']+=1
@@ -4107,6 +4107,7 @@ TEXT_ROUTES=[
  ('DreamPrompting','DREAMPROMPTING_API_KEY','https://dreamprompting.com/api/v1/chat/completions','openai/gpt-oss-120b'),
  ('xKiro','XKIRO_API_KEY','https://api.xkiro.com/v1/chat/completions','cohere/command-a'),
  ('Vikasit','VIKASIT_API_KEY','https://api.vikasit.ai/v1/chat/completions','vikasit-nova'),
+ ('Vireonix','VIREONIX_ENABLED','https://vireonix.ai/v1/chat/completions','auto'),
 ]
 db.execute('CREATE TABLE IF NOT EXISTS text_usage (day TEXT, route TEXT, tokens INTEGER, attempts INTEGER, PRIMARY KEY(day,route))')
 db.commit()
@@ -4114,8 +4115,12 @@ text_lock=asyncio.Lock()
 text_history=[]
 def text_config(route):
     name,key,url,model=route
+    if name=='Vireonix':
+        return ('no-auth' if os.getenv('VIREONIX_ENABLED','0')=='1' else None),url,model
     prefix=key.removesuffix('_API_KEY')
     return os.getenv(key),os.getenv(prefix+'_TEXT_URL',url),model if name.endswith((' Qwen',' ALLAM')) else os.getenv(prefix+'_TEXT_MODEL',model)
+def text_headers(name,key):
+    return {} if name=='Vireonix' else {'Authorization':'Bearer '+key}
 def text_day():
     return datetime.datetime.now(datetime.timezone.utc).date().isoformat()
 def text_used():
@@ -4727,7 +4732,7 @@ async def review_icebreaker(question, context, answer, generator_model, routes, 
             payload={'model':model,'messages':review_messages,'max_tokens':128}
             if model.startswith('openai/gpt-oss-') and name.startswith('Groq '): payload['reasoning_effort']='low'
             async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15)) as session:
-                async with session.post(url,headers={'Authorization':'Bearer '+key},json=payload,allow_redirects=False) as response:
+                async with session.post(url,headers=text_headers(name,key),json=payload,allow_redirects=False) as response:
                     if response.status!=200:
                         text_api_failure(name,response.status,response.headers)
                         continue
@@ -4787,7 +4792,7 @@ async def generate_text(m,question,context='',group=False,history_context='',dia
         messages[0]['content']+=' Переваги користувача: '+preference
     output_limit=180 if icebreaker else 64 if simple else (750 if 'Історія надана' in context else 500)
     # Group rollout excludes routes whose free terms or reliability are not established.
-    routes=list(TEXT_ROUTES)
+    routes=[r for r in TEXT_ROUTES if r[0]!='Vireonix' or os.getenv('VIREONIX_USER_TRAFFIC','0')=='1']
     ordered=text_api_order(routes,m.message_id)
     if simple:
         ordered=sorted(ordered,key=lambda r: 0 if r[0] in ('Groq 1','Groq 2','Groq 1 20B','Groq 2 20B') else 1)
@@ -4834,7 +4839,7 @@ async def generate_text(m,question,context='',group=False,history_context='',dia
                     payload={'model':model,'messages':messages,'max_tokens':output_limit}
                     if name.startswith('Groq ') and not model.startswith('openai/gpt-oss-'): payload.update({'temperature':0.2,'top_p':0.85})
                     if model.startswith('openai/gpt-oss-') and name.startswith('Groq '): payload['reasoning_effort']='low'
-                    async with session.post(url,headers={'Authorization':'Bearer '+key},json=payload,allow_redirects=False) as response:
+                    async with session.post(url,headers=text_headers(name,key),json=payload,allow_redirects=False) as response:
                         attempt['status']='HTTP '+str(response.status)
                         if response.status!=200:
                             text_api_failure(name,response.status,response.headers)
