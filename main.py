@@ -4809,13 +4809,16 @@ async def generate_text(m,question,context='',group=False,history_context='',dia
     ordered=text_api_order(routes,m.message_id)
     if simple:
         ordered=sorted(ordered,key=lambda r: 0 if r[0] in ('Groq 1','Groq 2','Groq 1 20B','Groq 2 20B') else 1)
+    ordered=sorted(ordered,key=lambda r: 0 if r[0]=='Vireonix' else 1)
     for route in ordered+[("Local Qwen",)]:
         if group and not group_enabled(chat): return
         name=route[0]
         local=name=='Local Qwen'
         key,url,model=('local','http://127.0.0.1:11434/api/chat','qwen3.5:2b') if local else text_config(route)
         if not key or not url or not model or (not local and not url.startswith('https://')) or blocked('text:'+name)>time.time(): continue
+        if name=='Vireonix' and vireonix_slots.locked(): continue
         if not local and not await text_api_pace(name): continue
+        if name=='Vireonix' and vireonix_slots.locked(): continue
         day=text_day()
         used=group_used(chat,day)
         daily_limit=mini_daily_limit(chat)
