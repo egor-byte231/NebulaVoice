@@ -3293,7 +3293,7 @@ async def run_load_test(message,config):
                         row=stats[name]
                         sent=time.monotonic()
                         try:
-                            async with session.post(url,headers=text_headers(name,key),json={'model':model,'messages':[{'role':'user','content':'Відповідай українською: скільки буде 2+2?'}],'max_tokens':512},allow_redirects=False) as response:
+                            async with text_post(session,name,url,headers=text_headers(name,key),json={'model':model,'messages':[{'role':'user','content':'Відповідай українською: скільки буде 2+2?'}],'max_tokens':512},allow_redirects=False) as response:
                                 if response.status!=200:
                                     status_code=str(response.status)
                                     row[status_code if status_code in ('429','403') else 'errors']+=1
@@ -4121,6 +4121,19 @@ def text_config(route):
     return os.getenv(key),os.getenv(prefix+'_TEXT_URL',url),model if name.endswith((' Qwen',' ALLAM')) else os.getenv(prefix+'_TEXT_MODEL',model)
 def text_headers(name,key):
     return {} if name=='Vireonix' else {'Authorization':'Bearer '+key}
+
+from contextlib import asynccontextmanager
+vireonix_slots=asyncio.Semaphore(6)
+
+@asynccontextmanager
+async def text_post(session,name,url,**kwargs):
+    if name=='Vireonix':
+        async with vireonix_slots:
+            async with session.post(url,**kwargs) as response:
+                yield response
+    else:
+        async with session.post(url,**kwargs) as response:
+            yield response
 def text_day():
     return datetime.datetime.now(datetime.timezone.utc).date().isoformat()
 def text_used():
@@ -4732,7 +4745,7 @@ async def review_icebreaker(question, context, answer, generator_model, routes, 
             payload={'model':model,'messages':review_messages,'max_tokens':128}
             if model.startswith('openai/gpt-oss-') and name.startswith('Groq '): payload['reasoning_effort']='low'
             async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15)) as session:
-                async with session.post(url,headers=text_headers(name,key),json=payload,allow_redirects=False) as response:
+                async with text_post(session,name,url,headers=text_headers(name,key),json=payload,allow_redirects=False) as response:
                     if response.status!=200:
                         text_api_failure(name,response.status,response.headers)
                         continue
@@ -4839,7 +4852,7 @@ async def generate_text(m,question,context='',group=False,history_context='',dia
                     payload={'model':model,'messages':messages,'max_tokens':output_limit}
                     if name.startswith('Groq ') and not model.startswith('openai/gpt-oss-'): payload.update({'temperature':0.2,'top_p':0.85})
                     if model.startswith('openai/gpt-oss-') and name.startswith('Groq '): payload['reasoning_effort']='low'
-                    async with session.post(url,headers=text_headers(name,key),json=payload,allow_redirects=False) as response:
+                    async with text_post(session,name,url,headers=text_headers(name,key),json=payload,allow_redirects=False) as response:
                         attempt['status']='HTTP '+str(response.status)
                         if response.status!=200:
                             text_api_failure(name,response.status,response.headers)
