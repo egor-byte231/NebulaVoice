@@ -4136,9 +4136,16 @@ from contextlib import asynccontextmanager
 vireonix_slots=asyncio.Semaphore(6)
 vireonix_active=0
 vireonix_waiting=0
-db.execute('CREATE TABLE IF NOT EXISTS vireonix_stats (ts REAL, status TEXT, seconds REAL, input_tokens INTEGER, output_tokens INTEGER)')
-db.execute('CREATE INDEX IF NOT EXISTS vireonix_stats_ts ON vireonix_stats(ts)')
-db.commit()
+def ensure_vireonix_stats():
+    db.execute('CREATE TABLE IF NOT EXISTS vireonix_stats (ts REAL, status TEXT, seconds REAL, input_tokens INTEGER, output_tokens INTEGER)')
+    columns={row[1] for row in db.execute('PRAGMA table_info(vireonix_stats)')}
+    for name,kind in [('ts','REAL'),('status','TEXT'),('seconds','REAL'),('input_tokens','INTEGER'),('output_tokens','INTEGER')]:
+        if name not in columns:
+            db.execute('ALTER TABLE vireonix_stats ADD COLUMN '+name+' '+kind)
+    db.execute('CREATE INDEX IF NOT EXISTS vireonix_stats_ts ON vireonix_stats(ts)')
+    db.commit()
+
+ensure_vireonix_stats()
 
 @asynccontextmanager
 async def text_post(session,name,url,**kwargs):
@@ -4177,7 +4184,8 @@ async def text_post(session,name,url,**kwargs):
             vireonix_active-=1
             vireonix_slots.release()
             try:
-                db.execute('INSERT INTO vireonix_stats VALUES (?,?,?,?,?)',(time.time(),status,time.monotonic()-started,inp,out))
+                ensure_vireonix_stats()
+                db.execute('INSERT INTO vireonix_stats (ts,status,seconds,input_tokens,output_tokens) VALUES (?,?,?,?,?)',(time.time(),status,time.monotonic()-started,inp,out))
                 db.commit()
             except Exception:
                 logging.exception('Vireonix statistics write failed')
@@ -4247,12 +4255,13 @@ async def vireonix_report():
         logging.exception('Vireonix daily accounting failed')
         lines.append('⚠️ Добовий облік: '+type(e).__name__)
     try:
+        ensure_vireonix_stats()
         for label,cutoff in [('60 хв',time.time()-3600),('Весь час',0)]:
             n,ok,limited,timeout,inp,out,avg=db.execute("SELECT COUNT(*),COALESCE(SUM(CASE WHEN status='ok' THEN 1 ELSE 0 END),0),COALESCE(SUM(CASE WHEN status='429' THEN 1 ELSE 0 END),0),COALESCE(SUM(CASE WHEN status='timeout' THEN 1 ELSE 0 END),0),COALESCE(SUM(input_tokens),0),COALESCE(SUM(output_tokens),0),AVG(CASE WHEN status='ok' THEN seconds END) FROM vireonix_stats WHERE ts>=?",(cutoff,)).fetchone()
             lines.extend(['',label,f'Спроби: {n} | OK: {ok}',f'429: {limited} | Таймаути: {timeout} | Інші: {n-ok-limited-timeout}',f'Вхід / вихід: {inp:,} / {out:,}',f'Середній час: {avg:.2f} с' if avg is not None else 'Середній час: —'])
     except Exception as e:
         logging.exception('Vireonix detailed accounting failed')
-        lines.append('⚠️ Детальний облік: '+type(e).__name__)
+        lines.append('⚠️ Детальний облік: '+type(e).__name__+': '+str(e)[:200])
     lines.append('Квота IP приблизна в токенах; відсотки отримані з API. Детальний облік включає тести.')
     return '\n'.join(lines)
 
