@@ -2962,6 +2962,11 @@ async def deletion_watch_monitor():
 async def deliver_transcript(m,status,result):
     if not enabled(): return await mark_disabled(status)
     result=correct_transcript_spelling(result)
+    if m.from_user and not m.from_user.is_bot and not m.sender_chat and history_allowed(m):
+        if result.strip() and result.strip()!='Мовлення не виявлено':
+            await capture_history(m,('[Голосове] ' if m.voice else '[Кружечок] ')+result,'audio')
+        else:
+            history_count(m.chat.id,'skipped_no_speech')
     chunks=[result[i:i+3700] for i in range(0,len(result),3700)]
     if chunks:
         await d1_query(history_session,'CREATE TABLE IF NOT EXISTS transcript_numbers (id INTEGER PRIMARY KEY AUTOINCREMENT, chat INTEGER NOT NULL, message_id INTEGER NOT NULL, UNIQUE(chat,message_id))')
@@ -4682,12 +4687,63 @@ async def mini_write_access(m:Message):
     await miniapp.write_access(m)
 
 
+db.execute('CREATE TABLE IF NOT EXISTS history_capture_stats (chat INTEGER, reason TEXT, count INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(chat,reason))')
+db.commit()
+history_privacy=None
+
+def history_count(chat,reason):
+    with db:
+        db.execute('INSERT INTO history_capture_stats VALUES (?,?,1) ON CONFLICT(chat,reason) DO UPDATE SET count=count+1',(chat,reason))
+
+def history_stats(chat):
+    return dict(db.execute('SELECT reason,count FROM history_capture_stats WHERE chat=?',(chat,)).fetchall())
+
+def history_author(m):
+    author=m.from_user.full_name or 'Учасник'
+    if m.from_user.username: author+=' (@'+m.from_user.username+')'
+    return author+' [ID:'+str(m.from_user.id)+']'
+
+def history_allowed(m):
+    return group_enabled(m.chat.id) and (m.chat.type=='private' or bool(db.execute('SELECT 1 FROM text_notices WHERE chat=?',(m.chat.id,)).fetchone()))
+
+async def capture_history(m,body,kind):
+    try:
+        if not history_allowed(m): return False
+        if await remember_group(m.chat.id,history_author(m)+': '+body,m.message_id,m.date.timestamp()):
+            history_count(m.chat.id,'saved_'+kind)
+            return True
+        history_count(m.chat.id,'skipped_disabled')
+    except Exception:
+        history_count(m.chat.id,'skipped_write_error')
+        logging.exception('History capture failed')
+    return False
+
+@dp.message.outer_middleware()
+async def history_capture_middleware(handler,event,data):
+    if event.chat.type in ('private','group','supergroup'):
+        chat=event.chat.id
+        history_count(chat,'received')
+        if not event.from_user or event.from_user.is_bot or event.sender_chat:
+            history_count(chat,'skipped_sender')
+        elif not history_allowed(event):
+            history_count(chat,'skipped_disabled_or_no_notice')
+        elif event.voice or event.video_note:
+            history_count(chat,'audio_pending')
+        elif (event.text or '').startswith('/'):
+            history_count(chat,'skipped_command')
+        elif event.text or event.caption:
+            await capture_history(event,event.text or event.caption,'text' if event.text else 'caption')
+        else:
+            history_count(chat,'skipped_no_text')
+    return await handler(event,data)
+
 async def remember_group(chat,line,message_id, sent_at):
     if not group_enabled(chat): return
     async with history_lock:
         if not group_enabled(chat): return
         await d1_query(history_session,'INSERT OR IGNORE INTO chat_history VALUES (?,?,?,?)',(chat,message_id,sent_at,line[:1000]))
         await d1_query(history_session,'DELETE FROM chat_history WHERE chat=? AND message_id NOT IN (SELECT message_id FROM chat_history WHERE chat=? ORDER BY message_id DESC LIMIT 50)',(chat,chat))
+        return True
 
 async def read_history(chat,before=None,diagnostic=None):
     sql='SELECT line FROM chat_history WHERE chat=?'
@@ -5121,7 +5177,7 @@ async def group_ai_control(m:Message):
     cmd=m.text.split()[0].split('@')[0]
     chat=m.chat.id
     if cmd=='/ai_on':
-        await m.answer('🤖 Адміністратор увімкнув ШІ. Бот зберігає до 50 отриманих текстових повідомлень у Cloudflare D1 та може передавати їх зовнішнім AI API для контекстних запитів. Не публікуйте конфіденційні дані. Виклик: @Nebulavcbot або Reply. /ai_off вимикає ШІ та очищає історію.')
+        await m.answer('🤖 Адміністратор увімкнув ШІ. Бот зберігає до 50 отриманих повідомлень (текст, підписи та транскрипції) у Cloudflare D1 та може передавати їх зовнішнім AI API для контекстних запитів. Не публікуйте конфіденційні дані. Виклик: @Nebulavcbot або Reply. /ai_off вимикає ШІ та очищає історію.')
         db.execute('DELETE FROM text_disabled WHERE chat=?',(chat,))
         db.execute('INSERT OR IGNORE INTO text_groups VALUES (?)',(chat,))
         db.execute('INSERT OR IGNORE INTO text_notices VALUES (?)',(chat,))
@@ -5842,15 +5898,6 @@ async def text_message(m:Message):
 
     
     raw=m.text or ''
-    if not raw.startswith('/') and group_enabled(chat) and (not group or db.execute('SELECT 1 FROM text_notices WHERE chat=?',(chat,)).fetchone()):
-        author=m.from_user.full_name or 'Учасник'
-        if m.from_user.username:
-            author+=' (@'+m.from_user.username+')'
-        author+=' [ID:'+str(m.from_user.id)+']'
-        try:
-            await remember_group(chat,author+': '+raw,m.message_id,m.date.timestamp())
-        except Exception:
-            logging.exception('Chat history write failed')
     reply=m.reply_to_message
     icebreaker=None
     if group and reply and reply.from_user and reply.from_user.id==bot.id:
@@ -5885,14 +5932,14 @@ async def text_message(m:Message):
         db.execute('INSERT OR IGNORE INTO text_groups VALUES (?)',(chat,))
         db.commit()
         if not db.execute('SELECT 1 FROM text_notices WHERE chat=?',(chat,)).fetchone() and (mentioned or replied):
-            await m.reply('🤖 ШІ увімкнено автоматично. Після цього повідомлення бот зберігатиме до 50 текстових повідомлень у Cloudflare D1 для контексту та може передавати їх зовнішнім AI API. /ai_off — вимкнути (адмін). /premium — тариф.')
+            await m.reply('🤖 ШІ увімкнено автоматично. Після цього повідомлення бот зберігатиме до 50 повідомлень (текст, підписи та транскрипції) у Cloudflare D1 для контексту та може передавати їх зовнішнім AI API. /ai_off — вимкнути (адмін). /premium — тариф.')
             db.execute('INSERT OR IGNORE INTO text_notices VALUES (?)',(chat,))
             db.commit()
     if not (mentioned or replied): return
     question=re.sub(r'(?<!\w)@Nebulavcbot(?!\w)','',raw,flags=re.I).strip()
     if not question: return
     overview_add(m,requests=1)
-    diagnostic={'attempts':[],'platform':'Azure VPS'}
+    diagnostic={'attempts':[],'platform':'Azure VPS','history_capture':history_stats(chat),'telegram_privacy_mode':history_privacy}
     diag_started=time.monotonic()
     try: diag_id=await text_diag_begin(m)
     except Exception:
@@ -6254,6 +6301,14 @@ async def main():
         await session.close()
         raise
     history_session=session
+    global history_privacy
+    try:
+        me=await bot.get_me()
+        history_privacy='disabled' if me.can_read_all_group_messages else 'enabled' if me.can_read_all_group_messages is False else 'unknown'
+        logging.info('Telegram Privacy Mode: %s',history_privacy)
+    except Exception:
+        history_privacy='unknown'
+        logging.exception('Privacy Mode check failed')
     try:
         await miniapp.start()
     except Exception:
