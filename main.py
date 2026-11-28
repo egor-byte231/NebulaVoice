@@ -4151,6 +4151,18 @@ def text_headers(name,key):
 from contextlib import asynccontextmanager
 vireonix_slots=asyncio.Semaphore(6)
 sensenova_slots=asyncio.Semaphore(6)
+sensenova_rate_lock=asyncio.Lock()
+sensenova_starts=[]
+
+async def sensenova_rate_wait():
+    async with sensenova_rate_lock:
+        while True:
+            now=time.monotonic()
+            sensenova_starts[:]=[t for t in sensenova_starts if now-t<30]
+            if len(sensenova_starts)<9:
+                sensenova_starts.append(now)
+                return
+            await asyncio.sleep(max(0.01,30-(now-sensenova_starts[0])))
 vireonix_active=0
 vireonix_waiting=0
 def ensure_vireonix_stats():
@@ -4208,6 +4220,7 @@ async def text_post(session,name,url,**kwargs):
                 logging.exception('Vireonix statistics write failed')
     elif name=='SenseNova':
         async with sensenova_slots:
+            await sensenova_rate_wait()
             async with session.post(url,**kwargs) as response:
                 yield response
     else:
@@ -5247,7 +5260,7 @@ def history_scope_question(question):
 def standalone_humor(question):
     return bool(re.search(r'(?i)\b(?:жартуй|пожартуй|жартани|розсміши|підколюй|підколи|підколоти|шути|пошути|рассмеши|подколи|подкалывай|анекдот|розкажи\s+жарт|расскажи\s+шутку)\b',question)) and not bool(re.search(r'(?i)історі|истори|переписк|повідомлен|сообщени|на основі|на основе|про чат|по чату|що я пис|что я пис',question))
 
-DIRECT_REPLY_RULES='Попередня відповідь бота є окремим контекстом діалогу, а не історією групи. Не аналізуй чат без потреби. На прохання пожартувати або підколоти одразу дай сам жарт чи дружній підкол, не описуй запит і не обіцяй виконати його. Не починай з Окей, твій запит прийнято, або аналогічних службових вступів. Не вигадуй кількість повідомлень, повторів чи дій користувача. Загальну кількість доступних або переданих повідомлень називай лише за точними службовими метаданими і лише якщо про це запитали; кількість реплік конкретного автора не виводь із загальної кількості.'
+DIRECT_REPLY_RULES='Попередня відповідь бота є окремим контекстом діалогу, а не історією групи. Не аналізуй чат без потреби. На прохання пожартувати або підколоти одразу дай сам жарт чи дружній підкол, не описуй запит і не обіцяй виконати його. Не починай з Окей, твій запит прийнято, або аналогічних службових вступів. Не вигадуй кількість повідомлень, повторів чи дій користувача. Загальну кількість доступних або переданих повідомлень називай лише за точними службовими метаданими і лише якщо про це запитали; кількість реплік конкретного автора не виводь із загальної кількості. Якщо попередня відповідь бота містить запитання до користувача, а поточна репліка є відповіддю на нього, реагуй саме на відповідь користувача, не відповідай на власне запитання і не розповідай про себе. Наприклад: бот питає про найнудніший предмет, користувач каже Мабуть математика — відповідай Математика? 😂 Це через нескінченні рівняння чи просто вчитель так пояснював, що хотілося спати? Це приклад стилю, не шаблон. Якщо користувач явно питає про тебе, відповідай на його питання.'
 
 def context_size(question,replied,history):
     if standalone_humor(question): return 0
@@ -5417,7 +5430,7 @@ async def generate_text(m,question,context='',group=False,history_context='',dia
                 continue
         if group and not group_enabled(chat): return
         keyboard=miniapp.keyboard(m)
-        sent=await m.reply(html.escape(answer[:3700])+('\n\n<blockquote>'+html.escape(DISCLAIMER)+'</blockquote>' if development_enabled() else ''),parse_mode='HTML',reply_markup=keyboard)
+        sent=await m.reply(html.escape(answer[:3700])+('\n\n<blockquote>'+html.escape(DISCLAIMER+(' #'+str(diagnostic['number'])+'.' if diagnostic.get('number') is not None else ''))+'</blockquote>' if development_enabled() else ''),parse_mode='HTML',reply_markup=keyboard)
         visible_tokens=0
         notify_limit=False
         if True:
@@ -5788,7 +5801,10 @@ async def text_message(m:Message):
     diagnostic={'attempts':[],'platform':'Azure VPS'}
     diag_started=time.monotonic()
     try: diag_id=await text_diag_begin(m)
-    except Exception: diag_id=None
+    except Exception:
+        logging.exception('Text diagnostic allocation failed')
+        diag_id=None
+    if diag_id is not None: diagnostic['number']=diag_id
     if False and await cloud_text_probe():
         return await submit_cloud_text(m,question,group,replied,reply)
     if test_route('text',m): return await m.reply('Тест текстової моделі потребує доступного Cloudflare.')
