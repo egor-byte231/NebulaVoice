@@ -294,7 +294,7 @@ async def server_status_text():
 
 @dp.message(Command('server'),F.chat.type=='private',F.from_user.id==OWNER)
 async def server_status(m:Message):
-    await m.reply(await server_status_text())
+    await rich_stats_send(m,await server_status_text(),reply=True)
 
 def silent_add_allowed(user_id):
     extra_ids=os.getenv('NEBULA_SILENT_ADD_USER_IDS','').replace(',',' ').split()
@@ -3674,17 +3674,12 @@ async def owner_action(c:CallbackQuery):
     if c.data.startswith('owner:overview:'):
         scope=c.data.rsplit(':',1)[-1]
         if scope not in ('groups','private','all','pm','group_direct','webapp','combined','automatic'): return
-        try: await c.message.edit_text(overview_report(scope),parse_mode='HTML',reply_markup=overview_menu(scope))
+        try: await rich_stats_send(c.message,overview_report(scope),edit=True,parse_mode='HTML',reply_markup=overview_menu(scope))
         except Exception as e:
             if 'message is not modified' not in str(e).lower(): raise
         return
     if c.data=='owner:vireonix':
-        try: await c.message.edit_text(await vireonix_report(),parse_mode=None,reply_markup=vireonix_menu())
-        except Exception as e:
-            if 'message is not modified' not in str(e).lower(): raise
-        return
-    if c.data=='owner:vireonix':
-        try: await c.message.edit_text(await vireonix_report(),parse_mode=None,reply_markup=vireonix_menu())
+        try: await rich_stats_send(c.message,await vireonix_report(),edit=True,parse_mode=None,reply_markup=vireonix_menu())
         except Exception as e:
             if 'message is not modified' not in str(e).lower(): raise
         return
@@ -3692,19 +3687,19 @@ async def owner_action(c:CallbackQuery):
         try:
             pages=text_report_pages()
             page=max(0,min(len(pages)-1,int(c.data.rsplit(':',1)[-1]) if c.data!='owner:ai' else 0))
-            await c.message.edit_text(pages[page],parse_mode='HTML',reply_markup=text_stats_menu(page,len(pages)))
+            await rich_stats_send(c.message,pages[page],edit=True,parse_mode='HTML',reply_markup=text_stats_menu(page,len(pages)))
         except Exception as e:
             if 'message is not modified' not in str(e).lower():
                 logging.exception('Owner text statistics failed')
                 await c.message.answer('⚠️ Не вдалося відкрити статистику: '+type(e).__name__,parse_mode=None,reply_markup=text_stats_menu())
         return
     if c.data=='owner:stats':
-        try: await c.message.edit_text(report(),parse_mode='HTML',reply_markup=stats_menu())
+        try: await rich_stats_send(c.message,report(),edit=True,parse_mode='HTML',reply_markup=stats_menu())
         except Exception as e:
             if 'message is not modified' not in str(e).lower(): raise
         return
     if c.data=='owner:server':
-        return await c.message.edit_text(await server_status_text(),reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='🔄 Оновити',callback_data='owner:server')],[InlineKeyboardButton(text='Назад',callback_data='owner:back')]]))
+        return await rich_stats_send(c.message,await server_status_text(),edit=True,reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='🔄 Оновити',callback_data='owner:server')],[InlineKeyboardButton(text='Назад',callback_data='owner:back')]]))
     if c.data=='owner:back':
         return await c.message.edit_text('Панель власника',reply_markup=owner_menu())
     if c.data=='owner:load' or c.data.startswith('owner:load:'): return await load_action(c)
@@ -4257,34 +4252,54 @@ async def vireonix_report():
 
 @dp.message(Command('vireonix_stats'),F.chat.type=='private',F.from_user.id==OWNER)
 async def vireonix_status(m:Message):
-    await m.answer(await vireonix_report(),parse_mode=None,reply_markup=vireonix_menu())
+    await rich_stats_send(m,await vireonix_report(),parse_mode=None,reply_markup=vireonix_menu())
 
-def vireonix_menu():
-    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='🔄 Оновити',callback_data='owner:vireonix')],[InlineKeyboardButton(text='⬅️ Назад',callback_data='owner:ai')]])
 
-async def vireonix_report():
-    t,a=db.execute('SELECT COALESCE(SUM(tokens),0),COALESCE(SUM(attempts),0) FROM text_usage WHERE day=? AND route=?',(text_day(),'Vireonix')).fetchone()
-    lines=['📊 Vireonix — Auto',f'Слоти: {6-vireonix_slots._value}/6',f'Добовий облік бота (UTC, з тестами): {t:,} токенів | {a:,} спроб','']
+def rich_stats_html(body,parse_mode=None):
+    plain=lambda x: html.unescape(re.sub(r'<[^>]+>','',x)) if parse_mode=='HTML' else x
+    esc=lambda x: html.escape(plain(x))
+    blocks=[]
+    rows=[]
+    def flush():
+        if rows:
+            blocks.append('<table><tr><th>Показник</th><th>Значення</th></tr>'+''.join('<tr><td>'+a+'</td><td>'+b+'</td></tr>' for a,b in rows)+'</table>')
+            rows.clear()
+    for i,line in enumerate(body.splitlines()):
+        line=line.strip()
+        if not line:
+            flush()
+            continue
+        if i==0 or (parse_mode=='HTML' and line.startswith('<b>') and line.endswith('</b>')):
+            flush()
+            blocks.append('<h3>'+esc(line)+'</h3>')
+        elif ': ' in plain(line) and len(plain(line).split(': ',1)[0])<=55:
+            a,b=plain(line).split(': ',1)
+            rows.append((html.escape(a),html.escape(b)))
+        else:
+            flush()
+            blocks.append('<p>'+esc(line)+'</p>')
+    flush()
+    return ''.join(blocks)
+
+async def rich_stats_send(message,body,parse_mode=None,reply_markup=None,edit=False,reply=False):
+    payload={'chat_id':message.chat.id,'rich_message':{'html':rich_stats_html(body,parse_mode)}}
+    if reply_markup is not None:
+        payload['reply_markup']=reply_markup.model_dump(exclude_none=True,mode='json')
+    if edit: payload['message_id']=message.message_id
+    elif reply: payload['reply_parameters']={'message_id':message.message_id}
+    method='editMessageText' if edit else 'sendRichMessage'
     try:
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=20)) as session:
-            async with session.get('https://vireonix.ai/api/limits',allow_redirects=False) as response:
-                response.raise_for_status()
-                data=await response.json()
-        rates=data['model_rates']['auto']
-        remaining=data['remaining']
-        lines.append('🌐 Жива квота API (IP VPS)')
-        for kind,label in [('input','Вхідні'),('output','Вихідні')]:
-            limit=int(rates[kind+'_tokens_per_hour'])
-            percent=float(remaining[kind])
-            lines.extend([f'{label}: {percent:g}% залишилось',f'Ліміт: {limit:,}/год',f'Залишок ≈ {round(limit*percent/100):,}',f'Витрачено ≈ {round(limit*(100-percent)/100):,}'])
-        lines.extend([f"Загальний залишок: {remaining['overall']}%",f"Поновлення (UTC): {remaining.get('resets_at','невідомо')}",'Абсолютні залишки приблизні: API повертає відсотки.','','Сирі дані API:',json.dumps(data,ensure_ascii=False,indent=2)])
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15)) as session:
+            async with session.post('https://api.telegram.org/bot'+bot.token+'/'+method,json=payload) as response:
+                result=await response.json()
+                if result.get('ok') or 'message is not modified' in result.get('description','').lower(): return
+                logging.warning('Rich statistics rejected: HTTP %s',response.status)
     except Exception as e:
-        lines.append('⚠️ Жива квота недоступна: '+type(e).__name__)
-    return '\n'.join(lines)[:3900]
-
-@dp.message(Command('vireonix_stats'),F.chat.type=='private',F.from_user.id==OWNER)
-async def vireonix_stats_command(m:Message):
-    await m.answer(await vireonix_report(),parse_mode=None,reply_markup=vireonix_menu())
+        logging.warning('Rich statistics unavailable: %s',type(e).__name__)
+    kwargs={'parse_mode':parse_mode,'reply_markup':reply_markup}
+    if edit: return await message.edit_text(body,**kwargs)
+    if reply: return await message.reply(body,**kwargs)
+    return await message.answer(body,**kwargs)
 
 def text_stats_menu(page=0,total=1):
     rows=[[InlineKeyboardButton(text='🔄 Оновити',callback_data='owner:ai:'+str(page))]]
@@ -4342,7 +4357,7 @@ def text_report():
 async def text_status(m:Message):
     try:
         pages=text_report_pages()
-        await m.answer(pages[0],parse_mode='HTML',reply_markup=text_stats_menu(0,len(pages)))
+        await rich_stats_send(m,pages[0],parse_mode='HTML',reply_markup=text_stats_menu(0,len(pages)))
     except Exception:
         logging.exception('Text statistics report failed')
         await m.answer('⚠️ Не вдалося сформувати статистику. Деталі записано в журнал.',reply_markup=text_stats_menu())
@@ -5188,7 +5203,7 @@ async def payment_support(m:Message):
 async def private_stats(m:Message):
     overview_user(m)
     chat=m.chat.id
-    await m.answer(f'Тариф: {"Premium" if premium_until(chat)>time.time() else "Free"}\nТокени: {group_used(chat)} / {private_limit(chat)} (UTC)\n/premium — придбати Premium.')
+    await rich_stats_send(m,f'Тариф: {"Premium" if premium_until(chat)>time.time() else "Free"}\nТокени: {group_used(chat)} / {private_limit(chat)} (UTC)\n/premium — придбати Premium.')
 @dp.message(Command('limit'))
 async def show_limit(m:Message):
     overview_user(m)
@@ -5204,7 +5219,7 @@ async def show_limit(m:Message):
     reset=(now+datetime.timedelta(days=1)).replace(hour=0,minute=0,second=0,microsecond=0)
     minutes=int((reset-now).total_seconds()/60)
     tariff='Premium' if premium_until(chat)>time.time() else 'Free'
-    await m.reply(f'📊 Ліміт ШІ — {tariff}\n\nВикористано: {used:,} / {limit:,}\nЗарезервовано: {reserved:,}\nЗалишилося: {left:,} токенів\n'+ '█'*filled+'░'*(10-filled)+f' {pct:.1f}%\n\nСкидання через {minutes//60} г {minutes%60} хв (00:00 UTC)\nОблік сумарний для всіх API.'.replace(',', ' '),parse_mode=None)
+    await rich_stats_send(m,f'📊 Ліміт ШІ — {tariff}\n\nВикористано: {used:,} / {limit:,}\nЗарезервовано: {reserved:,}\nЗалишилося: {left:,} токенів\n'+ '█'*filled+'░'*(10-filled)+f' {pct:.1f}%\n\nСкидання через {minutes//60} г {minutes%60} хв (00:00 UTC)\nОблік сумарний для всіх API.'.replace(',', ' '),parse_mode=None)
 
 db.execute('CREATE TABLE IF NOT EXISTS classifier_daily (day TEXT PRIMARY KEY, attempts INTEGER, ok INTEGER, needed INTEGER, tokens INTEGER, ms INTEGER, bypass INTEGER)')
 db.commit()
