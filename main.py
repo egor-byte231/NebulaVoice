@@ -3681,7 +3681,7 @@ async def owner_action(c:CallbackQuery):
     if c.data=='owner:vireonix':
         try:
             body=await vireonix_report()
-            sent=await bot.send_message(c.message.chat.id,body,parse_mode=None,reply_markup=vireonix_menu())
+            await rich_stats_send(c.message,body,parse_mode=None,reply_markup=vireonix_menu(),custom_html=vireonix_html(body))
             try: await bot.delete_message(c.message.chat.id,c.message.message_id)
             except Exception: pass
         except Exception:
@@ -4267,9 +4267,36 @@ async def vireonix_report():
 
 @dp.message(Command('vireonix_stats'),F.chat.type=='private',F.from_user.id==OWNER)
 async def vireonix_status(m:Message):
-    await m.answer(await vireonix_report(),parse_mode=None,reply_markup=vireonix_menu())
+    body=await vireonix_report()
+    await rich_stats_send(m,body,parse_mode=None,reply_markup=vireonix_menu(),custom_html=vireonix_html(body))
 
 
+
+def vireonix_html(body):
+    lines=body.splitlines()
+    esc=html.escape
+    values={}
+    current=None
+    rest=[]
+    for line in lines[2:]:
+        if line.startswith(('Вхідні:','Вихідні:')):
+            current=line.split(':',1)[0]
+            values[current]=[line.split(': ',1)[1].replace(' за годину',''),'—','—']
+        elif current and line.startswith('Доступно:'):
+            values[current][1]=line.split(': ',1)[1]
+        elif current and line.startswith('Витрачено:'):
+            values[current][2]=line.split(': ',1)[1]
+            current=None
+        elif line.strip():
+            rest.append(line)
+    out='<h3>'+esc(lines[0])+'</h3><p>'+esc(lines[1])+'</p>'
+    if values:
+        out+='<table><tr><th>За годину</th><th>Вхідні</th><th>Вихідні</th></tr>'
+        for i,label in enumerate(['Залишок / ліміт','Доступно','Витрачено']):
+            out+='<tr><td>'+label+'</td>'+''.join('<td>'+esc(values.get(k,['—']*3)[i])+'</td>' for k in ('Вхідні','Вихідні'))+'</tr>'
+        out+='</table>'
+    out+='<details><summary>📊 Детальний облік</summary>'+rich_stats_html('Статистика\n'+'\n'.join(rest))+'</details>'
+    return out
 
 def activity_chart_html(scope):
     today=datetime.datetime.now(datetime.timezone.utc).date()
@@ -4320,9 +4347,9 @@ def rich_stats_html(body,parse_mode=None):
     flush()
     return blocks[0]+('<details open><summary>📊 Детальна статистика</summary>'+''.join(blocks[1:])+'</details>' if len(blocks)>1 else '') if blocks else '<p>Немає даних</p>'
 
-async def rich_stats_send(message,body,parse_mode=None,reply_markup=None,edit=False,reply=False,extra_html=''):
+async def rich_stats_send(message,body,parse_mode=None,reply_markup=None,edit=False,reply=False,extra_html='',custom_html=None):
     chat_id=message if isinstance(message,int) else message.chat.id
-    payload={'chat_id':chat_id,'rich_message':{'html':rich_stats_html(body,parse_mode)+extra_html}}
+    payload={'chat_id':chat_id,'rich_message':{'html':(custom_html if custom_html is not None else rich_stats_html(body,parse_mode))+extra_html}}
     if reply_markup is not None:
         payload['reply_markup']=reply_markup.model_dump(exclude_none=True,mode='json')
     if edit: payload['message_id']=message.message_id
