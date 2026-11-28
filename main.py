@@ -3683,6 +3683,11 @@ async def owner_action(c:CallbackQuery):
         except Exception as e:
             if 'message is not modified' not in str(e).lower(): raise
         return
+    if c.data=='owner:vireonix':
+        try: await c.message.edit_text(await vireonix_report(),parse_mode=None,reply_markup=vireonix_menu())
+        except Exception as e:
+            if 'message is not modified' not in str(e).lower(): raise
+        return
     if c.data=='owner:ai' or c.data.startswith('owner:ai:'):
         try:
             pages=text_report_pages()
@@ -4254,8 +4259,36 @@ async def vireonix_report():
 async def vireonix_status(m:Message):
     await m.answer(await vireonix_report(),parse_mode=None,reply_markup=vireonix_menu())
 
+def vireonix_menu():
+    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='🔄 Оновити',callback_data='owner:vireonix')],[InlineKeyboardButton(text='⬅️ Назад',callback_data='owner:ai')]])
+
+async def vireonix_report():
+    t,a=db.execute('SELECT COALESCE(SUM(tokens),0),COALESCE(SUM(attempts),0) FROM text_usage WHERE day=? AND route=?',(text_day(),'Vireonix')).fetchone()
+    lines=['📊 Vireonix — Auto',f'Слоти: {6-vireonix_slots._value}/6',f'Добовий облік бота (UTC, з тестами): {t:,} токенів | {a:,} спроб','']
+    try:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=20)) as session:
+            async with session.get('https://vireonix.ai/api/limits',allow_redirects=False) as response:
+                response.raise_for_status()
+                data=await response.json()
+        rates=data['model_rates']['auto']
+        remaining=data['remaining']
+        lines.append('🌐 Жива квота API (IP VPS)')
+        for kind,label in [('input','Вхідні'),('output','Вихідні')]:
+            limit=int(rates[kind+'_tokens_per_hour'])
+            percent=float(remaining[kind])
+            lines.extend([f'{label}: {percent:g}% залишилось',f'Ліміт: {limit:,}/год',f'Залишок ≈ {round(limit*percent/100):,}',f'Витрачено ≈ {round(limit*(100-percent)/100):,}'])
+        lines.extend([f"Загальний залишок: {remaining['overall']}%",f"Поновлення (UTC): {remaining.get('resets_at','невідомо')}",'Абсолютні залишки приблизні: API повертає відсотки.','','Сирі дані API:',json.dumps(data,ensure_ascii=False,indent=2)])
+    except Exception as e:
+        lines.append('⚠️ Жива квота недоступна: '+type(e).__name__)
+    return '\n'.join(lines)[:3900]
+
+@dp.message(Command('vireonix_stats'),F.chat.type=='private',F.from_user.id==OWNER)
+async def vireonix_stats_command(m:Message):
+    await m.answer(await vireonix_report(),parse_mode=None,reply_markup=vireonix_menu())
+
 def text_stats_menu(page=0,total=1):
     rows=[[InlineKeyboardButton(text='🔄 Оновити',callback_data='owner:ai:'+str(page))]]
+    rows.append([InlineKeyboardButton(text='📊 Vireonix — жива квота',callback_data='owner:vireonix')])
     if total>1:
         rows.append([InlineKeyboardButton(text=('✓ ' if i==page else '')+str(i+1),callback_data='owner:ai:'+str(i)) for i in range(total)])
     rows.extend([[InlineKeyboardButton(text='📊 Vireonix',callback_data='owner:vireonix')],[InlineKeyboardButton(text='🖥 Локальний ШІ',callback_data='localqwen:show')],[InlineKeyboardButton(text='⬅️ Назад',callback_data='owner:back')]])
