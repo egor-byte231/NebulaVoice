@@ -5177,10 +5177,16 @@ async def icebreaker_monitor():
                         db.execute('UPDATE icebreaker_settings SET next_at=? WHERE chat=?',(night_end+question_delay(),chat))
                     continue
             members={uid:entry for uid,entry in icebreaker_members.get(chat,{}).items() if now-entry[1]<=900}
-            recent_users={r[0] for r in db.execute('SELECT user_id FROM icebreaker_user_history WHERE chat=? ORDER BY id DESC LIMIT 20',(chat,))}
+            recent_order=[r[0] for r in db.execute('SELECT user_id FROM icebreaker_user_history WHERE chat=? ORDER BY id DESC LIMIT 20',(chat,))]
+            if not members and db.execute('SELECT next_at FROM icebreaker_settings WHERE chat=?',(chat,)).fetchone()[0]==0:
+                members={uid:(name,last_seen) for uid,name,last_seen in db.execute('SELECT user_id,name,last_seen FROM group_roster WHERE chat=? AND present=1 AND last_seen>=?',(chat,now-86400)).fetchall()}
+            recent_users=set(recent_order)
             candidates=[(uid,entry) for uid,entry in members.items() if uid not in recent_users]
-            if not candidates and db.execute('SELECT next_at FROM icebreaker_settings WHERE chat=?',(chat,)).fetchone()[0]==0:
-                candidates=[(uid,(name,last_seen)) for uid,name,last_seen in db.execute('SELECT user_id,name,last_seen FROM group_roster WHERE chat=? AND present=1 AND last_seen>=?',(chat,now-86400)).fetchall() if uid not in recent_users]
+            # Small active pools rotate by least recently selected, rather than stall.
+            if not candidates and 0<len(members)<=20:
+                rank={uid:recent_order.index(uid) for uid in members if uid in recent_users}
+                oldest=max(rank.values())
+                candidates=[(uid,entry) for uid,entry in members.items() if rank.get(uid)==oldest]
             if not candidates:
                 logging.info('Group question waiting: chat=%s no eligible participant',chat)
                 continue
