@@ -62,11 +62,16 @@ def overview_user(m,kind='direct'):
     db.execute('INSERT OR IGNORE INTO overview_activity VALUES (?,?,?)',(day,kind,m.from_user.id))
     db.commit()
 
-db.execute('CREATE TABLE IF NOT EXISTS group_overview_daily (day TEXT,chat INTEGER,voices INTEGER DEFAULT 0,circles INTEGER DEFAULT 0,requests INTEGER DEFAULT 0,PRIMARY KEY(day,chat))')
-db.commit()
+def ensure_group_overview():
+    db.execute('CREATE TABLE IF NOT EXISTS group_overview_daily (day TEXT,chat INTEGER,voices INTEGER DEFAULT 0,circles INTEGER DEFAULT 0,requests INTEGER DEFAULT 0,PRIMARY KEY(day,chat))')
+    db.execute('CREATE TABLE IF NOT EXISTS publication_membership (chat INTEGER PRIMARY KEY,present INTEGER NOT NULL)')
+    db.commit()
+
+ensure_group_overview()
 
 def overview_add(m,voices=0,circles=0,requests=0):
     if m.chat.type in ('group','supergroup'):
+        ensure_group_overview()
         day=datetime.datetime.now(datetime.timezone.utc).date().isoformat()
         db.execute('INSERT INTO group_overview_daily VALUES (?,?,?,?,?) ON CONFLICT(day,chat) DO UPDATE SET voices=voices+excluded.voices,circles=circles+excluded.circles,requests=requests+excluded.requests',(day,m.chat.id,voices,circles,requests))
         publication_membership(m.chat.id,True)
@@ -4393,12 +4398,13 @@ async def rich_stats_send(message,body,parse_mode=None,reply_markup=None,edit=Fa
 
 async def groups_report(message,page=0,edit=False):
     import html
+    ensure_group_overview()
     membership=dict(db.execute('SELECT chat,present FROM publication_membership'))
     candidates={r[0] for r in db.execute('SELECT chat FROM text_groups WHERE chat<0')}
     candidates.update(chat for chat,present in membership.items() if present)
     candidates.update(r[0] for r in db.execute('SELECT DISTINCT chat FROM text_group_usage WHERE chat<0'))
     try:
-        candidates.update(r['chat'] for r in await d1_query(history_session,'SELECT DISTINCT chat FROM runtime_results WHERE chat<0'))
+        candidates.update(r['chat'] for r in await asyncio.wait_for(d1_query(history_session,'SELECT DISTINCT chat FROM runtime_results WHERE chat<0'),5))
     except Exception:
         pass
     candidates.difference_update(chat for chat,present in membership.items() if not present)
@@ -4409,7 +4415,7 @@ async def groups_report(message,page=0,edit=False):
             groups.append(chat)
             continue
         try:
-            member=await bot.get_chat_member(chat,bot.id)
+            member=await asyncio.wait_for(bot.get_chat_member(chat,bot.id),4)
             present=publication_present(member)
             publication_membership(chat,present)
             if present: groups.append(chat)
@@ -4430,9 +4436,9 @@ async def groups_report(message,page=0,edit=False):
         name=str(chat)
         members='—'
         try:
-            info=await bot.get_chat(chat)
+            info=await asyncio.wait_for(bot.get_chat(chat),4)
             name=info.title or name
-            members=str(await bot.get_chat_member_count(chat))
+            members=str(await asyncio.wait_for(bot.get_chat_member_count(chat),4))
         except Exception: pass
         today=db.execute('SELECT COALESCE(SUM(voices),0),COALESCE(SUM(circles),0),COALESCE(SUM(requests),0) FROM group_overview_daily WHERE chat=? AND day=?',(chat,day)).fetchone()
         alltime=db.execute('SELECT COALESCE(SUM(voices),0),COALESCE(SUM(circles),0),COALESCE(SUM(requests),0) FROM group_overview_daily WHERE chat=?',(chat,)).fetchone()
@@ -4447,15 +4453,24 @@ async def groups_report(message,page=0,edit=False):
     markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='◀️',callback_data='groups_page:'+str(max(0,page-1))),InlineKeyboardButton(text=f'{page+1}/{pages} · 🔄',callback_data='groups_page:'+str(page)),InlineKeyboardButton(text='▶️',callback_data='groups_page:'+str(min(pages-1,page+1)))]])
     await rich_stats_send(message,'\n'.join(body),reply_markup=markup,edit=edit,custom_html=''.join(rich))
 
-@dp.message(Command('groups'),F.chat.type=='private',F.from_user.id==OWNER)
+@dp.message(Command('groups','group'),F.chat.type=='private',F.from_user.id==OWNER)
 async def groups_command(m:Message):
-    await groups_report(m)
+    progress=await m.answer('⏳ Збираю статистику груп…')
+    try:
+        await asyncio.wait_for(groups_report(progress,edit=True),60)
+    except Exception as e:
+        logging.exception('Groups report failed')
+        await bot.send_message(m.chat.id,'⚠️ Не вдалося отримати статистику груп: '+type(e).__name__+'. Перевір журнал VPS.')
 
 @dp.callback_query(F.data.startswith('groups_page:'),F.from_user.id==OWNER)
 async def groups_page(c:CallbackQuery):
     if not c.message or c.message.chat.type!='private': return await c.answer()
     await c.answer()
-    await groups_report(c.message,int(c.data.split(':')[1]),edit=True)
+    try:
+        await asyncio.wait_for(groups_report(c.message,int(c.data.split(':')[1]),edit=True),60)
+    except Exception as e:
+        logging.exception('Groups page failed')
+        await bot.send_message(c.message.chat.id,'⚠️ Помилка сторінки груп: '+type(e).__name__)
 
 
 def text_stats_menu(page=0,total=3):
