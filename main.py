@@ -3714,7 +3714,7 @@ async def owner_action(c:CallbackQuery):
         except Exception as e:
             if 'message is not modified' not in str(e).lower():
                 logging.exception('Owner text statistics failed')
-                await c.message.answer('⚠️ Не вдалося відкрити статистику: '+type(e).__name__,parse_mode=None,reply_markup=text_stats_menu())
+                await c.message.answer('⚠️ Не вдалося відкрити статистику: '+type(e).__name__+': '+str(e)[:250],parse_mode=None,reply_markup=text_stats_menu())
         return
     if c.data=='owner:stats':
         try: await rich_stats_send(c.message,report(),edit=True,parse_mode='HTML',reply_markup=stats_menu())
@@ -4181,8 +4181,11 @@ def ensure_vireonix_stats():
 
 ensure_vireonix_stats()
 
-db.execute('CREATE TABLE IF NOT EXISTS text_performance (day TEXT, route TEXT, ok INTEGER, errors INTEGER, ms REAL, PRIMARY KEY(day,route))')
-db.commit()
+def ensure_text_performance():
+    db.execute('CREATE TABLE IF NOT EXISTS text_performance (day TEXT, route TEXT, ok INTEGER, errors INTEGER, ms REAL, PRIMARY KEY(day,route))')
+    db.commit()
+
+ensure_text_performance()
 
 @asynccontextmanager
 async def measured_text_post(session,name,url,**kwargs):
@@ -4207,6 +4210,7 @@ async def measured_text_post(session,name,url,**kwargs):
     finally:
         if not cancelled:
             try:
+                ensure_text_performance()
                 db.execute('INSERT INTO text_performance VALUES (?,?,?,?,?) ON CONFLICT(day,route) DO UPDATE SET ok=ok+excluded.ok,errors=errors+excluded.errors,ms=ms+excluded.ms',(day,name,int(ok),int(not ok),(time.monotonic()-started)*1000 if ok else 0))
                 db.commit()
             except Exception:
@@ -4584,6 +4588,7 @@ def text_report_pages():
         lines.append('🟢 налаштовано · 🟠 пауза · ⚪ вимкнено')
         lines.append('Залишки Groq — оцінка; облік включає тести.')
         pages.append('\n'.join(lines))
+    ensure_text_performance()
     perf={name:(ok,errors,ms) for name,ok,errors,ms in db.execute('SELECT route,ok,errors,ms FROM text_performance WHERE day=?',(text_day(),))}
     for i,routes in enumerate(groups,4):
         lines=[f'<b>📈 Продуктивність API · {i}/5</b>',f'Дата: {text_day()} UTC','API | Успіх | Час | Помилки']
@@ -6109,6 +6114,8 @@ async def d1_initialize(session):
             finally: source.close()
         # Restoring a legacy snapshot can remove Azure-only schema.
         db.commit()
+        ensure_text_performance()
+        history_capture_schema()
         RuntimeSettings(db)
         ensure_local_qwen_control()
         db.execute('CREATE TABLE IF NOT EXISTS cloud_completed (id TEXT PRIMARY KEY)')
