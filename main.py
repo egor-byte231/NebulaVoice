@@ -2964,7 +2964,7 @@ async def deliver_transcript(m,status,result):
     result=correct_transcript_spelling(result)
     if m.from_user and not m.from_user.is_bot and not m.sender_chat and history_allowed(m):
         if result.strip() and result.strip()!='Мовлення не виявлено':
-            await capture_history(m,('[Голосове] ' if m.voice else '[Кружечок] ')+result,'audio')
+            history_enqueue(m,('[Голосове] ' if m.voice else '[Кружечок] ')+result,'audio')
         else:
             history_count(m.chat.id,'skipped_no_speech')
     chunks=[result[i:i+3700] for i in range(0,len(result),3700)]
@@ -4718,6 +4718,30 @@ async def capture_history(m,body,kind):
         logging.exception('History capture failed')
     return False
 
+history_capture_queue=asyncio.Queue(maxsize=2000)
+
+def history_enqueue(m,body,kind):
+    try:
+        history_capture_queue.put_nowait((m,body,kind))
+        history_count(m.chat.id,'queued_'+kind)
+    except asyncio.QueueFull:
+        history_count(m.chat.id,'skipped_queue_full')
+
+async def history_capture_worker():
+    while True:
+        m,body,kind=await history_capture_queue.get()
+        try:
+            if not history_allowed(m):
+                history_count(m.chat.id,'skipped_disabled')
+            else:
+                await asyncio.wait_for(capture_history(m,body,kind),timeout=30)
+        except asyncio.TimeoutError:
+            history_count(m.chat.id,'skipped_write_timeout')
+        except Exception:
+            logging.exception('Background history capture failed')
+        finally:
+            history_capture_queue.task_done()
+
 @dp.message.outer_middleware()
 async def history_capture_middleware(handler,event,data):
     if event.chat.type in ('private','group','supergroup'):
@@ -4732,11 +4756,7 @@ async def history_capture_middleware(handler,event,data):
         elif (event.text or '').startswith('/'):
             history_count(chat,'skipped_command')
         elif event.text or event.caption:
-            try:
-                await asyncio.wait_for(capture_history(event,event.text or event.caption,'text' if event.text else 'caption'),timeout=3)
-            except asyncio.TimeoutError:
-                history_count(chat,'skipped_write_timeout')
-                logging.warning('History capture timed out: chat=%s message=%s',chat,event.message_id)
+            history_enqueue(event,event.text or event.caption,'text' if event.text else 'caption')
         else:
             history_count(chat,'skipped_no_text')
     return await handler(event,data)
@@ -6322,6 +6342,7 @@ async def main():
     db.commit()
     logging.info('Cloud text Worker readiness: %s',await cloud_text_probe())
     tasks=[asyncio.create_task(worker(i)) for i in range(40)]
+    tasks.append(asyncio.create_task(history_capture_worker()))
     tasks.append(asyncio.create_task(audio_queue_restore()))
     if cloud_ready: tasks.append(asyncio.create_task(d1_monitor(session)))
     tasks.append(asyncio.create_task(quota_reset_monitor()))
