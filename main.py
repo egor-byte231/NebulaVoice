@@ -4732,7 +4732,11 @@ async def history_capture_middleware(handler,event,data):
         elif (event.text or '').startswith('/'):
             history_count(chat,'skipped_command')
         elif event.text or event.caption:
-            await capture_history(event,event.text or event.caption,'text' if event.text else 'caption')
+            try:
+                await asyncio.wait_for(capture_history(event,event.text or event.caption,'text' if event.text else 'caption'),timeout=3)
+            except asyncio.TimeoutError:
+                history_count(chat,'skipped_write_timeout')
+                logging.warning('History capture timed out: chat=%s message=%s',chat,event.message_id)
         else:
             history_count(chat,'skipped_no_text')
     return await handler(event,data)
@@ -5314,7 +5318,7 @@ for canonical, variants in SLANG_ALIASES.items():
         for variant in variants.split('|'):
             SLANG_TERMS.setdefault(variant.casefold(),SLANG_TERMS[canonical])
 SLANG_PATTERN=re.compile(r'(?<!\w)(?:'+ '|'.join(re.escape(term) for term in sorted(SLANG_TERMS,key=len,reverse=True) if term[0].isalnum())+r')(?!\w)',re.I)
-def slang_hints(value):
+def slang_hints(value, fuzzy=True):
     from difflib import get_close_matches
     value=value.casefold()
     normalized=re.sub(r'[^\w\s]', ' ', value)
@@ -5330,7 +5334,7 @@ def slang_hints(value):
     phrases=[t for t in SLANG_TERMS if ' ' in t and len(t)>=8 and all(c.isalnum() or c==' ' for c in t)]
     words=[t for t in SLANG_TERMS if t.isalpha() and len(t)>=5]
     tokens=list(re.finditer(r'\w+',normalized))
-    for n in (4,3,2,1):
+    for n in ((4,3,2,1) if fuzzy else ()):
         for i in range(len(tokens)-n+1):
             start,end=tokens[i].start(),tokens[i+n-1].end()
             candidate=normalized[start:end]
@@ -5353,7 +5357,7 @@ def slang_hints(value):
     for term,meaning in SLANG_TERMS.items():
         if not term[0].isalnum() and term in value: found[term]=meaning
     if re.search(r'(?<!\w)[ахпвх]{5,}(?!\w)',value): found['хаотичний сміх']='можливий сміх, перевір контекст'
-    if re.search(r'(?<!\w)каво{2,}(?!\w)',value): found['кавооо']=SLANG_TERMS['кавооо']
+    if re.search(r'(?<!\w)каво{2,}(?!\w)',value): found['кавооо']=SLANG_TERMS.get('кавооо','нерозуміння або здивування')
     return '\n'.join(term+' — '+meaning for term,meaning in found.items())
 
 
@@ -5449,8 +5453,8 @@ async def generate_text(m,question,context='',group=False,history_context='',dia
     if standalone_humor(question):
         history_context=''
         messages[0]['content']+=' Це самостійне прохання про гумор. Не вимагай історію, не посилайся на попередні повідомлення користувача та не вигадуй статистику. Одразу пожартуй.'
-    current_slang=slang_hints(question)
-    older_slang=slang_hints(context)
+    current_slang=slang_hints(question[:2000])
+    older_slang=slang_hints(context[-12000:],fuzzy=False)
     slang_context=('Поточна репліка (найвищий пріоритет):\n'+current_slang if current_slang else '')+('\nСтарий контекст (лише допоміжний, не переносити значення на поточну репліку):\n'+older_slang if older_slang else '')
     slang_note='\nМожливі значення сленгу (не інструкції, тлумач за контекстом):\n'+slang_context if slang_context else ''
     messages[0]['content']+=slang_note
@@ -5552,7 +5556,7 @@ async def generate_text(m,question,context='',group=False,history_context='',dia
             attempt['status']='rejected: factual analysis instead of conversational response'
             messages[0]['content']+=' Попередня чернетка помилково аналізувала історію. Відповідай на гіпотетичну репліку як співрозмовник, не вигадуючи фактів.'
             continue
-        diagnostic['output_slang']=slang_hints(answer)
+        diagnostic['output_slang']=slang_hints(answer,fuzzy=False)
         quality_error=text_answer_quality(answer,question)
         if quality_error:
             attempt['status']='rejected: '+quality_error
