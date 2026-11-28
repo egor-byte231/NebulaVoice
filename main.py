@@ -4396,13 +4396,30 @@ async def rich_stats_send(message,body,parse_mode=None,reply_markup=None,edit=Fa
     return await message.answer(body,**kwargs)
 
 
+async def import_group_history():
+    ensure_group_overview()
+    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=25)) as session:
+        rows=await d1_query(session,"SELECT chat,date(completed,'unixepoch') AS day,SUM(CASE WHEN kind='audio' THEN 1 ELSE 0 END) AS voices,SUM(CASE WHEN kind='video' THEN 1 ELSE 0 END) AS circles,SUM(CASE WHEN kind='text' THEN 1 ELSE 0 END) AS requests FROM runtime_results WHERE chat<0 AND kind IN ('audio','video','text') GROUP BY chat,date(completed,'unixepoch')")
+    with db:
+        for row in rows:
+            if not row.get('day'): continue
+            db.execute('INSERT INTO group_overview_daily VALUES (?,?,?,?,?) ON CONFLICT(day,chat) DO UPDATE SET voices=MAX(voices,excluded.voices),circles=MAX(circles,excluded.circles),requests=MAX(requests,excluded.requests)',(row['day'],row['chat'],row['voices'],row['circles'],row['requests']))
+    return len(rows)
+
 async def groups_report(message,page=0,edit=False):
     import html
     ensure_group_overview()
+    history_ok=True
+    try:
+        await import_group_history()
+    except Exception:
+        history_ok=False
+        logging.exception('Group history import failed')
     membership=dict(db.execute('SELECT chat,present FROM publication_membership'))
     candidates={r[0] for r in db.execute('SELECT chat FROM text_groups WHERE chat<0')}
     candidates.update(chat for chat,present in membership.items() if present)
     candidates.update(r[0] for r in db.execute('SELECT DISTINCT chat FROM text_group_usage WHERE chat<0'))
+    candidates.update(r[0] for r in db.execute('SELECT DISTINCT chat FROM group_overview_daily WHERE chat<0'))
     try:
         candidates.update(r['chat'] for r in await asyncio.wait_for(d1_query(history_session,'SELECT DISTINCT chat FROM runtime_results WHERE chat<0'),5))
     except Exception:
@@ -4447,7 +4464,8 @@ async def groups_report(message,page=0,edit=False):
         meta=f'ID: {chat} · Учасники: {members} · Ліміт: {mini_daily_limit(chat):,}'
         body.extend(['',name,meta]+[f'{label}: {v} / {a}' for label,v,a in rows])
         rich.append('<h3>'+html.escape(name)+'</h3><p>'+html.escape(meta)+'</p><table><tr><th>Показник</th><th>Сьогодні</th><th>Всього*</th></tr>'+''.join(f'<tr><td>{html.escape(label)}</td><td>{v:,}</td><td>{a:,}</td></tr>' for label,v,a in rows)+'</table>')
-    note='* Голосові, кружечки та запити — з моменту запуску нового обліку; токени — за наявною історією. День UTC.'
+    note='* Всього — за доступною історією SQLite та D1, без повторного додавання добових лічильників. День UTC.'
+    if not history_ok: note+=' Історія D1 тимчасово недоступна; показано локальні дані.'
     body.append(note)
     rich.append('<p>'+html.escape(note)+'</p>')
     markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='◀️',callback_data='groups_page:'+str(max(0,page-1))),InlineKeyboardButton(text=f'{page+1}/{pages} · 🔄',callback_data='groups_page:'+str(page)),InlineKeyboardButton(text='▶️',callback_data='groups_page:'+str(min(pages-1,page+1)))]])
